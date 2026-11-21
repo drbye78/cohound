@@ -8,9 +8,9 @@
 >
 > | величина | значение | носитель |
 > |---|---|---|
-> | `METHODOLOGY_VERSION` | **`0.6.0`** | `core/domain/models.py:199` |
-> | `SCHEMA_VERSION` (`runs/{run_id}/cohound.db`) | **`3.27.0`** | `core/store/sqlite.py:143` |
-> | `STATE_SCHEMA_VERSION` (`state/{package_id}/state.db`) | **`"13"`** | `core/store/state_sqlite.py:90` |
+> | `METHODOLOGY_VERSION` | **`0.7.0`** | `core/domain/models.py:224` |
+> | `SCHEMA_VERSION` (`runs/{run_id}/cohound.db`) | **`3.27.0`** | `core/store/sqlite.py:153` |
+> | `STATE_SCHEMA_VERSION` (`state/{package_id}/state.db`) | **`"14"`** | `core/store/state_sqlite.py:99` |
 > | `SEAM_SCHEMA_VERSION` (контракт `/v1/*`) | **`"1"`** | `core/edge/seam_schema.py:68` |
 > | `EDGE_JOBS_SCHEMA_VERSION` (`edge_jobs.db`) | **`"1"`** | `core/edge/scheduler.py:198` |
 > | `EXECUTION_CONTRACT_FIELDS` | **36** полей | `core/pipeline/digests.py:105` |
@@ -68,7 +68,9 @@
 > 5 — частичность извлечения; **6** — гейт версии вместо миграции (01.11.2026); 7 —
 > `chunk_meta.char_start`/`char_end`; 8 — `crawl_policy`; 9 — `corpus_capture`; 10 —
 > `container_state`; 11 — `capture` + наблюдения `url_state`; **12** — отпечаток пространства
-> снятия. Источник — `core/store/state_sqlite.py:34-84`.
+> снятия; 13 — `chunk_meta.table_ref` (O39 ф2); **14** — материал того же пространства
+> (`capture.space_json`, 0.7.0: смена формулы обхода больше не читается как другое
+> пространство). Источник — `core/store/state_sqlite.py:34-98`.
 >
 > Всё ниже — история границы и её сверка, а не описание текущего кода там, где это названо.
 
@@ -163,7 +165,7 @@ absence/evidence-модель, а значит по `AGENTS.md` §9 (класс�
 > неотличимой от текущей, то есть объявляла файл новым, не будучи им.
 
 **Решение 29.10.2026: `SCHEMA_VERSION` остаётся `3.13.0`** (константа жила тогда на 15-й
-строке того же файла; сегодня — `core/store/sqlite.py:143`, значение `3.27.0`). Все
+строке того же файла; сегодня — `core/store/sqlite.py:153`, значение `3.27.0`). Все
 изменения
 ниже — аддитивные: колонки добавлял идемпотентный `_ensure_columns`
 (удалён в 3.14.0: шимов `ALTER TABLE` больше нет, `core/store/sqlite.py`), таблицу —
@@ -841,7 +843,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 - **п. 5** — `METHODOLOGY_VERSION` = `0.2.0`. Под ним ещё **не измерено ни одного прогона**
   (прерванный шёл под `0.1.0`), поэтому волна 2 (перенос ячеек) входит в ту же `0.2.0`:
   номер описывает условия измерения, а измерений под ним нет. ➖ **Снято 05.11.2026**
-  (F3 планов 19/20): действует `0.6.0` (`core/domain/models.py:199`) — датированное
+  (F3 планов 19/20): действует `0.7.0` (`core/domain/models.py:224`) — датированное
   отсутствие I2d, публикация авторизуется гейтом G4 (per-cell подпись снята с 0.4.0),
   а `explicit` без цитаты отрицания понижается до `❓` (с 0.5.0).
 - **п. 7** — `14` оговорка 5 и п. 7 §6 обновлены; `09` §4.3/§6.5/§11.2/§13.6/§14.1

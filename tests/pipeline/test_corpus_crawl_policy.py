@@ -429,7 +429,10 @@ def test_network_denied_makes_zero_network_calls_and_names_the_skip(
         # 3. Продукт остаётся на карте: PARTIAL, а не BLOCKED («несостоявшееся измерение»).
         assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
         assert run_products["p1"]["coverage_complete"] is False
-        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+        # Сеанс **завершён**: пропуск политики — не неполнота корпуса (решение владельца
+        # 21.11.2026). Он виден провенансом: запись корня с ``crawl_policy_skipped``,
+        # ``policy_skips`` и ``network_mode=deny``, — а не агрегатным флагом «partial».
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
 
         # 4. Пропуск виден в строке продукта и в провенансе корня.
         notes = _notes(result)
@@ -545,10 +548,14 @@ def test_on_request_without_refresh_scope_denies_update_and_reuses_chunks(
             assert docs[0].reuse_kind is not None
             assert docs[0].reuse_kind.value == "reused"
 
-            # 3. Покрытие неполно по политике, причина названа.
-            assert coverages["p1"].complete is False
+            # 3. Полнота — по снятию, а не по факту «сеть не трогали»: прошлый живой
+            #    обход исчерпал корень (``complete=1``), корпус переиспользован целиком,
+            #    поэтому покрытие полное. Пропуск политики остаётся названным.
+            assert coverages["p1"].complete is True
             assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
-            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+            # Статус продукта следует за покрытием: корпус полон (снятие есть),
+            # поэтому ``complete``; пропуск политики виден в провенансе, а не в статусе.
+            assert run_products["p1"]["status"] == RunProductStatus.COMPLETE.value
 
             # 4. ``url_state`` не переписан: наблюдения не было, «последней версией»
             #    переиспользованное не становится (иначе следующий живой прогон соврал бы).
@@ -624,9 +631,10 @@ def test_one_live_and_one_denied_root_is_partial_with_named_token(
         assert coverage.reason == CRAWL_POLICY_SKIPPED_REASON
         assert coverage.observed_sources == 1
 
-        # 3. Продукт на карте: PARTIAL (не BLOCKED) и сеанс partial.
+        # 3. Продукт на карте: PARTIAL (не BLOCKED); сеанс завершён — запрет сети не
+        #    техническая потеря, а решение расписания (решение владельца 21.11.2026).
         assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
-        assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+        assert session is not None and session.status is CrawlSessionStatus.COMPLETED
 
         # 4. Запись в ``results[].notes`` (строка product_end) называет пропуск.
         notes = _notes(result)
@@ -745,10 +753,14 @@ def test_denied_root_reuses_its_chunks_next_to_a_fetched_root(
             notes = _notes(result)
             assert CRAWL_POLICY_SKIPPED_REASON in notes
             coverage = coverages["p1"]
-            assert coverage.complete is False
+            # Оба корня удостоверены прошлым живым обходом (``complete=1``), поэтому
+            # запрет сети в этом прогоне полноты не отнимает (I2d: носитель — снятие).
+            assert coverage.complete is True
             assert coverage.reason == CRAWL_POLICY_SKIPPED_REASON
-            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
-            assert session is not None and session.status is CrawlSessionStatus.PARTIAL
+            # Статус продукта следует за покрытием: корпус полон (снятие есть),
+            # поэтому ``complete``; пропуск политики виден в провенансе, а не в статусе.
+            assert run_products["p1"]["status"] == RunProductStatus.COMPLETE.value
+            assert session is not None and session.status is CrawlSessionStatus.COMPLETED
         finally:
             store.close()
 
@@ -847,10 +859,13 @@ def test_overlapping_roots_do_not_duplicate_a_document(tmp_path: Path) -> None:
             assert len(hashes) == len(set(hashes))
             assert len(hashes) == len(docs), "один чанк на документ, ни одного лишнего"
 
-            # 3. Покрытие неполно по политике, продукт на карте.
-            assert coverages["p1"].complete is False
+            # 3. Полнота — по снятиям обоих корней (оба обойдены прошлым прогоном);
+            #    пропуск политики назван, но неполноты не создаёт.
+            assert coverages["p1"].complete is True
             assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
-            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+            # Статус продукта следует за покрытием: корпус полон (снятие есть),
+            # поэтому ``complete``; пропуск политики виден в провенансе, а не в статусе.
+            assert run_products["p1"]["status"] == RunProductStatus.COMPLETE.value
             assert CRAWL_POLICY_SKIPPED_REASON in _notes(result)
         finally:
             store.close()
@@ -1072,8 +1087,8 @@ def test_observed_alias_does_not_bring_back_its_stale_durable_copy(
             )
             assert build.duplicates.get("p1", 0) == 1, build.duplicates
 
-            # 6. Покрытие неполно по политическому токену, продукт на карте.
-            assert coverages["p1"].complete is False
+            # 6. Полнота — по снятию корня (оно есть), пропуск политики назван токеном.
+            assert coverages["p1"].complete is True
             assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
         finally:
             store.close()
@@ -1155,7 +1170,8 @@ def test_denied_root_without_prior_chunks_is_not_silently_empty(
             notes = _notes(result)
             assert "переиспользовано документов 0" in notes
 
-            # 3. Покрытие неполно по токену, продукт не ``BLOCKED``.
+            # 3. Носителя нет: запрещённый корень не обходился ни разу (субстрата нет),
+            #    поэтому ``complete=False`` — и это факт, а не «сеть не трогали».
             assert coverages["p1"].complete is False
             assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
             assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
@@ -1213,10 +1229,13 @@ def test_denied_root_in_full_mode_replays_all_its_durable_documents(
             # 3. Потери не замаскированы ошибкой: их просто нет.
             assert not [error for error in result.errors if denied in error], result.errors
 
-            # 4. Покрытие неполно по политическому токену, продукт на карте.
-            assert coverages["p1"].complete is False
+            # 4. Полнота — по снятию: корпус запрещённого корня воспроизведён целиком,
+            #    пропуск политики остаётся названным токеном.
+            assert coverages["p1"].complete is True
             assert coverages["p1"].reason == CRAWL_POLICY_SKIPPED_REASON
-            assert run_products["p1"]["status"] == RunProductStatus.PARTIAL.value
+            # Статус продукта следует за покрытием: корпус полон (снятие есть),
+            # поэтому ``complete``; пропуск политики виден в провенансе, а не в статусе.
+            assert run_products["p1"]["status"] == RunProductStatus.COMPLETE.value
         finally:
             store.close()
 

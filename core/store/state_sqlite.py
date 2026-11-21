@@ -87,7 +87,16 @@ __all__ = ["STATE_DDL", "STATE_SCHEMA_VERSION", "connect_state", "state_db_path"
 #: плана ``26``): адрес куска внутри таблицы (JSON ``{table_id,row_start,row_end}``); без
 #: него переиспользованный chunk-set терял адрес и кусок таблицы молча становился «не из
 #: таблицы». Шимов нет ⇒ файл ≤ 12 отвергается ``SchemaVersionMismatch`` и пересоздаётся.
-STATE_SCHEMA_VERSION = "13"
+#: 14 — **материал удостоверяемого пространства** снятия (``capture.space_json``): режимы
+#: политики + ``crawl_config_digest`` + версия семантики обхода. Отпечаток отвечал только
+#: «совпало ли», и смена **формулы** (``CRAWL_SEMANTICS``) читалась как смена
+#: **пространства**: измерено 21.11.2026, отпечаток дрейфовал ``012a1f2b`` (12.11) →
+#: ``475fb268`` (14.11) → ``ae1d69f5`` (21.11), и состоявшиеся снятия обесценивались
+#: молча. ``NULL`` — материал не записан (строка прежней схемы): сравнение идёт по
+#: отпечатку, как раньше, то есть перенос данных **не меняет** ни одного вердикта.
+#: Шимов при открытии нет; файл версии ≤ 13 отвергается, перенос — явный
+#: ``scripts/migrate_state.py``.
+STATE_SCHEMA_VERSION = "14"
 
 #: DDL §4.2. Идемпотентен: ``CREATE ... IF NOT EXISTS`` на всех объектах.
 STATE_DDL = """
@@ -462,7 +471,14 @@ CREATE TABLE IF NOT EXISTS capture (
         observed_how IN ('live','revalidated','adopted','scheduled')
     ),
     actor           TEXT,                        -- человек/планировщик (adopted/scheduled)
-    superseded_by   TEXT REFERENCES capture(capture_id)
+    superseded_by   TEXT REFERENCES capture(capture_id),
+    -- Материал того же пространства (режимы + crawl_config_digest + semantics): по нему
+    -- расхождение отпечатков объясняется, а не выдаётся за другое пространство.
+    -- NULL = материал не записан (строка до схемы 14) — сравнение идёт по отпечатку.
+    -- Объявлена **последней** намеренно: перенос делает ``ALTER TABLE ... ADD COLUMN``,
+    -- а он дописывает колонку в конец, и структурная сверка мигрированного файла с
+    -- чистым v14 сравнивает порядок колонок.
+    space_json      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_capture_product

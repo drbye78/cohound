@@ -114,14 +114,14 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
    (`subject_digest`) с `verdict=approved`. Новый `run_id` решение прошлого прогона **не**
    наследует — это аудит-след и точечный override.
 2. **Durable-аттестация профиля** (`profile_attestation` в `state/{package}/state.db`,
-   `STATE_SCHEMA_VERSION = "13"` — `core/store/state_sqlite.py:90`): человек аттестует
+   `STATE_SCHEMA_VERSION = "14"` — `core/store/state_sqlite.py:99`): человек аттестует
    **содержимое** профиля один раз, и прогон проходит G1/G2, пока профиль совпадает с
    аттестованным (дайджест сверяется, расхождение называет изменившийся компонент).
 
 **У аттестации есть производитель** — `hound package profile attest`
 (`cmd_package_profile_attest`, `core/cli/package/commands.py:2912`; запись —
 `core/cli/package/commands.py:3001` → `save_profile_attestation`,
-`core/store/state_store.py:1617`; парсер — `core/cli/package/parser.py:968`, `--gate`
+`core/store/state_store.py:1621`; парсер — `core/cli/package/parser.py:968`, `--gate`
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
@@ -399,7 +399,7 @@ retained-байтами не фетчится заново
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
 краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2318-2357`) вызывается в
-цикле продукта (`core/pipeline/corpus.py:3415`), и каждая запись становится **отдельным
+цикле продукта (`core/pipeline/corpus.py:3458`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
@@ -596,7 +596,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1326-1357`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1358-1389`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
@@ -687,9 +687,9 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:904-943`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:936-943`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
-  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1415-1420`);
+  сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/corpus.py:1416-1420`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
   Раунды входят в
   `EXECUTION_CONTRACT_FIELDS` (`serp_rounds`): поиск добавляет документы в корпус, то есть

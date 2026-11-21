@@ -428,6 +428,12 @@ class CaptureRow:
     coverage_digest: str | None = None
     doc_set_digest: str | None = None
     policy_digest: str | None = None
+    #: Материал удостоверяемого пространства (JSON: режимы + ``crawl_config_digest`` +
+    #: версия семантики обхода). Отпечаток говорит «совпало ли», материал — «что
+    #: разошлось»: без него смена формулы обхода читалась бы как другое пространство и
+    #: обнуляла бы состоявшееся снятие (измерено 21.11.2026). ``None`` — строка прежней
+    #: схемы: сравнение идёт по отпечатку, как до появления материала.
+    space_json: str | None = None
     actor: str | None = None
     superseded_by: str | None = None
 

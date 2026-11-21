@@ -240,6 +240,7 @@ from core.pipeline.corpus_coverage import (  # noqa: F401
     _persist_corpus_coverage,
     _product_notes,
     derive_corpus_coverage,
+    encode_space_material,
 )
 
 #: L5 шаг 3: класс терминального отказа попыток вынесен в ``corpus_drain``.
@@ -1688,18 +1689,35 @@ class _RootCaptureState:
     refused: list[str]
 
 
-def _root_capture_complete(*, incomplete: bool) -> bool:
-    """Исчерпан ли корень: обход **не усечён** и не пропустил документы.
+def _root_capture_complete(*, incomplete: bool, observed: bool) -> bool:
+    """Исчерпан ли корень: пространство **наблюдалось**, обход не усечён и не пропустил документы.
 
-    Единственный предикат ``complete`` снятия. ``incomplete`` — неполнота технической
-    природы: усечение ``max_*`` и пропуск документа уровнем ``off`` означают, что часть
-    пространства **не посещалась**. Отказ ``robots`` сюда не входит: файл ``robots``
-    объявляет естественную границу сайта, пространство исчерпано по его собственному
-    правилу, и гипотез о содержимом запрещённой секции не строится (решение владельца
-    21.11.2026). Поэтому ни набор отказов, ни набор поданных URL в решение не входят:
-    подача закрывает **пробел материала** (``resolved_manually``), а не ``complete``.
+    Единственный предикат ``complete`` снятия. Два разных повода сказать «нет»:
+
+    * ``incomplete`` — неполнота технической природы: усечение ``max_*`` и пропуск
+      документа уровнем ``off`` означают, что часть пространства **не посещалась**;
+    * ``observed`` — из корня **прочитано хоть что-то** (страница discovery или
+      ревалидации) либо сайт отказал по собственной границе ``robots``. Корень, из
+      которого не прочитано ни одной страницы и который не отказал по ``robots``,
+      пространства не наблюдал вовсе: его сид мог ответить ``403``/``5xx``, и объявлять
+      такое снятие исчерпанием значило бы удостоверять ``bounded``-отсутствие корнем,
+      которого никто не читал. Измерено 21.11.2026 на ``wiki.astralinux.ru/tandocs/``:
+      ``pages_fetched=0``, элемент сессии ``failed/source_unavailable`` (403 на UA
+      Scrapy), а снятие записывалось ``complete=1`` — то есть ``bounded ❌`` получал
+      носитель, которого не было.
+
+    Отказ ``robots`` в ``incomplete`` не входит и в ``observed`` считается: файл
+    ``robots`` объявляет естественную границу сайта, пространство исчерпано по его
+    собственному правилу, и гипотез о содержимом запрещённой секции не строится
+    (решение владельца 21.11.2026). Поэтому ни набор отказов, ни набор поданных URL в
+    решение ``incomplete`` не входят: подача закрывает **пробел материала**
+    (``resolved_manually``), а не ``complete``.
+
+    Ревалидационный трафик считается наблюдением: проход по известным URL не смешивается
+    с discovery-счётчиком ``fetched`` (S1), и корень, целиком переиспользованный с
+    ревалидацией, не должен читаться как «не наблюдался».
     """
-    return not incomplete
+    return not incomplete and observed
 
 
 def _recompute_root_captures(
@@ -3329,6 +3347,14 @@ def _build_corpus(
         # Неполнота технической природы: усечение бюджета и пропуск документа уровнем
         # ``off`` — это непосещённое пространство. Отказ ``robots`` сюда не входит.
         incomplete = bool(frontier.truncated or frontier.skipped_documents)
+        # Наблюдалось ли пространство корня: прочитанная страница (discovery или
+        # ревалидация) либо отказ по объявленной границе сайта. Ноль и того, и другого —
+        # корень не читался, и ``complete=1`` удостоверил бы исчерпание того, чего не
+        # видели (``_root_capture_complete``).
+        observed = (
+            frontier.fetched + frontier.revalidation_fetched > 0
+            or bool(frontier.robots_refused_urls)
+        )
         capture = CaptureRow(
             capture_id=_capture_id_for(product_id, plan.root_url, run_id),
             product_id=product_id,
@@ -3336,9 +3362,15 @@ def _build_corpus(
             root_url=plan.root_url,
             started_at=frontier.started_at or _now_iso(),
             finished_at=_now_iso(),
-            complete=_root_capture_complete(incomplete=incomplete),
+            complete=_root_capture_complete(incomplete=incomplete, observed=observed),
             observed_how=CAPTURE_OBSERVED_LIVE,
             policy_digest=None if crawl_policy is None else crawl_policy.space_digest,
+            # Материал того же пространства: отпечаток отвечает «совпало ли», материал —
+            # «что разошлось». Без него смена формулы обхода читалась бы как другое
+            # пространство и обнуляла состоявшееся снятие.
+            space_json=encode_space_material(
+                None if crawl_policy is None else crawl_policy.space_material
+            ),
         )
         try:
             state.record_capture(capture)
@@ -3365,10 +3397,14 @@ def _build_corpus(
 
         Зовётся **из гейта планов** — до резолва цели, развёртки каталога (feed/channel)
         и sitemap, — поэтому «ни одного запроса» здесь не обещание, а следствие места
-        вызова. Пропуск делает продукт неполным (``crawl_policy_skipped`` в
-        ``truncated_products`` и ``incomplete_reasons``) и **не** идёт через zero-source:
-        продукт остаётся на карте (I4), а не превращается в ``BLOCKED``
-        («несостоявшееся измерение» — это другой случай).
+        вызова. Пропуск **не** делает продукт неполным: он не пополняет
+        ``truncated_products``/``coverage_incomplete``, потому что расписание решает
+        **когда** обновлять, а не **что** исчерпано (решение владельца 21.11.2026).
+        Полнота берётся из снятий корней (I2d), а корпус — из durable-субстрата.
+        Пропуск виден провенансом: запись корня (``truncated_reason=crawl_policy_skipped``),
+        ``policy_zero_reasons`` (причина нулевого выхода) и ``policy_skips``/``policy_notes``.
+        В zero-source он **не** идёт: продукт остаётся на карте (I4), а не превращается в
+        ``BLOCKED`` («несостоявшееся измерение» — это другой случай).
 
         **Переиспользование отложено до хвоста продукта** (E.6 плана 19, решение
         оркестратора 05.11.2026). Здесь фиксируется только **пропуск** (провенант, покрытие,
@@ -3405,8 +3441,15 @@ def _build_corpus(
                 corpus_source=execution.corpus_source.value,
                 truncation_records=truncation_records,
             )
-        truncated_products.add(product_id)
-        coverage_incomplete.setdefault(product_id, reason)
+        # Пропуск политики — **не** неполнота корпуса (решение владельца 21.11.2026):
+        # расписание существует, чтобы не краулить заново то, чей график обновлений
+        # известен, а не чтобы забыть продукт. Корпус берётся из durable-субстрата
+        # (``_close_product``), полноту решают **снятия** корней (I2d), а не факт
+        # «сеть в этом прогоне не трогали». Поэтому ``truncated_products`` и
+        # ``coverage_incomplete`` здесь не пополняются: иначе переиспользованный корпус
+        # объявлялся бы усечённым, и ``bounded ❌`` терял бы датированный носитель
+        # (измерено 21.11.2026: 149 эталонных ячеек двух продуктов с пропущенными
+        # политикой корнями недостижимы только из-за этого отождествления).
         policy_zero_reasons.setdefault(product_id, reason)
         ctx = contexts.get(str(product_id))
         detail = ", ".join(reasons)
@@ -5105,6 +5148,8 @@ def _build_corpus(
                     resolved_manually_by_root=resolved_manually_by_root,
                     # ``--only-failed``: ремонт не наблюдал продукт целиком.
                     incomplete_reasons=coverage_incomplete,
+                    # Пропуск политики: причина видна, полноту решают снятия.
+                    provenance_reasons=policy_zero_reasons,
                     # F3: объявленные корни продукта + их снятия (``complete`` по снятиям).
                     declared_roots={product_id: product_roots},
                     captures={product_id: product_captures},
@@ -5113,6 +5158,11 @@ def _build_corpus(
                     # остаётся входом ``run_id`` и здесь не сверяется (I2d).
                     declared_space_digest=(
                         None if crawl_policy is None else crawl_policy.space_digest
+                    ),
+                    # Материал того же пространства — сторона сравнения для снятий,
+                    # записанных со схемой 14 (объясняет расхождение отпечатков).
+                    declared_space_material=(
+                        None if crawl_policy is None else crawl_policy.space_material
                     ),
                 )
                 # 16 §3.2: ``coverage_complete`` строки продукта — та же величина, что
@@ -5502,11 +5552,18 @@ def _build_corpus(
                 # Тот же набор продуктов-ремонтов: перезапись не должна вернуть им
                 # ``complete``, которого они не заслужили.
                 incomplete_reasons=coverage_incomplete,
+                # Причина пропуска политики — провенанс: перезапись строки её сохраняет.
+                provenance_reasons=policy_zero_reasons,
                 # F3: объявленные корни и их снятия — второй предикат полноты нет.
                 declared_roots=url_map,
                 captures=coverage_captures,
                 declared_space_digest=(
                     None if crawl_policy is None else crawl_policy.space_digest
+                ),
+                # Тот же материал, что на границе продукта: перезапись строки покрытия
+                # обязана сохранить объяснение расхождения отпечатков.
+                declared_space_material=(
+                    None if crawl_policy is None else crawl_policy.space_material
                 ),
                 # Измеренные строки продуктов, которых это исполнение не обходило, не
                 # переписываются нулями (см. ``preserved_products``).

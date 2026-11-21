@@ -683,11 +683,17 @@ def test_root_capture_document_skip_not_lifted_by_provision(tmp_path: Path) -> N
 
 
 def test_root_capture_predicate_is_not_truncated_and_not_skipped() -> None:
-    """(е) Предикат ``complete`` — ``not (truncated or skipped_documents)``.
+    """(е) Предикат ``complete`` — ``not incomplete and observed``.
 
     0.6.0: отказ ``robots`` в решение не входит, поэтому набор отказов и набор поданных
     URL на предикат не влияют. Неполноту даёт только техническая потеря — усечение
     бюджета и пропуск документа уровнем ``off``.
+
+    0.7.0: второй множитель — ``observed``. Корень, из которого не прочитано ни одной
+    страницы и который не отказал по ``robots``, пространства не наблюдал, и
+    ``complete=1`` удостоверил бы исчерпание того, чего никто не видел (измерено
+    21.11.2026 на ``wiki.astralinux.ru/tandocs/``: ``pages_fetched=0``,
+    ``failed/source_unavailable``, а снятие записывалось ``complete=1``).
     """
     from core.pipeline.corpus import _root_capture_complete
 
@@ -695,10 +701,16 @@ def test_root_capture_predicate_is_not_truncated_and_not_skipped() -> None:
         for skipped in (False, True):
             expected = not (truncated or skipped)
             assert (
-                _root_capture_complete(incomplete=truncated or skipped) is expected
+                _root_capture_complete(
+                    incomplete=truncated or skipped, observed=True
+                )
+                is expected
             ), (truncated, skipped)
     # Отказ ``robots`` не делает корень неполным: предикат о нём ничего не знает.
-    assert _root_capture_complete(incomplete=False) is True
+    assert _root_capture_complete(incomplete=False, observed=True) is True
+    # Ненаблюдённый корень не удостоверяет ничего — даже без технической неполноты.
+    assert _root_capture_complete(incomplete=False, observed=False) is False
+    assert _root_capture_complete(incomplete=True, observed=False) is False
 
 
 # --------------------------------------------------------------------------- #

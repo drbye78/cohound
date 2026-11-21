@@ -558,7 +558,7 @@ _partition_reuse_reason 2926-3005
    `corpus`** — `_serp_note`, `_serp_disabled_observation`, `_stage_timings_aggregate`:
    они там **определены** (`corpus.py:1009/765/714`), переезжать некуда.
    **Три `monkeypatch`-адреса оставлены на `corpus` намеренно и доказанно**: это шов, а не
-   долг. `_ingest_member_doc` (`corpus.py:2930`) и `_persist_docs` (`corpus.py:275`, `:2639`)
+   долг. `_ingest_member_doc` (`corpus.py:2948`) и `_persist_docs` (`corpus.py:275`, `:2639`)
    связываются в `partial` в кадре `_build_corpus`, поэтому подмена на модуле-владельце не
    доехала бы до кода. Доказательство прогоном в обе стороны: raise-спай на
    `corpus_ingest.persist_docs` тест **не** роняет, на `corpus._persist_docs` — роняет.

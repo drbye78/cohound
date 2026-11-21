@@ -63,7 +63,7 @@ upstream-факте в **измерение** с датой, цитатой и �
 | **`baselines.csv` в `run_id`** | ❌ нет `baselines_digest` в контракте (33 поля) |
 | **per-параметр evidence** | ❌ `_derived_evidence` (`inheritance.py:152`) берёт **одну** цитату из `passport.upstream.evidence` |
 | **reference-продукт как сущность** | ❌ `baseline_id` — строка; за ней нет продукта, версии, корпуса |
-| **несколько предков у продукта** | ❌ `Passport.upstream` — одно поле (`models.py:439`), 3 места использования в `inheritance.py` |
+| **несколько предков у продукта** | ❌ `Passport.upstream` — одно поле (`models.py:471`), 3 места использования в `inheritance.py` |
 | **история версий** | ❌ `upstream.version` — одна строка |
 | **карта reference-продукта** | ❌ нет: `_compute_from_cells` (`compute.py:268`) работает по ячейкам, а ячеек reference-продукта никто не производит |
 

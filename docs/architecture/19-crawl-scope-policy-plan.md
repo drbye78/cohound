@@ -2,8 +2,8 @@
 
 **Тип:** справочник (as-built) + **одно решение владельца** (E.8). **Владелец:** Roger. **Начало:** 04.11.2026, срез `1c76e6e`.
 **Сверено с кодом:** 2026-11-16. Действующие версии —
-`SCHEMA 3.27.0` (`core/store/sqlite.py:143`), `STATE "13"` (`core/store/state_sqlite.py:90`),
-`METHODOLOGY 0.6.0` (`core/domain/models.py:199`); встречающиеся ниже «`7` → `8`»,
+`SCHEMA 3.27.0` (`core/store/sqlite.py:153`), `STATE "14"` (`core/store/state_sqlite.py:99`),
+`METHODOLOGY 0.7.0` (`core/domain/models.py:224`); встречающиеся ниже «`7` → `8`»,
 «`8` → `9`», «`9` → `10`» — история плана, а не текущее состояние.
 **Ревью:** @oracle 04.11.2026 (14 обязательных правок внесены, см. §11).
 **Как читать:** статус пункта — по факту кода, а не по обещанию (правило маркеров — как в
@@ -56,7 +56,7 @@ per-host статуса и без различения дискавери и о�
 
 | механизм | где | чего не хватает |
 |---|---|---|
-| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:993`, `core/pipeline/run_identity.py:274`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:438`) |
+| `RefreshPolicy = auto\|revalidate\|refresh\|offline`, резолв `--refresh` > `run.yaml` > `auto`, **входит в `run_id`** | `core/domain/enums.py:993`, `core/pipeline/run_identity.py:274`, `core/pipeline/plan.py:112` | нет per-scope значения; `frozen` нет; неизвестное значение молча падало в `auto` (исправлено в P1: `_as_refresh_policy`, `core/pipeline/corpus.py:439`) |
 | обновление = условный GET (ETag/Last-Modified) для известных URL | `incremental.plan_incremental:116`, `url_state` (`core/store/state_sqlite.py:143`), `ReuseKind.revalidated` | — |
 | ноль запросов, корпус из `state.db` | `corpus_ingest.offline_reuse_product:3784` | переиспользует **чанки**; при смене версии чанкера/пустом наборе/I19-расхождении и **наличных байтах** документ пересобирается текущим конвейером (`rebuild_from_stored_bytes`), байтов нет — `no_bytes`; не пишет `url_state`/`document_version` как «последнюю версию» — эту дисциплину наследует и `frozen` |
 | per-path блэклист с видимым отказом | `blacklist_match:966`, `skipped_blacklisted` | не различает дискавери и обновление, нет per-host статуса |
@@ -177,7 +177,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
 4. **`hound crawl run` перестаёт хардкодить `AUTO`** (`core/cli/commands/crawl.py:462`): иначе
    `run` и `crawl run` адресуют разные сеансы при одном объявленном входе.
 5. **Неизвестное значение политики — `EXIT_USAGE`, не `auto`.** Тихий fallback — это сеть по опечатке (AGENTS §2);
-   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:438`).
+   реализовано в `_as_refresh_policy` (`core/pipeline/corpus.py:439`).
 6. Время снятия (`captured_at`) — **провенанс**, не идентичность (как `extractor_version`).
 7. Честная граница: резолв ветки «discovery vs update» читает `url_state`, поэтому **те же
    объявленные входы при сдвинутом `state.db` дают другой корпус** — так уже живёт `auto`
@@ -225,9 +225,15 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   значение без исполнения дало бы ложный `execution_change`.
 - ✅ `chunks`-корень проходит обобщённый offline-путь (`core/pipeline/corpus_ingest.py:3926`, «продукт →
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
-- ✅ **Пропуск по политике делает покрытие неполным**: `crawl_policy_skipped` в
-  `incomplete_reasons` + `truncated_products` (`core/pipeline/corpus_commit.py:105`) — тем же каналом, что
-  `HOST_OUT_OF_SHARD_REASON` (`core/pipeline/corpus.py:2207`, `core/pipeline/corpus.py:3781`). `expected_sources` не уменьшается молча.
+- ✅ **Пропуск по политике — переиспользование, а не неполнота** (0.7.0, решение владельца
+  21.11.2026): `crawl_policy_skipped` больше не идёт в `incomplete_reasons` и
+  `truncated_products` — расписание решает **когда** обновлять, а не **что** исчерпано.
+  Полноту решают снятия объявленных корней (I2d), а корпус берётся из durable-субстрата;
+  причина остаётся видимой провенансом (`provenance_reasons` → `corpus_coverage.reason`,
+  запись корня, `policy_skips`, `network_mode=deny`), поэтому пропуск не выглядит ни как
+  полный обход, ни как `failed`. До 0.7.0 он шёл каналом `HOST_OUT_OF_SHARD_REASON`
+  (`core/pipeline/corpus_commit.py:105`) и объявлял корпус неполным, из-за чего `bounded
+  ❌` терял датированный носитель на переиспользованном корпусе.
 - ✅ Политический пропуск **не** идёт через zero-source: ветка `core/pipeline/corpus.py:5289` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
@@ -275,7 +281,7 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   идёт по durable-группам снятия (`corpus_capture_doc`, `doc_hash` → URL'ы), канонический
   адрес — `min(url)` **запросом**, а не гонкой готовности; результат не зависит от
   `host_concurrency`.
-- ✅ **Запись снятия** — таблицы `corpus_capture` (`core/store/state_sqlite.py:381`) и
+- ✅ **Запись снятия** — таблицы `corpus_capture` (`core/store/state_sqlite.py:390`) и
   `corpus_capture_doc` (`core/store/state_sqlite.py:398`): `captured_at`, `capture_digest`, `seeds_digest`,
   `coverage_complete`, `coverage_digest`, `doc_set_digest`, `reuse_kind` документов.
   `STATE_SCHEMA_VERSION` `8` → **`9`** (история; действующая — `12`). `url_state.last_checked_at` для этого **не годится**
@@ -389,8 +395,8 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 - Идентичность: дайджест стабилен при перестановке записей, меняется при смене режима или
   `--refresh-scope`, не меняется от `note`/`actor`/несовпавших строк.
 - Сеть: в `network_denied` и `frozen` — **ноль** вызовов (фейки бросают), а не «мало».
-- Покрытие: каждый пропуск по политике делает продукт неполным и назван токеном; ни один
-  пропуск не выглядит как `failed` (I4) или как «нет seed'ов».
+- Покрытие: пропуск по политике полноты не отнимает (0.7.0: полноту решают снятия, I2d) и
+  назван провенансом; ни один пропуск не выглядит как `failed` (I4) или как «нет seed'ов».
 - I1–I23 не пересматриваются; `core/` нейтрален (режимы — операционные перечисления).
 
 ## 9. Риски и чего план не обещает
@@ -441,7 +447,8 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
 Внесено 14 из 14: материал дайджеста включает `--refresh-scope`; конфликт вместо тай-брейка;
 несовпавшие строки видимы и вне дайджеста; `frozen_source` канонизируется; гейт выше первого
 сетевого вызова + SERP-контур; две оси (`network_mode` × `corpus_source`); пропуск делает
-покрытие неполным; запись снятия вместо `last_checked_at`; `frozen_reextract_mismatch`; durable
+покрытие неполным (**отменено 0.7.0**, 21.11.2026: переиспользование ≠ неполнота);
+запись снятия вместо `last_checked_at`; `frozen_reextract_mismatch`; durable
 группы дедупа; переименование режимов; переснятие пинов контракта; запрет переписывать
 `url_state`; `EXIT_USAGE` на неизвестной политике.
 

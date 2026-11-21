@@ -634,9 +634,11 @@ run-DB утверждала «партиция на диске», хотя `comm
   другого контейнера получит `database is locked` как норму; (3) без `document_version` +
   `chunk_store` следующий прогон не посчитает оценки на снятии (`offline_reuse_product`) —
   «снятие сделано» без корпуса не выполняет приёмку;
-- *узкий writer «append строк»* — не знает `complete` (это факт фронтьера: `not (truncated
-  or skipped_documents)` после 0.6.0) и не обновляет `last_checked_at`, поэтому
-  следующий прогон не получит `reuse` и полезет в сеть вторым снятием;
+- *узкий writer «append строк»* — не знает `complete` (это факт фронтьера: `not incomplete
+  and observed` после 0.7.0, где `incomplete = truncated or skipped_documents`, а
+  `observed` — прочитана страница либо был отказ `robots`) и не обновляет
+  `last_checked_at`, поэтому следующий прогон не получит `reuse` и полезет в сеть вторым
+  снятием;
 - *DMZ только префетчит, снятия пишет следующий прогон* — приёмка F4 («снятие между
   прогонами») не выполняется вовсе; это отказ от F4, а не его минимум.
 
@@ -644,10 +646,12 @@ run-DB утверждала «партиция на диске», хотя `comm
 плана, — та, что действовала на момент написания. 20.11.2026 отказ `robots.txt` был
 разделён на «подача закрывает по адресу» / «усечение не закрывает», а 21.11.2026 решение
 владельца сняло вопрос совсем: **`robots` — объявленная граница сайта, а не потеря**, и
-корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1691`) — это
-`not (truncated or skipped_documents)`. Поэтому писатель
-снятия обязан знать **только** техническую неполноту (`truncated`, `skipped_documents`) и
-не должен ни вычитать отказы `robots`, ни переписывать `complete` после подачи
+корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1692`) — это
+`not incomplete and observed` (0.7.0: `incomplete = truncated or skipped_documents`,
+`observed` — прочитана страница либо был отказ `robots`). Поэтому писатель
+снятия обязан знать техническую неполноту (`truncated`, `skipped_documents`) и
+наблюдённость корня, а не должен ни вычитать отказы `robots`, ни переписывать `complete`
+после подачи
 (`_recompute_root_captures`, `core/pipeline/corpus.py:1705`, публикует лишь разрез
 `resolved_manually`). Подача остаётся входом **следующего** прогона и не подчиняется ни
 расписанию, ни `refresh_policy` (`13-manual-artifacts.md` §3.3).
@@ -718,15 +722,20 @@ run-DB утверждала «партиция на диске», хотя `comm
   именно она уходит в `absence_as_of` у `bounded ❌`;
 - **схема не меняется**: поля `roots_json` те же, новых нет.
 
-**Почему усечение остаётся видимым.** Приоритет `complete` не прячет неполноту: две
-причины `capture.complete=False` (`_record_root_capture`: `frontier.truncated`,
-`frontier.skipped_documents`) зеркалятся фактами прогона, которые решают `complete`
-**независимо** от выбора снятия: `truncated`/`skipped_documents` ⇒
-`truncated_products` ⇒ `coverage.truncated=True` ⇒ `complete=False`. Отказ `robots` в
-этот список больше не входит (0.6.0: объявленная граница сайта, а не потеря) — он
-остаётся аудитом в `blocked` и рабочим списком подачи. Плюс `incomplete_reasons`
-(`only_failed_repair`, `host_out_of_shard`, политический пропуск) обнуляет `complete`
-напрямую. Проверено матрицей в `/tmp` (не артефакт репозитория): усечение, блокирующий
+**Почему усечение остаётся видимым.** Приоритет `complete` не прячет неполноту: причины
+`capture.complete=False` (`_record_root_capture`) зеркалятся фактами прогона, которые
+решают `complete` **независимо** от выбора снятия: `truncated`/`skipped_documents` ⇒
+`truncated_products` ⇒ `coverage.truncated=True` ⇒ `complete=False`. Третья причина
+добавлена 0.7.0: корень, из которого не прочитано ни страницы и который не отказал по
+`robots`, **пространства не наблюдал** (`observed`), и `complete=1` удостоверил бы
+исчерпание того, чего никто не видел (измерено 21.11.2026 на `wiki.astralinux.ru/tandocs/`:
+`pages_fetched=0`, `failed/source_unavailable`, а снятие записывалось `complete=1`).
+Отказ `robots` в список неполноты не входит (0.6.0: объявленная граница сайта, а не
+потеря) — он остаётся аудитом в `blocked` и рабочим списком подачи. Плюс
+`incomplete_reasons` (`only_failed_repair`, `host_out_of_shard`) обнуляет `complete`
+напрямую; **политический пропуск из этого списка убран в 0.7.0** — расписание решает
+*когда* обновлять, а не *что* исчерпано, поэтому переиспользованный корпус остаётся
+полным, а причина (`crawl_policy_skipped`) публикуется провенансом строки покрытия. Проверено матрицей в `/tmp` (не артефакт репозитория): усечение, блокирующий
 `FAILED` технического класса, нечитаемый origin и `incomplete_reasons` дают
 `complete=False` даже при удостоверяющем снятии от 01.11; без них — `complete=True` с
 датой 01.11.

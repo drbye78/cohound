@@ -1860,6 +1860,34 @@ def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None
         store.close()
 
 
+def test_unobserved_root_does_not_attest_exhaustion(tmp_path: Path) -> None:
+    """Корень, из которого не прочитано ни страницы, не даёт ``complete=1`` (0.7.0).
+
+    Измерено 21.11.2026 на ``wiki.astralinux.ru/tandocs/``: сид ответил 403
+    (``failed/source_unavailable``), ``pages_fetched=0``, а снятие записывалось
+    ``complete=1`` — то есть ``bounded ❌`` получал носитель, которого никто не читал.
+    Предикат ``_root_capture_complete`` смотрел только ``truncated``/``skipped_documents``.
+    """
+    store = SqliteStore(":memory:")
+    _make_run(store)
+    bad = "https://docs.test/p1/broken"
+    with SqliteStateStore(":memory:") as state:
+        try:
+            _build(
+                tmp_path, pages={}, urls={"p1": [bad]},
+                crawler=_Crawler({}, raising={bad}), store=store, run_id=RUN_ID,
+                state=state,
+            )
+            captures = list(state.iter_captures("p1"))
+            assert len(captures) == 1
+            capture = captures[0]
+            assert capture.root_url == bad
+            # Технический отказ сида: ни страницы, ни отказа по ``robots``.
+            assert capture.complete is False
+        finally:
+            store.close()
+
+
 @pytest.mark.parametrize("status", [429, 503, 403])
 def test_crawl_failure_keeps_error_kind_but_records_http_status(
     tmp_path: Path, status: int

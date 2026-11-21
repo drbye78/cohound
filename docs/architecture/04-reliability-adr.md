@@ -354,7 +354,7 @@ tests/
 | ANN-альтернатива | ➖ снято решением | решение — `14` §4: Qdrant отклонён (поиск продукт-скупед, I17, ANN по миллионам векторов не выполняется никогда), порт `VectorIndex` готов, ANN-адаптера нет; возврат — по условию строки выше, не по «на вырост» |
 | эмбеддинги на CPU | ✅ сделано | батчевый путь `core/adapters/embed_local.py:193` (нарезка входа `batch_size`); цена — 2.8–5.7 чанк/с продакшн-путь, fp16 — 15.40 чанк/с (06.11.2026, `docs/reports/measurements/2026-11-06-embedding-precision-cpu.md`) |
 | массовая запись в SQLite | ✅ сделано | `PRAGMA journal_mode = WAL` (`core/store/sqlite.py:125`) и одна транзакция на пачку 200 (`core/store/sqlite_store.py:97`, `save_cells_batch` — `core/store/sqlite_store.py:645`) |
-| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1387`, безлимит запрещён — `core/pipeline/corpus.py:1410`), кэш — `core/util/cache.py:133` |
+| search-адаптер latency/стоимость | ✅ сделано | бюджет фазы объявляется и проверяется (`core/pipeline/corpus.py:1388`, безлимит запрещён — `core/pipeline/corpus.py:1411`), кэш — `core/util/cache.py:133` |
 
 ### D.1. Память и OOM
 
@@ -457,7 +457,7 @@ zip с 47 PDF держал родителя на 561 % CPU при простаи
   они и есть цена: из 79 MB, которые берёт `extract` на 6.51 M символов, **67 MB** — список
   страниц (54) и склейка (13).
 - **Пик воркера — максимум по документам, а не цена одного.** При
-  `extract_max_tasks_per_child: 25` (`packages/ru-pg-dbms/run.yaml:112`) и `malloc_trim` после
+  `extract_max_tasks_per_child: 25` (`packages/ru-pg-dbms/run.yaml:113`) и `malloc_trim` после
   каждого документа: 94-страничный документ — **+309 MB** к пику за 4 документа (насыщение не
   наступило), 12-страничный — **+93 MB** за 8 (насыщение на 5-м, база 1.53 GB). Без trim второй
   документ стоил **+462 MB** против **+135 MB** с ним.
@@ -551,9 +551,10 @@ IDP/DLP/IDS (07 §8); 0021–0022 — операционный слой посл
 даёт, `[]` — искал и не нашёл); с 3.12.0 файл другой версии
 **отвергается**
 гейтом `11` §2.6, а не мигрируется молча), `STATE_SCHEMA_VERSION` схемы `state/{package}/state.db` —
-**`"13"`** (`"4"` добавила `profile_attestation`; действующая цепочка: 8/9 — `crawl_policy`/`corpus_capture`,
+**`"14"`** (`"4"` добавила `profile_attestation`; действующая цепочка: 8/9 — `crawl_policy`/`corpus_capture`,
 10 — `container_state`, 11 — `capture`/наблюдения `url_state`, 12 — отпечаток пространства
-снятия, 13 — `chunk_meta.table_ref` (O39 фаза 2); планы 19/20/26). Основное из накопленного: E2 —
+снятия, 13 — `chunk_meta.table_ref` (O39 фаза 2), 14 — материал пространства
+(`capture.space_json`, 0.7.0); планы 19/20/26). Основное из накопленного: E2 —
 `runs.registry_spec_digest`, дайджест package-scoped спецификаций реестров, граница
 `execution_change` §13; P1 — `run_inputs` как источник истины входов плана +
 деплой-провенанс/`ranking_epsilon`; ранее P2 — контент-адресуемый `index_build_id`
@@ -620,7 +621,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   (`tests/selfcheck.py:1037` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:375`;
   тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1333` и `core/domain/models.py:1712`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1365` и `core/domain/models.py:1744`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:146` (`TEMPLATE_VERSION = "evaluator_v6"`), `templates/{version}.txt`,

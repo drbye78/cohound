@@ -191,7 +191,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
   `results[].notes`. Перенести в ledger как отдельную строку (сейчас это нота в логе, а не
   счётчик в артефакте).
 * **Хук:** `core/pipeline/corpus_ingest.py:1729` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:481`,
-  пост-проход `canonicalize_doc_urls` (`core/pipeline/corpus.py:628`) — он группирует по
+  пост-проход `canonicalize_doc_urls` (`core/pipeline/corpus.py:629`) — он группирует по
   `crawl_session_items.doc_hash` и ставит победителем `min(urls)` (`core/pipeline/corpus.py:723`).
 * **Дефект детерминизма (найден при разведке).** `canonicalize_doc_urls` покрывает только
   элементы сеанса краула. У документа-члена элемента сеанса нет, а `corpus_docs.url` при
@@ -429,7 +429,7 @@ CREATE TABLE dedup_ledger (
 |---|---|---|---|
 | S0 | нет (уже) | — | — |
 | S1, S2 | **нет** — чистая функция байт | провенанс + ledger | — |
-| S3 | да (уже) | `doc_id`, `corpus_doc_set_digest` (`core/pipeline/digests.py:678`) | уже действует |
+| S3 | да (уже) | `doc_id`, `corpus_doc_set_digest` (`core/pipeline/digests.py:718`) | уже действует |
 | S5 (роль) | да — ранжирование | `retrieval_params_json` | `execution_change` |
 | S7 (схлопывание) | да — набор доказательств | `retrieval_params_json` | `execution_change` |
 | S8 | нет — даты и reuse | `corpus_snapshot`, `reuse_kind` | провенанс |
@@ -591,7 +591,7 @@ S7 в `retrieval_params_json` (новый `run_id`, `execution_change`). Вор�
 | 4 | `corpus_chunks.embedded_at` всегда `NULL` | `core/store/sqlite.py:392` (колонка есть, писателя нет) | провенанс вектора не публикуется | **✅ P0-B 07.11.2026** |
 | 5 | `corpus_members.skip_reason` не экспортируется ни в один артефакт | `core/store/sqlite_store.py:2884` (только чтение) | «почему члена нет» из БД не отвечается | **✅ 09.11.2026**: `outputs/corpus_members.csv` + сводка `corpus_members` в `--json` (`core/pipeline/corpus_members.py`; только строки с `skip_reason`, схема БД не тронута) |
 | 6 | отказы уровня плана не порождают строку члена вовсе | `core/util/container_policy.py:91` | отказ виден только в памяти фазы | **✅ 09.11.2026**: бюджетные причины (`PLAN_SKIP_ROW_REASONS`) дают строку — пачкой фазы; каталог/шифрование/чужой формат остаются агрегатом прогноза (не члены-файлы), `path_rejected` — после колонки `raw_member_path` |
-| 7 | `corpus_docs.url` документа-члена = последний писатель ⇒ зависит от порядка спуска | `core/store/sqlite_store.py:1623`; канонизация членов — `core/pipeline/corpus.py:628` | адрес члена — функция расписания | **✅ P0-A 07.11.2026** |
+| 7 | `corpus_docs.url` документа-члена = последний писатель ⇒ зависит от порядка спуска | `core/store/sqlite_store.py:1623`; канонизация членов — `core/pipeline/corpus.py:629` | адрес члена — функция расписания | **✅ P0-A 07.11.2026** |
 | 8 | EPUB не финализировал текст перед хешем | `core/adapters/extract_epub.py:61` vs `core/util/sanitize.py:485` | нарушен контракт «каждый читатель зовёт границу очистки»: тела глав чистил `HtmlExtractor`, а шапки глав и заметки — нет. **Не** про равенство хешей EPUB и HTML: книга склеена читателем, хеши не совпадут и после фикса | **✅ 09.11.2026**, `epub-3` (`execution_change`) |
 | 9 | `03-data-config-cli.md:64` называет ретейленный файл `doc_hash`, код — хешем байтов | `03-data-config-cli.md:64` | терминологический дрейф в справочнике (AGENTS §1.2: чинить в том же коммите) | **✅ 09.11.2026**: `{raw_hash}` + абзац «чем он отличается от `content_hash`» |
 | 10 | `_by_work` не переживает resume: финальный URL прошлого исполнения может дать вторую строку очереди | `core/pipeline/extract_queue.py:181` (названный остаток) | вторая конвертация тех же байт = кэш-хит; документ не удваивается | не чиним, цена названа |

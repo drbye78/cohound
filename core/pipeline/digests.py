@@ -586,6 +586,50 @@ def crawl_policy_digest(
     )
 
 
+def crawl_space_material(
+    decisions: Iterable[tuple[str, str, str | None, str | None, str]],
+    *,
+    crawl_config_digest: str | None,
+    semantics: str | None = None,
+) -> dict[str, Any]:
+    """**Материал** удостоверяемого пространства — то, из чего считается ``space_digest``.
+
+    Зачем материал рядом с дайджестом. Отпечаток отвечает «совпало ли», но не «что
+    разошлось», и — главное — не различает два разных события: смену **формулы**
+    (``CRAWL_SEMANTICS``: правила обхода, порядок изъятия, победитель дедупа) и смену
+    **самого пространства** (лимиты, режимы). Наблюдённый дрейф отпечатка 21.11.2026:
+    ``012a1f2b`` (12.11) → ``475fb268`` (14.11) → ``ae1d69f5`` (21.11) — и каждое
+    расхождение читалось как «другое пространство», обесценивая состоявшиеся снятия.
+
+    ``semantics`` — версия правил обхода (:data:`core.pipeline.crawl_frontier.CRAWL_SEMANTICS`).
+    Она **не** входит в сравнение пространств: исчерпание — факт о лимитах и режимах,
+    а правила меняют *как* обход идёт, не *что* он покрывает (``complete=1`` означает
+    «усечения не было», а усечение от порядка не зависит). Хранится затем, чтобы
+    расхождение отпечатка при смене правил было **объяснимо** и не выдавалось за смену
+    пространства.
+
+    Форма стабильна и сортирована: материал сравнивается как JSON, поэтому порядок
+    объявления корней не должен решать, одно это пространство или два.
+    """
+    rows = sorted(
+        {
+            (
+                str(product_id),
+                str(scope_kind),
+                None if host is None else str(host),
+                None if path is None else str(path),
+                str(mode),
+            )
+            for product_id, scope_kind, host, path, mode in decisions
+        }
+    )
+    return {
+        "crawl_space": [list(row) for row in rows],
+        "crawl_config_digest": crawl_config_digest,
+        "semantics": semantics,
+    }
+
+
 def crawl_space_digest(
     decisions: Iterable[tuple[str, str, str | None, str | None, str]],
     *,
@@ -612,24 +656,20 @@ def crawl_space_digest(
     при ``max_documents=100`` не удостоверяет прогон с 500. ``None`` сериализуется как JSON
     ``null`` (как в :func:`execution_contract_digest`): отсутствие значения — часть
     отпечатка, а не «любое значение».
+
+    Формула **не** меняется вместе с :func:`crawl_space_material`: материал добавлен
+    рядом, а не вместо. Иначе все исторические снятия перестали бы совпадать с
+    объявленным пространством в тот же день, когда появилась возможность объяснить
+    расхождение.
     """
-    rows = sorted(
-        {
-            (
-                str(product_id),
-                str(scope_kind),
-                None if host is None else str(host),
-                None if path is None else str(path),
-                str(mode),
-            )
-            for product_id, scope_kind, host, path, mode in decisions
-        }
+    material = crawl_space_material(
+        decisions, crawl_config_digest=crawl_config_digest
     )
     return short_hash(
         _canonical(
             {
-                "crawl_space": [list(row) for row in rows],
-                "crawl_config_digest": crawl_config_digest,
+                "crawl_space": material["crawl_space"],
+                "crawl_config_digest": material["crawl_config_digest"],
             }
         ),
         _DIGEST_LEN,

@@ -301,7 +301,7 @@ mismatch forces `complete=False`; an unknown digest (either side) does not — a
 is not a fact of absence (A3). The decision surface stays `crawl_policy_digest`, the `run_id`
 term. No staleness threshold is introduced (A3): `absence_as_of` is published, and «верить ли
 `❌` от марта» is the reader's judgement, not a verdict.
-`SCHEMA_VERSION` 3.26.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
+`SCHEMA_VERSION` 3.27.0 (`corpus_coverage.roots_json`, `cells.absence_as_of` at 3.20.0;
 `corpus_docs.page_map` at 3.21.0 — the page map, from which a chunk's page number is a
 **function**, not a column: a copy would have to be maintained on every chunk-write path and
 one missed path would give a silently wrong page; `corpus_docs.ocr_probe`/`pages_ocr`/
@@ -335,10 +335,16 @@ carries no chunker version — and the price of `policy-6` was **measured** 17.1
 than argued: the whole corpus re-chunked to 253 306 of 253 306 identical chunks, and
 re-embedding changed the ranking on **0** of 15 golden cells (McNemar p=1.0)
 (`2026-11-17-policy6-retrieval.md`; `postgrespro`/`pangolin`, 117 of 132 cells, not re-embedded
-— ≈5 h GPU). STATE `13` —
-`chunk_meta.table_ref`: the durable chunk-set carries the address too, and a file of an older
-STATE is rejected by the version gate (the same rule that made `capture.policy_digest` STATE
-`12`).
+— ≈5 h GPU); `cell_evidence.scope_acceptance` **removed** at 3.27.0 (methodology 0.4.0: the
+per-cell signature is gone, G4 authorizes publication once per report). STATE `14` —
+`chunk_meta.table_ref` (13) plus `capture.space_json` (14): the durable chunk-set carries the
+table address, and the capture carries the **material** of the space it exhausted (policy
+modes + `crawl_config_digest` + crawl semantics version), so a digest drift caused by a changed
+**formula** is not read as a changed **space** (measured 21.11.2026: `012a1f2b` (12.11) →
+`475fb268` (14.11) → `ae1d69f5` (21.11) with unchanged corpus bytes). `NULL` = material not
+recorded (a pre-14 row) — comparison falls back to the digest, so the migration changes no
+verdict. A file of an older STATE is rejected by the version gate (the same rule that made
+`capture.policy_digest` STATE `12`); the move 13 → 14 is `scripts/migrate_state.py`.
 
 ## 6. Crawl scope: declared hosts
 
@@ -368,15 +374,38 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
 - A terminal artifact (document/container) is exempt from **path-prefix only**: it does not
   continue navigation, but SSRF/host-scope/blacklist still apply.
 - **`robots_disallow` is the site's declared boundary, not an incomplete crawl** (owner rule
-  21.11.2026, methodology 0.6.0). `robots.txt` announces what the site does not want walked; a
-  forbidden section is therefore **not** "product material we failed to download", and no
-  hypothesis is built about what is inside it. A root capture is
-  `complete = not (truncated or skipped_documents)` — `_root_capture_complete`
-  (`core/pipeline/corpus.py:1691`) is the single predicate — so a `robots` refusal does not keep
+  21.11.2026, methodology 0.6.0; the `observed` factor below is 0.7.0). `robots.txt` announces
+  what the site does not want walked; a forbidden section is therefore **not** "product material
+  we failed to download", and no hypothesis is built about what is inside it. A root capture is
+  `complete = not incomplete and observed` — `_root_capture_complete`
+  (`core/pipeline/corpus.py:1692`) is the single predicate — where `incomplete = truncated or
+  skipped_documents` and `observed` means at least one page was read (discovery or
+  revalidation) or the site refused by its own `robots`. So a `robots` refusal does not keep
   the root unexhausted, does not make the session incomplete, and does not make an origin
-  unreadable. `bounded` absence (I2d) on such a corpus **is** provable, because the space was
-  declared by the site itself. Incompleteness of what we know about a product is a consequence of
+  unreadable. The `observed` factor was added in 0.7.0: a root that yielded no page and had no
+  `robots` refusal never saw the space, and `complete=1` would attest exhaustion of something
+  nobody looked at (measured 21.11.2026 on `wiki.astralinux.ru/tandocs/`: `pages_fetched=0`,
+  `failed/source_unavailable` on a 403, and the capture was written `complete=1`).
+  `bounded` absence (I2d) on such a corpus **is** provable, because the space was declared by
+  the site itself. Incompleteness of what we know about a product is a consequence of
   **technical failures fetching non-forbidden artifacts** and of nothing else.
+- **A policy skip is reuse, not incompleteness** (owner decision 21.11.2026, methodology
+  0.7.0). The point of `scheduled`/manual refresh is to avoid a redundant crawl where the
+  update cadence is known — not to forget the product. So `crawl_policy_skipped` no longer
+  feeds `truncated_products`/`incomplete_reasons`: the corpus comes from the durable
+  substrate and completeness is decided by the root **captures** (I2d), not by "the network was
+  not touched in this run". The skip stays visible as provenance (`provenance_reasons` →
+  `corpus_coverage.reason`, the root record with `crawl_policy_skipped`, `policy_skips`,
+  `policy_zero_reasons`, `network_mode=deny`). Before 0.7.0 the two were identified, and a
+  fully reused corpus was declared truncated — which is why 149 golden `❌` of
+  `jatoba`/`pangolin` were unreachable in `ru-pg-dbms-145ad66ca3f9`.
+- **The exhausted space is versioned by its material, not only by its digest** (0.7.0,
+  `capture.space_json`, STATE 14). The digest answers "did it match", the material answers
+  "what differed": a changed **crawl formula** (`CRAWL_SEMANTICS`) yields "nothing to compare"
+  (`policy_matched=None`, A3) and does not cancel a completed capture, while a difference
+  **within one semantics** (limits, modes) is still `False`. This is the fix for the measured
+  drift `012a1f2b` (12.11) → `475fb268` (14.11) → `ae1d69f5` (21.11) on unchanged corpus
+  bytes, where each mismatch silently voided a capture that had already happened.
 - **A `robots` refusal stays visible, and a declared manual artifact is the only way past it.**
   The refusal remains in the audit (`blocked`/`partial_blocks`) and in the operator's provision
   worklist (`artifacts_gap`, sourced from `PROVIDABLE_FAILURE_KINDS`,
@@ -392,15 +421,22 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
   fixed before that run — it never rewrites a past run. And it lands regardless of crawl
   schedule/refresh mode: `scheduled` with an unexpired interval, `network_denied`,
   `--refresh offline`, `--refresh frozen` — provisioned bytes still enter the corpus (provision is
-  not network). Non-retroactivity is guaranteed by identity, not by intent: `manual_artifacts_digest`
-  over `(product_id, url, sha256)` is a contract field, so adding or replacing a file is a **new
-  `run_id`**. Measured 21.11.2026 (instrument `scripts/measure_golden_ceiling.py`, run
-  `ru-pg-dbms-145ad66ca3f9`): with `robots` no longer blocking, reachable golden `❌` go 7 → **77**
-  and the agreement ceiling 0.6961 → **0.7735**, making `digital_q_database` the first pilot product
-  whose `bounded` absence is attested. What remains unreachable is **not** `robots`: 149
-  `policy_skipped` (the root was not walked by policy — "we were told not to look" is not "the
-  server refused") and 56 `carrier_missing` (`max_documents` truncation: `postgrespro/docs` 20000,
-  `docs.tantorlabs.ru/tdb` 1500).
+  not network). Non-retroactivity is guaranteed by identity, not by intent:
+  `manual_artifacts_digest` over `(product_id, url, sha256)` is a contract field, so adding or
+  replacing a file is a **new `run_id`**. Measured 21.11.2026 (instrument
+  `scripts/measure_golden_ceiling.py`, run `ru-pg-dbms-145ad66ca3f9`): with `robots` no longer
+  blocking, reachable golden `❌` go 7 → **77** and the agreement ceiling 0.6961 → **0.7735**,
+  making `digital_q_database` the first pilot product whose `bounded` absence is attested. What
+  remained unreachable there was **not** `robots`: 149 `policy_skipped` (the root was not walked
+  by policy — "we were told not to look" is not "the server refused") and 56 `carrier_missing`
+  (`max_documents` truncation: `postgrespro/docs` 20000, `docs.tantorlabs.ru/tdb` 1500).
+  Under 0.7.0 those 149 are no longer a separate class: a policy skip is reuse, so the same run
+  keeps ceiling **0.7735** with all 205 counted `carrier_missing`, while the run that actually
+  refreshed `jatoba`/`pangolin` (`ru-pg-dbms-9c8dd0345f3f`) reaches **226** of 282 golden `❌`
+  and ceiling **0.9381** — the remaining 56 are the two `max_documents` limits and nothing else.
+  Both numbers are re-measured from the primary artifacts (captures in `state.db` + frontier
+  counters in `crawl_sessions.provenance_json`), not from the recorded `roots_json`, which
+  answers the previous formula's question: `measure_golden_ceiling.py --state-db … --run-id …`.
 
 Measured cost of getting this wrong: `edu.postgrespro.ru` produced 563 of 682 items on a root
 that declared only the parent host, while the product documentation root got zero of its own

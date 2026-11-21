@@ -326,7 +326,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 
 **Что публикуется о ширине.** Не preflight, а фаза: `lane_notes` (→ `notes`) называет по
 продукту число объявленных host'ов и предел «одновременно полос не больше N» — когда host'ов
-меньше объявленных полос (`core/pipeline/corpus.py:3754-3760`), — а также расхождение
+меньше объявленных полос (`core/pipeline/corpus.py:3797-3803`), — а также расхождение
 объявления по корням продукта (`core/pipeline/corpus.py:3762`); это факт, а не тихое усечение.
 Ожидаемый критический путь **до** прогона не печатается: он
 считается после, из сеанса, как `wall ≥ max_host (бюджет_host × медиана интервала_host)`
@@ -379,7 +379,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:628`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:629`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:167`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,

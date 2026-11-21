@@ -97,7 +97,7 @@
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
 URL сейчас выражается не пропуском фазы, а zero-source причиной продукта (`ZERO_SOURCE_NO_URLS_ENTRY`,
-`core/pipeline/corpus_coverage.py:421`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
+`core/pipeline/corpus_coverage.py:533`) — это другая ось наблюдения, и подменять одну другой нельзя. Значения
 оставлены в словаре как объявленные, но выдавать их за работающие механизмы нельзя.
 
 **Оси, которые входят в `run_id` (и почему).** `DocumentLevel`, `PdfPipeline`, `PdfDevice`,
@@ -649,7 +649,7 @@ class ProductStatePort(Protocol):
 прогоны). `upsert_*`/`record_*` идемпотентны (`INSERT … ON CONFLICT DO UPDATE`);
 `reconcile_seed_set` **не удаляет** строки: seed, исчезнувший из авторского файла, →
 `disabled` + `retired_at`. Реализация — `store/state_store.py` (`SqliteStateStore`) поверх DDL
-`store/state_sqlite.py` (`STATE_SCHEMA_VERSION = "13"`, `core/store/state_sqlite.py:90`). Схема и семантика — `09` §4.
+`store/state_sqlite.py` (`STATE_SCHEMA_VERSION = "14"`, `core/store/state_sqlite.py:99`). Схема и семантика — `09` §4.
 
 ### 3.11. `ports/crawl_executor.py` — исполнение краула (split)
 
@@ -941,7 +941,7 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:295` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1744`; структура `ProtocolExhaustion` — `core/domain/models.py:1580`;
+`core/domain/models.py:1776`; структура `ProtocolExhaustion` — `core/domain/models.py:1612`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:2847` (`max_retries`), цикл
 `core/pipeline/evaluate.py:3163`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:

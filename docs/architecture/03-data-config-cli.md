@@ -201,8 +201,8 @@ runs/{run_id}/
 ### B.1. Контракт `ports/store.py` → `store/sqlite.py`
 
 Схема §4.4 перенесена из бывшего `core/db.py` (удалён в T1.3) в `store/sqlite.py` (**24** `CREATE TABLE` + `sqlite_sequence` (`AUTOINCREMENT` у `search_log.log_id`) = **25 таблиц** в `sqlite_master`, включая `schema_meta`; 15 объявленных `CREATE INDEX` (в `sqlite_master` их 38 — остальные автоиндексы PK/UNIQUE), 5 триггеров — I4/I6/I7/I13/I18 и `trg_evidence_source_id` (I10/I15); сверено 08.11.2026). Константа `SCHEMA_VERSION`
-= **`3.27.0`** (`core/store/sqlite.py:143`), `STATE_SCHEMA_VERSION` = **`"13"`**
-(`core/store/state_sqlite.py:90`). **Полная история версий и причина каждого bump'а — канонически
+= **`3.27.0`** (`core/store/sqlite.py:153`), `STATE_SCHEMA_VERSION` = **`"14"`**
+(`core/store/state_sqlite.py:99`). **Полная история версий и причина каждого bump'а — канонически
 в `16-runs-schema-boundary.md`** (баннер: 3.13.0 → 3.14.0 гейт вместо аддитивных шимов → … →
 3.26.0), здесь не дублируется: две копии истории расходятся, и тогда неизвестно, какая верна.
 Ниже — только **что в какой таблице** появилось, потому что это нужно для чтения DDL:
@@ -330,11 +330,11 @@ class SqliteStore:
 
 | Версия | Носитель | Значение |
 |---|---|---|
-| `SCHEMA_VERSION` | `runs/{run_id}/cohound.db` | `"3.27.0"` (`core/store/sqlite.py:143`) |
-| `STATE_SCHEMA_VERSION` | `state/{package_id}/state.db` (durable-состояние оператора) | `"13"` (`core/store/state_sqlite.py:90`) |
+| `SCHEMA_VERSION` | `runs/{run_id}/cohound.db` | `"3.27.0"` (`core/store/sqlite.py:153`) |
+| `STATE_SCHEMA_VERSION` | `state/{package_id}/state.db` (durable-состояние оператора) | `"14"` (`core/store/state_sqlite.py:99`) |
 | `EDGE_JOBS_SCHEMA_VERSION` | `edge_jobs.db` (очередь DMZ) | `"1"` (`core/edge/scheduler.py:198`) |
 | `SEAM_SCHEMA_VERSION` | контракт `/v1/*` (`contracts/seam/*.json`); в манифесте — `edge_schema_version` (`DEFAULT_SCHEMA_VERSION`, `core/adapters/remote_gateway.py:54`) | `"1"` (`core/edge/seam_schema.py:68`) |
-| `METHODOLOGY_VERSION` | код (`core/domain/models.py:199`), ярлык пакета обязан ему **равняться** | `"0.6.0"` |
+| `METHODOLOGY_VERSION` | код (`core/domain/models.py:224`), ярлык пакета обязан ему **равняться** | `"0.7.0"` |
 
 #### C.1.1. Что входит в `run_id` (форкает ли прогон идентичность)
 
@@ -1792,9 +1792,9 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | Шаг | Действие | Проверка | Статус |
 |---|---|---|---|
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1213` (`_shims_removed`) |
-| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:155`, `SCHEMA_VERSION` — `core/store/sqlite.py:143`; тот же гейт `tests/selfcheck.py:1213` |
+| 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:155`, `SCHEMA_VERSION` — `core/store/sqlite.py:153`; тот же гейт `tests/selfcheck.py:1213` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1037` (`_import_graph`), вызов `tests/selfcheck.py:375` |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1420` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1452` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется

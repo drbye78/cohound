@@ -46,10 +46,10 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:245`).
 - Блокирующий отказ делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2724`, `core/pipeline/corpus_coverage.py:229-231`, условие 2) —
+  (`core/domain/models.py:2724`, `core/pipeline/corpus_coverage.py:337-339`, условие 2) —
   **пока URL не закрыт объявленным артефактом**: материал, предъявленный артефактом
   (`corpus_docs.origin=manual`), перестаёт делать сеанс неполным (`resolved_manually`,
-  `core/pipeline/corpus_coverage.py:308-327`, сверено 07.11.2026, якорь переставлен
+  `core/pipeline/corpus_coverage.py:416-435`, сверено 07.11.2026, якорь переставлен
   21.11.2026).
 - I2c зависит от **класса отрицания**, а не от полноты краула как таковой
   (`core/domain/invariants.py:293-309`): `explicit` (цитата вендора) и `authoritative`
@@ -85,7 +85,7 @@
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
 намерению: `retain` (`core/pipeline/corpus_ingest.py:1161`) — единственный writer сырых
-байтов, с единственным вызовом (`core/pipeline/corpus.py:2653`, `_commit_local`), в который
+байтов, с единственным вызовом (`core/pipeline/corpus.py:2671`, `_commit_local`), в который
 сходятся оба
 транспорта (локальный и executor).
 
@@ -175,7 +175,7 @@ provide:
 `corpus_docs` на 25.10 не различал происхождение (`core/store/sqlite.py:270-278` — те же
 9 колонок, ни одной про источник). As-built: `origin TEXT NOT NULL DEFAULT 'crawl'` объявлен прямо в DDL
 (`core/store/sqlite.py:269-303`, `origin` — `core/store/sqlite.py:281`); схема при этом не «аддитивно дотянута», а
-версионирована гейтом — текущая **3.27.0** (`core/store/sqlite.py:29-35`, `core/store/sqlite.py:143`), шимов
+версионирована гейтом — текущая **3.27.0** (`core/store/sqlite.py:29-35`, `core/store/sqlite.py:153`), шимов
 `ALTER TABLE` при открытии нет ни одного.
 
 Плюс отдельная audit-таблица (или строка манифеста) `manual_artifacts`:
@@ -191,10 +191,15 @@ provide:
 никто не строит, а материал оттуда добывается только объявленной подачей, расширяющей
 границы знания о продукте для **следующих** прогонов. Отсюда три следствия:
 
-* снятие корня считается как `complete = not (truncated or skipped_documents)`
-  (`_root_capture_complete`, `core/pipeline/corpus.py:1691`) — отказ `robots` в предикат не
-  входит, поэтому `bounded`-отсутствие на таком корпусе **доказуемо**: пространство
-  объявлено самим сайтом;
+* снятие корня считается как `complete = not incomplete and observed`
+  (`_root_capture_complete`, `core/pipeline/corpus.py:1692`), где `incomplete = truncated or
+  skipped_documents`, а `observed` — прочитана хоть одна страница (discovery или
+  ревалидация) либо был отказ по собственной границе сайта. Отказ `robots` в `incomplete`
+  не входит, поэтому `bounded`-отсутствие на таком корпусе **доказуемо**: пространство
+  объявлено самим сайтом; `observed` добавлен 0.7.0 — корень, из которого не прочитано ни
+  страницы и который не отказал по `robots`, исчерпания не удостоверяет (измерено
+  21.11.2026: `pages_fetched=0`, `failed/source_unavailable` на 403, а снятие записано
+  `complete=1`);
 * отказ остаётся аудитом (`blocked`/`partial_blocks`) и рабочим списком подачи
   (`outputs/artifacts_gap.yaml`, набор `PROVIDABLE_FAILURE_KINDS` —
   `core/domain/enums.py:266`, шире блокирующего **намеренно**: сужение вместе с блокирующим
@@ -211,7 +216,7 @@ provide:
 артефактом, оставался `complete=0`. Одно правило было реализовано в двух местах по-разному.
 20.11 сверка была сведена (фронтьер держит адреса, `Frontier.robots_refused_urls`,
 `core/pipeline/crawl_frontier.py:1461`), а 21.11 сам вопрос снят: `robots` больше не
-отнимает полноту, поэтому `_recompute_root_captures` (`core/pipeline/corpus.py:1705`)
+отнимает полноту, поэтому `_recompute_root_captures` (`core/pipeline/corpus.py:1723`)
 переписывать снятие не должен — он публикует только разрез «сколько отказов корня закрыто
 предъявленным материалом» (`CorpusRootCoverage.resolved_manually`). Усечение `max_*` и
 пропуск уровнем `off` подача не снимает — это техническая потеря, а не граница.
@@ -343,7 +348,7 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
-(`core/domain/models.py:1786` — `CrawlSessionProvenance.failed: int`;
+(`core/domain/models.py:1818` — `CrawlSessionProvenance.failed: int`;
 `core/pipeline/report.py:1859-1930` — движки в шапке; `core/pipeline/report.py:2557-2562` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL
@@ -408,7 +413,7 @@ gaps:
 
 **Вместо фазы — связность.** Два прогона уже связуемы, и связь существует:
 `state/{package_id}/state.db` несёт
-`run_lineage.previous_run_id` и `change_class` (`core/store/state_sqlite.py:276-280`; запись —
+`run_lineage.previous_run_id` и `change_class` (`core/store/state_sqlite.py:285-289`; запись —
 `core/pipeline/state_adopt.py:1536,1807`). Прогон N+1, объявивший артефакты, попадает в эту
 цепочку автоматически, а `hound diff` называет смену `manual_artifacts_digest` осью
 расхождения (`core/pipeline/report.py:2903-2957`). Отдельная пометка на артефакте не нужна:

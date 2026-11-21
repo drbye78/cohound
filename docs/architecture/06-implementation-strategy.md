@@ -335,10 +335,10 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W3 — Store — ✅ done
 
-✅ сделано (проверено) — `core/store/sqlite.py:143` (`SCHEMA_VERSION = "3.27.0"`; **24** `CREATE TABLE`,
+✅ сделано (проверено) — `core/store/sqlite.py:153` (`SCHEMA_VERSION = "3.27.0"`; **24** `CREATE TABLE`,
 включая `schema_meta`, + `sqlite_sequence` = 25 таблиц в БД),
-`core/store/state_sqlite.py:90` (`STATE_SCHEMA_VERSION = "13"`),
-`core/store/state_store.py:1617` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
+`core/store/state_sqlite.py:99` (`STATE_SCHEMA_VERSION = "14"`),
+`core/store/state_store.py:1621` (`save_profile_attestation`; производитель — CLI, подписей 0, см. §5.W4).
 
 - `core/store/sqlite.py` — DDL §4.4 + триггеры I4/I6/I7/I13/I18, `SCHEMA_VERSION = "3.27.0"`;
   гейт версии схемы — файл другой версии отвергается, `11` §2.6; свидетельство живости сеанса
@@ -346,7 +346,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 - `core/pipeline/liveness.py` — `owner`/`heartbeat_at`, recovery-on-open (`running` → `interrupted`),
   `Heartbeat` (F1/Д-6).
 - `core/store/state_sqlite.py` — durable per-product состояние (`state/{package_id}/state.db`,
-  `STATE_SCHEMA_VERSION = "13"`): lineage, `previous_run_id`, `profile_attestation`, политика
+  `STATE_SCHEMA_VERSION = "14"`): lineage, `previous_run_id`, `profile_attestation`, политика
   краула/снятия (планы 19/20). Источник
   `--since-run`/класса изменения (09 §4.1).
 - `core/store/sqlite_store.py` — реализация `StorePort`/`GateStore`; батчевые транзакции, WAL.
@@ -359,7 +359,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
 `core/cli/context.py:1702` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
-из CLI (`core/cli/package/commands.py:3001` → `core/store/state_store.py:1617`), команда —
+из CLI (`core/cli/package/commands.py:3001` → `core/store/state_store.py:1621`), команда —
 `hound package profile attest` (`core/cli/package/commands.py:2912`); строк в `profile_attestation`
 в `state.db` — **0**.
 
@@ -558,8 +558,8 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2207` вызывает `_run_serp_contour`
-(def — `core/pipeline/corpus.py:1345`; поиск → допуск → расширение seed-набора **до** дренажа,
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2225` вызывает `_run_serp_contour`
+(def — `core/pipeline/corpus.py:1346`; поиск → допуск → расширение seed-набора **до** дренажа,
 одна сборка), `core/pipeline/search_log.py` (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1553`)
 **не вызывается ни из одного прод-пути**: ссылки только в `core/pipeline/__init__.py` и
@@ -724,8 +724,8 @@ P5), но строка помечена здесь как неактуальна
   (`core/pipeline/crawl_frontier.py:213-216`): иначе число, выведенное из бюджета хоста, делало бы
   `run_id` функцией машины. Число выводится из бюджета (`preflight_extraction_budget`) и
   публикуется в манифесте; в `packages/ru-pg-dbms/run.yaml` ось **намеренно не объявлена**
-  (`packages/ru-pg-dbms/run.yaml:90`), объявлен только `extract_max_tasks_per_child: 25`
-  (`packages/ru-pg-dbms/run.yaml:112`); `metrics.json:resources.scheduling` прогона
+  (`packages/ru-pg-dbms/run.yaml:91`), объявлен только `extract_max_tasks_per_child: 25`
+  (`packages/ru-pg-dbms/run.yaml:113`); `metrics.json:resources.scheduling` прогона
   `ru-pg-dbms-c2e7b860ac17` даёт `extract_workers: null`, `source: "declared"`.
   **Память (замер, не оценка).** «Пол» docling-воркера ≈ **1.1 GB** резидентных после
   `malloc_trim` (`core/util/memory.py`: 1679 → 1084 MB, 1480 → 1122 MB), плюс веса и страница

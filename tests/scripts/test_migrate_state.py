@@ -1,29 +1,26 @@
-"""Тесты явного переноса ``state.db`` 12 → 13 (``scripts/migrate_state.py``).
+"""Тесты явного переноса ``state.db`` 13 → 14 (``scripts/migrate_state.py``).
 
 Штатное открытие (:func:`core.store.state_sqlite.connect_state`) файл другой версии
 **отвергает** — миграций при открытии нет (решение владельца 01.11.2026). Перенос делает
 отдельный инструмент, и здесь проверяется то, ради чего он существует:
 
-* **результат, а не действие**: схема после переноса структурно равна чистому v13 —
+* **результат, а не действие**: схема после переноса структурно равна чистому v14 —
   сравнением тем же :func:`scripts.migrate_state.compare_signatures`, которым инструмент
   печатает дельту (второго сравнения в тесте нет намеренно: два похожих сравнения
   разошлись бы на первой правке и пропустили бы ровно то, что должны ловить);
 * **данные переживают перенос** — проверяется содержимое строк, а не только их число:
   «строк столько же» верно и тогда, когда строки другие;
-* **отказы**: чужая версия, неизвестный объект, несогласованный файл (версия 12, а
+* **отказы**: чужая версия, неизвестный объект, несогласованный файл (версия 13, а
   колонка уже есть), занятый путь бэкапа — код ``2`` **до** записи;
 * **провал проверки не подменяет цель** — код ``1``, файл прежний (шов
   :func:`scripts.migrate_state.verify_migrated_copy` подменён);
 * **``--dry-run`` ничего не пишет** — ни копии, ни бэкапа, ни байта в самом файле.
 
-Фикстура v12 собирается из ``STATE_DDL`` **без** объявления ``chunk_meta.table_ref``: это
-и есть определение известного состояния v12 (v13 минус ровно одна колонка). Способ
-``ALTER TABLE chunk_meta DROP COLUMN table_ref`` на чистом v13 **не работает** в этом
-``.venv`` (SQLite 3.50.4): переписывая объявление таблицы, он оставляет запятую перед
-закрывающей скобкой после блока комментариев, и файл отвечает
-``error in table chunk_meta after drop column: incomplete input``. Поэтому фикстура
-строится из текста DDL, а не из готового файла; отдельный тест ниже сторожит, что
-удалённая колонка действительно единственная.
+Фикстура v13 собирается из ``STATE_DDL`` **без** объявления ``capture.space_json``: это
+и есть определение известного состояния v13 (v14 минус ровно одна колонка). Фикстура
+строится из текста DDL, а не из готового файла: объявление колонки — единственное
+отличие, и удаление строки из текста делает это отличие явным и проверяемым; отдельный
+тест ниже сторожит, что удалённая колонка действительно единственная.
 
 Сеть не используется, ``state.db`` стенда не трогается: всё в ``tmp_path``.
 """
@@ -54,19 +51,22 @@ def _load_module():
 
 migrate_state = _load_module()
 
-#: Колонка, которой нет в v12 и которая появляется в v13.
-ADDED_COLUMN = "table_ref"
+#: Колонка, которой нет в v13 и которая появляется в v14.
+ADDED_COLUMN = "space_json"
 
 
 # ------------------------------------------------------------------------ фикстуры
 
 
-def _v12_ddl() -> str:
-    """``STATE_DDL`` без объявления ``chunk_meta.table_ref`` — схема v12.
+def _v13_ddl() -> str:
+    """``STATE_DDL`` без объявления ``capture.space_json`` — схема v13.
 
-    Удаляется и блок комментариев перед колонкой (он документирует именно её), а у
-    предыдущей колонки снимается запятая: ``char_end INTEGER,`` перед ``)`` — синтаксис,
-    которого SQLite не принимает.
+    Удаляется объявление колонки и блок комментариев перед ним, а у предыдущей колонки
+    снимается запятая: колонка объявлена последней, и ``...,`` перед ``)`` — синтаксис,
+    которого SQLite не принимает. Порядок колонок важен: перенос делает
+    ``ALTER TABLE ... ADD COLUMN`` (колонка дописывается в конец), поэтому объявление в
+    DDL тоже стоит последним — иначе структурная сверка мигрированного файла с чистым
+    v14 не сошлась бы на порядке.
     """
     lines = STATE_DDL.splitlines()
     index = next(
@@ -98,11 +98,11 @@ def _build(path: Path, ddl: str, version: str) -> Path:
     return path
 
 
-def _v12_fixture(path: Path, version: str = "12") -> Path:
-    return _build(path, _v12_ddl(), version)
+def _v13_fixture(path: Path, version: str = "13") -> Path:
+    return _build(path, _v13_ddl(), version)
 
 
-def _v13_fixture(path: Path) -> Path:
+def _v14_fixture(path: Path) -> Path:
     conn = connect_state(path)
     conn.close()
     return path
@@ -150,7 +150,7 @@ def _seed(path: Path) -> dict[str, tuple]:
 def _snapshot(path: Path) -> dict[str, list[dict]]:
     """Полное содержимое затронутых таблиц — сравнение по значению, не по числу строк.
 
-    Колонка ``table_ref`` из снимка убирается: её добавляет перенос, и она обязана быть
+    Колонка ``space_json`` из снимка убирается: её добавляет перенос, и она обязана быть
     ``NULL`` (это проверяет отдельный тест) — иначе сравнение «до/после» сравнивало бы
     строки разной ширины и падало бы на самой правильной миграции.
     """
@@ -181,25 +181,25 @@ def _hash(path: Path) -> str:
 
 
 def test_fixture_removes_exactly_the_added_column() -> None:
-    """Сторож фикстуры: v12 отличается от v13 **одной** колонкой, иначе тесты врут."""
-    reference = _v12_ddl()
+    """Сторож фикстуры: v13 отличается от v14 **одной** колонкой, иначе тесты врут."""
+    reference = _v13_ddl()
     assert f"{ADDED_COLUMN} " not in reference
-    assert "chunk_meta" in reference
+    assert "CREATE TABLE IF NOT EXISTS capture (" in reference
     # Вырезано ровно объявление колонки, остальной DDL не тронут.
     removed = len(STATE_DDL.splitlines()) - len(reference.splitlines())
-    assert removed == 4  # три строки комментария + объявление
+    assert removed == 7  # шесть строк комментария + объявление
 
 
 # -------------------------------------------------------------------- успешный перенос
 
 
-def test_migration_makes_schema_equal_to_clean_v13(tmp_path: Path) -> None:
-    """Схема после переноса структурно равна чистому v13 (тем же сравнением, что в приборе)."""
-    db = _v12_fixture(tmp_path / "state.db")
+def test_migration_makes_schema_equal_to_clean_v14(tmp_path: Path) -> None:
+    """Схема после переноса структурно равна чистому v14 (тем же сравнением, что в приборе)."""
+    db = _v13_fixture(tmp_path / "state.db")
 
     assert migrate_state.main(["--db", str(db), "--apply", "--no-backup"]) == 0
 
-    reference = _v13_fixture(tmp_path / "reference.db")
+    reference = _v14_fixture(tmp_path / "reference.db")
     actual_conn = migrate_state._connect_ro(db)
     reference_conn = migrate_state._connect_ro(reference)
     try:
@@ -215,9 +215,9 @@ def test_migration_makes_schema_equal_to_clean_v13(tmp_path: Path) -> None:
         reference_conn.close()
 
 
-def test_migration_preserves_rows_and_leaves_table_ref_null(tmp_path: Path) -> None:
-    """Число строк сохранено, ``table_ref IS NULL`` у всех кусков, файл цел."""
-    db = _v12_fixture(tmp_path / "state.db")
+def test_migration_preserves_rows_and_leaves_space_json_null(tmp_path: Path) -> None:
+    """Число строк сохранено, ``space_json IS NULL`` у всех снятий, файл цел."""
+    db = _v13_fixture(tmp_path / "state.db")
     _seed(db)
     before = migrate_state.table_row_counts(migrate_state._connect_ro(db))
 
@@ -231,7 +231,7 @@ def test_migration_preserves_rows_and_leaves_table_ref_null(tmp_path: Path) -> N
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert (
             conn.execute(
-                "SELECT count(*) FROM chunk_meta WHERE table_ref IS NOT NULL"
+                "SELECT count(*) FROM capture WHERE space_json IS NOT NULL"
             ).fetchone()[0]
             == 0
         )
@@ -241,7 +241,7 @@ def test_migration_preserves_rows_and_leaves_table_ref_null(tmp_path: Path) -> N
 
 def test_row_contents_survive_the_migration(tmp_path: Path) -> None:
     """Данные переживают перенос по значению: «строк столько же» верно и для других строк."""
-    db = _v12_fixture(tmp_path / "state.db")
+    db = _v13_fixture(tmp_path / "state.db")
     before = _seed(db)
 
     assert migrate_state.main(["--db", str(db), "--apply", "--no-backup"]) == 0
@@ -250,13 +250,13 @@ def test_row_contents_survive_the_migration(tmp_path: Path) -> None:
 
 
 def test_backup_keeps_the_source_version(tmp_path: Path) -> None:
-    """Бэкап по умолчанию: рядом лежит копия исходной версии, и она читается как v12."""
-    db = _v12_fixture(tmp_path / "state.db")
+    """Бэкап по умолчанию: рядом лежит копия исходной версии, и она читается как v13."""
+    db = _v13_fixture(tmp_path / "state.db")
     _seed(db)
 
     assert migrate_state.main(["--db", str(db), "--apply"]) == 0
 
-    backup = tmp_path / "state.db.v12"
+    backup = tmp_path / "state.db.v13"
     assert backup.is_file()
     conn = sqlite3.connect(str(backup))
     try:
@@ -264,10 +264,10 @@ def test_backup_keeps_the_source_version(tmp_path: Path) -> None:
             conn.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            == "12"
+            == "13"
         )
         assert ADDED_COLUMN not in {
-            row[1] for row in conn.execute("PRAGMA table_info(chunk_meta)")
+            row[1] for row in conn.execute("PRAGMA table_info(capture)")
         }
     finally:
         conn.close()
@@ -275,7 +275,7 @@ def test_backup_keeps_the_source_version(tmp_path: Path) -> None:
 
 def test_migrated_file_opens_through_the_standard_gate(tmp_path: Path) -> None:
     """Штатное открытие мигрированного файла не бросает ``SchemaVersionMismatch``."""
-    db = _v12_fixture(tmp_path / "state.db")
+    db = _v13_fixture(tmp_path / "state.db")
     assert migrate_state.main(["--db", str(db), "--apply", "--no-backup"]) == 0
 
     conn = connect_state(db)  # не должно бросить
@@ -296,18 +296,18 @@ def test_migrated_file_opens_through_the_standard_gate(tmp_path: Path) -> None:
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     """``--dry-run`` (режим по умолчанию) не создаёт ни копии, ни бэкапа и не меняет файл.
 
-    Пин стоит на файлах переноса: ``state.db.v12`` и рабочей копии. Read-only открытие
+    Пин стоит на файлах переноса: ``state.db.v13`` и рабочей копии. Read-only открытие
     WAL-БД само по себе создаёт ``-shm``/пустой ``-wal`` (восстановление wal-index, как у
     любого read-only читателя репозитория) — это не запись в ``state.db``, и хеш файла
     ниже это подтверждает.
     """
-    db = _v12_fixture(tmp_path / "state.db")
+    db = _v13_fixture(tmp_path / "state.db")
     before = _hash(db)
 
     assert migrate_state.main(["--db", str(db)]) == 0
 
     assert _hash(db) == before
-    assert not (tmp_path / "state.db.v12").exists()
+    assert not (tmp_path / "state.db.v13").exists()
     assert not list(tmp_path.glob(".state.db.migrating-*"))
 
 
@@ -317,23 +317,23 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
 def test_other_version_is_refused_with_the_supported_pair(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Версия 11 — отказ с кодом 2; текст называет поддерживаемую пару ``12 → 13``."""
-    db = _v12_fixture(tmp_path / "state.db", version="11")
+    """Версия 12 — отказ с кодом 2; текст называет поддерживаемую пару ``13 → 14``."""
+    db = _v13_fixture(tmp_path / "state.db", version="12")
     before = _hash(db)
 
     assert migrate_state.main(["--db", str(db), "--apply"]) == 2
 
     captured = capsys.readouterr()
-    assert "12 → 13" in captured.out
-    assert "'11'" in captured.out
+    assert "13 → 14" in captured.out
+    assert "'12'" in captured.out
     assert _hash(db) == before
 
 
 def test_unknown_object_is_refused_by_name(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Объект, которого нет в чистом v13, — отказ; имя объекта в сообщении."""
-    db = _v12_fixture(tmp_path / "state.db")
+    """Объект, которого нет в чистом v14, — отказ; имя объекта в сообщении."""
+    db = _v13_fixture(tmp_path / "state.db")
     conn = sqlite3.connect(str(db))
     try:
         conn.execute("CREATE TABLE foreign_shim (x TEXT)")
@@ -349,14 +349,14 @@ def test_unknown_object_is_refused_by_name(
     assert _hash(db) == before
 
 
-def test_version_12_with_the_column_already_present_is_refused(
+def test_version_13_with_the_column_already_present_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Версия 12, а ``table_ref`` уже есть — несогласованный файл, а не «догоним молча»."""
-    db = _v13_fixture(tmp_path / "state.db")
+    """Версия 13, а ``space_json`` уже есть — несогласованный файл, а не «догоним молча»."""
+    db = _v14_fixture(tmp_path / "state.db")
     conn = sqlite3.connect(str(db))
     try:
-        conn.execute("UPDATE schema_meta SET value = '12' WHERE key = 'schema_version'")
+        conn.execute("UPDATE schema_meta SET value = '13' WHERE key = 'schema_version'")
         conn.commit()
     finally:
         conn.close()
@@ -365,7 +365,7 @@ def test_version_12_with_the_column_already_present_is_refused(
     assert migrate_state.main(["--db", str(db), "--apply"]) == 2
 
     captured = capsys.readouterr()
-    assert "table_ref" in captured.out
+    assert "space_json" in captured.out
     assert "уже есть" in captured.out
     assert _hash(db) == before
 
@@ -434,8 +434,8 @@ def test_occupied_backup_path_needs_force(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Занятый путь бэкапа — отказ без ``--force`` и работа с ним."""
-    db = _v12_fixture(tmp_path / "state.db")
-    backup = tmp_path / "state.db.v12"
+    db = _v13_fixture(tmp_path / "state.db")
+    backup = tmp_path / "state.db.v13"
     backup.write_bytes(b"not a database")
     before = _hash(db)
 
@@ -452,7 +452,7 @@ def test_occupied_backup_path_needs_force(
             conn.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            == "12"
+            == "13"
         )
     finally:
         conn.close()
@@ -466,7 +466,7 @@ def test_failed_verification_does_not_replace_the_target(
     Подменяется именно шов проверки: инструмент обязан **спросить** результат, а не
     объявить его сам.
     """
-    db = _v12_fixture(tmp_path / "state.db")
+    db = _v13_fixture(tmp_path / "state.db")
     _seed(db)
     before = _hash(db)
 
@@ -486,14 +486,14 @@ def test_failed_verification_does_not_replace_the_target(
 
 
 def test_already_current_file_is_left_byte_identical(tmp_path: Path) -> None:
-    """Версия 13 — код 0 и ни одного изменённого байта."""
-    db = _v13_fixture(tmp_path / "state.db")
+    """Версия 14 — код 0 и ни одного изменённого байта."""
+    db = _v14_fixture(tmp_path / "state.db")
     before = _hash(db)
 
     assert migrate_state.main(["--db", str(db), "--apply"]) == 0
 
     assert _hash(db) == before
-    assert not (tmp_path / "state.db.v12").exists()
+    assert not (tmp_path / "state.db.v13").exists()
 
 
 if __name__ == "__main__":  # pragma: no cover

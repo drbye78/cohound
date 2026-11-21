@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -37,6 +38,7 @@ def _root_coverages(
     captures: Iterable[CaptureRow],
     declared_space_digest: str | None = None,
     resolved_manually_by_root: Mapping[str, int] | None = None,
+    declared_space_material: Mapping[str, Any] | None = None,
 ) -> list[CorpusRootCoverage]:
     """Снятия объявленных корней продукта: по одному блоку на корень (план 20 §11.2).
 
@@ -97,8 +99,8 @@ def _root_coverages(
         key = snapshot_url_key(capture.root_url)
         current = newest.get(key)
         if current is None or _capture_rank(
-            capture, declared_space_digest
-        ) > _capture_rank(current, declared_space_digest):
+            capture, declared_space_digest, declared_space_material
+        ) > _capture_rank(current, declared_space_digest, declared_space_material):
             newest[key] = capture
     declared: dict[str, str] = {}
     for raw in declared_roots:
@@ -111,8 +113,15 @@ def _root_coverages(
         chosen = newest.get(key)
         capture_policy = None if chosen is None else chosen.policy_digest
         policy_matched: bool | None = None
-        if declared_space_digest and capture_policy:
-            policy_matched = declared_space_digest == capture_policy
+        if chosen is not None:
+            # Пространство сверяется по материалу, когда он записан; ``None`` — «неизвестно»
+            # (снятие прежней схемы без материала и разошедшийся отпечаток).
+            policy_matched = space_attests(
+                capture_material=parse_space_material(chosen.space_json),
+                declared_material=declared_space_material,
+                capture_digest=chosen.policy_digest,
+                declared_digest=declared_space_digest,
+            )
         complete = False if chosen is None else bool(chosen.complete)
         if policy_matched is False:
             # Обход шёл в другом пространстве (другие режимы/лимиты): исчерпание одного
@@ -133,9 +142,94 @@ def _root_coverages(
     return roots
 
 
+def encode_space_material(material: Mapping[str, Any] | None) -> str | None:
+    """Материал пространства → строка для ``capture.space_json`` (``None`` — не записан).
+
+    Сортировка ключей и отсутствие пробелов: сравнение материалов идёт по JSON, и две
+    записи одного пространства обязаны совпасть **байт-в-байт**, иначе «то же
+    пространство» зависело бы от порядка сборки словаря.
+    """
+    if material is None:
+        return None
+    return json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def parse_space_material(raw: str | None) -> dict[str, Any] | None:
+    """Строка ``capture.space_json`` → материал; ``None`` — материала нет или он испорчен.
+
+    Испорченное значение читается как **отсутствие** материала, а не как пустое
+    пространство: снятие, чей материал не разбирается, сравнивается по отпечатку — то
+    есть ровно так, как до появления материала. Иначе битая строка превратилась бы в
+    утверждение «пространство другое».
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def space_attests(
+    *,
+    capture_material: Mapping[str, Any] | None,
+    declared_material: Mapping[str, Any] | None,
+    capture_digest: str | None,
+    declared_digest: str | None,
+) -> bool | None:
+    """Удостоверяет ли снятие **объявленное** пространство: ``True``/``False``/``None``.
+
+    ``None`` — «неизвестно» (A3): отсутствие данных не выдаётся ни за совпадение, ни за
+    расхождение. Так читается, например, снятие, чей материал не записан (строка прежней
+    схемы) и чей отпечаток не совпал: неизвестно, разошлись ли лимиты или сменилась
+    формула, по которой отпечаток считался.
+
+    Когда материал есть у **обеих** сторон, решение принимается по нему, а не по хешу:
+
+    1. набор объявленных режимов разошёлся ⇒ ``False`` — это другое пространство, и
+       видно, какое именно;
+    2. ``crawl_config_digest`` совпал ⇒ ``True`` (лимиты и версия семантики обхода равны —
+       они входят в этот отпечаток);
+    3. отпечаток разошёлся, но **версия семантики обхода** разная ⇒ ``None``: правила
+       обхода изменились, отпечатки несравнимы, и объявлять по ним другое пространство
+       значило бы обесценивать состоявшееся снятие из-за правки формулы (измерено
+       21.11.2026: три отпечатка за десять дней без изменения байтов корпуса);
+    4. семантика та же, отпечаток другой ⇒ ``False``: при тех же правилах разошлись
+       лимиты, то есть пространство действительно другое.
+
+    Без материала хотя бы у одной стороны остаётся прежнее правило: оба отпечатка
+    известны и равны ⇒ ``True``, известны и различны ⇒ ``False``, хоть один неизвестен ⇒
+    ``None``. Перенос данных на схему 14 поэтому **не меняет** ни одного вердикта: у
+    перенесённых строк материала нет по построению.
+    """
+    if capture_material is not None and declared_material is not None:
+        if capture_material.get("crawl_space") != declared_material.get("crawl_space"):
+            return False
+        if (
+            capture_material.get("crawl_config_digest")
+            == declared_material.get("crawl_config_digest")
+        ):
+            return True
+        capture_semantics = capture_material.get("semantics")
+        declared_semantics = declared_material.get("semantics")
+        if (
+            capture_semantics is not None
+            and declared_semantics is not None
+            and capture_semantics != declared_semantics
+        ):
+            return None
+        return False
+    if declared_digest is None or capture_digest is None:
+        return None
+    return capture_digest == declared_digest
+
+
 def _attests_declared_space(
-    capture: CaptureRow, declared_space_digest: str | None
-) -> bool:
+    capture: CaptureRow,
+    declared_space_digest: str | None,
+    declared_space_material: Mapping[str, Any] | None = None,
+) -> bool | None:
     """Может ли снятие удостоверить **объявленное** пространство прогона.
 
     Носитель ``bounded ❌`` — исчерпанный обход пространства, поэтому полное снятие из
@@ -143,17 +237,25 @@ def _attests_declared_space(
     одного не удостоверяет другое. ``None`` с любой стороны — «неизвестно», и это не
     блокирует (A3: отсутствие данных — не факт несовпадения); решает только наблюдённое
     расхождение.
+
+    Сверка идёт по **материалу** пространства, когда он записан у обеих сторон, и по
+    отпечатку — иначе (:func:`space_attests`). Снятие, чей обход не был исчерпан, не
+    удостоверяет ничего независимо от материала.
     """
     if not capture.complete:
         return False
-    capture_policy = capture.policy_digest
-    if declared_space_digest is None or capture_policy is None:
-        return True
-    return capture_policy == declared_space_digest
+    return space_attests(
+        capture_material=parse_space_material(capture.space_json),
+        declared_material=declared_space_material,
+        capture_digest=capture.policy_digest,
+        declared_digest=declared_space_digest,
+    )
 
 
 def _capture_rank(
-    capture: CaptureRow, declared_space_digest: str | None = None
+    capture: CaptureRow,
+    declared_space_digest: str | None = None,
+    declared_space_material: Mapping[str, Any] | None = None,
 ) -> tuple[int, int, str, str, str]:
     """Порядок снятий для выбора удостоверяющего: сначала «может удостоверить».
 
@@ -183,7 +285,12 @@ def _capture_rank(
     (:func:`_root_coverages`), потому что явный отзыв обязан побеждать любой приоритет.
     """
     return (
-        1 if _attests_declared_space(capture, declared_space_digest) else 0,
+        1
+        if _attests_declared_space(
+            capture, declared_space_digest, declared_space_material
+        )
+        is not False
+        else 0,
         1 if capture.complete else 0,
         str(capture.finished_at or ""),
         str(capture.started_at or ""),
@@ -200,6 +307,7 @@ def derive_corpus_coverage(
     declared_roots: Iterable[str] = (),
     captures: Iterable[CaptureRow] = (),
     declared_space_digest: str | None = None,
+    declared_space_material: Mapping[str, Any] | None = None,
     manual_urls: Iterable[str] = (),
     partial_docs: Iterable[str] = (),
     resolved_manually_by_root: Mapping[str, int] | None = None,
@@ -390,7 +498,11 @@ def derive_corpus_coverage(
     # Снятие выбирается здесь же: один расчёт на два представления (``roots`` и
     # ``complete``) — второго предиката нет.
     roots = _root_coverages(
-        declared_roots, captures, declared_space_digest, resolved_manually_by_root
+        declared_roots,
+        captures,
+        declared_space_digest,
+        resolved_manually_by_root,
+        declared_space_material,
     )
     roots_ok = bool(roots) and all(root.complete for root in roots)
     # Сеансовые условия действуют, только когда сеанс **есть** (есть элементы): у прохода
@@ -607,9 +719,11 @@ def _persist_corpus_coverage(
     partial_docs: Mapping[str, Iterable[str]] | None = None,
     resolved_manually_by_root: Mapping[str, Mapping[str, int]] | None = None,
     incomplete_reasons: Mapping[str, str] | None = None,
+    provenance_reasons: Mapping[str, str] | None = None,
     declared_roots: Mapping[str, Iterable[str]] | None = None,
     captures: Mapping[str, Iterable[CaptureRow]] | None = None,
     declared_space_digest: str | None = None,
+    declared_space_material: Mapping[str, Any] | None = None,
     skip_products: Iterable[str] | None = None,
 ) -> dict[str, CorpusCoverage]:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
@@ -659,6 +773,12 @@ def _persist_corpus_coverage(
     :data:`ONLY_FAILED_REPAIR_REASON`. Такая строка получает ``complete=False`` и названную
     причину: иначе ремонт одного URL объявлял бы покрытие полным, а ``❌`` публиковался бы
     на корпусе, который в этом прогоне не наблюдался. Пустая карта — поведение прежнее.
+
+    ``provenance_reasons`` — ``product_id → машинный токен`` **без влияния на**
+    ``complete``: причина называет решение прогона, а не неполноту корпуса. Производитель —
+    пропуск политикой (:data:`CRAWL_POLICY_SKIPPED_REASON`): расписание решает **когда**
+    обновлять, а не **что** исчерпано, поэтому переиспользованный корпус остаётся полным,
+    а причина остаётся видимой. Заполняется только там, где ``reason`` ещё не назван.
 
     ``declared_roots`` — ``product_id → [объявленный корень]``, ``captures`` —
     ``product_id → [снятие]`` (``state.iter_captures``). Пара — **носитель полноты**
@@ -719,6 +839,9 @@ def _persist_corpus_coverage(
             captures=captures_by_product.get(product_id, ()),
             # Сверка удостоверяемого пространства снятия с объявленным (I2d §11.2).
             declared_space_digest=declared_space_digest,
+            # Материал того же пространства: по нему расхождение отпечатков объясняется
+            # (смена формулы обхода ≠ смена лимитов), а не обесценивает снятие целиком.
+            declared_space_material=declared_space_material,
             # 13-manual-artifacts §3.3: URL, чей материал предъявлен артефактом.
             manual_urls=(resolved_manually or {}).get(product_id, ()),
             # Тот же факт разрезом по корню — видимость подачи в блоке ``roots``.
@@ -742,6 +865,13 @@ def _persist_corpus_coverage(
             coverage = coverage.model_copy(
                 update={"complete": False, "reason": token}
             )
+        # Провенанс **без** влияния на ``complete``: пропуск политики объясняет, почему
+        # корень в этом прогоне не обходился, но полноту решают снятия (I2d). Раньше это
+        # шло через ``incomplete_reasons`` и обнуляло ``complete`` — то есть расписание
+        # объявляло корпус неполным, хотя он переиспользован целиком.
+        provenance = (provenance_reasons or {}).get(product_id)
+        if provenance and coverage.reason is None:
+            coverage = coverage.model_copy(update={"reason": provenance})
         store.save_corpus_coverage(run_id, coverage)
         written[product_id] = coverage
     return written

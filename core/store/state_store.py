@@ -335,6 +335,7 @@ _CAPTURE_COLUMNS = (
     "coverage_digest",
     "doc_set_digest",
     "policy_digest",
+    "space_json",
     "observed_how",
     "actor",
 )
@@ -349,7 +350,10 @@ _CAPTURE_UPSERT = (
     "complete = excluded.complete, "
     "coverage_digest = COALESCE(excluded.coverage_digest, capture.coverage_digest), "
     "doc_set_digest = COALESCE(excluded.doc_set_digest, capture.doc_set_digest), "
-    "policy_digest = COALESCE(excluded.policy_digest, capture.policy_digest)"
+    "policy_digest = COALESCE(excluded.policy_digest, capture.policy_digest), "
+    # Материал пространства дозаписывается, но не стирается: писатель без него (перенос
+    # строки прежней схемы) не должен обнулить объяснение расхождения отпечатков.
+    "space_json = COALESCE(excluded.space_json, capture.space_json)"
 )
 
 #: Колонки ``container_state`` в порядке записи (кроме составного ключа
@@ -1847,6 +1851,7 @@ class SqliteStateStore:
             coverage_digest=row["coverage_digest"],
             doc_set_digest=row["doc_set_digest"],
             policy_digest=row["policy_digest"],
+            space_json=row["space_json"],
             observed_how=str(row["observed_how"]),
             actor=row["actor"],
             superseded_by=row["superseded_by"],

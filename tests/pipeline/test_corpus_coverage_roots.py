@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 
 import pytest
@@ -975,3 +976,176 @@ def test_unknown_strengths_are_not_applicable(strength: str) -> None:
     assert check_absence_dated(
         denial_strength=strength, cited_observations=[], roots=[]
     ) == (True, None, [])
+
+# --------------------------------------------------------------------------- #
+# 0.7.0: материал пространства — смена формулы обхода не выдаёт себя за смену
+#        пространства (``capture.space_json``, STATE 14)
+# --------------------------------------------------------------------------- #
+
+
+def _material(*, config: str | None, semantics: str | None, mode: str = "auto") -> dict:
+    return {
+        "crawl_space": [[PRODUCT, "root", "docs.test", "/p1", mode]],
+        "crawl_config_digest": config,
+        "semantics": semantics,
+    }
+
+
+def test_space_material_equal_attests_even_without_digest() -> None:
+    """Одинаковый материал — одно пространство, даже если отпечатков нет вовсе."""
+    from core.pipeline.corpus_coverage import space_attests
+
+    assert (
+        space_attests(
+            capture_material=_material(config="c1", semantics="crawl-4"),
+            declared_material=_material(config="c1", semantics="crawl-4"),
+            capture_digest=None,
+            declared_digest=None,
+        )
+        is True
+    )
+
+
+def test_space_material_different_modes_is_another_space() -> None:
+    """Разошлись объявленные режимы — это другое пространство, и видно какое."""
+    from core.pipeline.corpus_coverage import space_attests
+
+    assert (
+        space_attests(
+            capture_material=_material(config="c1", semantics="crawl-4", mode="auto"),
+            declared_material=_material(
+                config="c1", semantics="crawl-4", mode="scheduled"
+            ),
+            capture_digest="d1",
+            declared_digest="d1",
+        )
+        is False
+    )
+
+
+def test_space_material_formula_change_is_unknown_not_a_difference() -> None:
+    """Сменилась версия семантики обхода — сравнить нечем (A3), а не «другое пространство».
+
+    Измерено 21.11.2026: отпечаток дрейфовал ``012a1f2b`` (12.11) → ``475fb268`` (14.11) →
+    ``ae1d69f5`` (21.11) без изменения байтов корпуса, и каждое расхождение обнуляло
+    состоявшееся снятие.
+    """
+    from core.pipeline.corpus_coverage import space_attests
+
+    assert (
+        space_attests(
+            capture_material=_material(config="c-old", semantics="crawl-3"),
+            declared_material=_material(config="c-new", semantics="crawl-4"),
+            capture_digest="012a1f2b",
+            declared_digest="ae1d69f5",
+        )
+        is None
+    )
+
+
+def test_space_material_limit_change_within_semantics_is_a_difference() -> None:
+    """Те же правила обхода, другие лимиты — пространство действительно другое."""
+    from core.pipeline.corpus_coverage import space_attests
+
+    assert (
+        space_attests(
+            capture_material=_material(config="c-old", semantics="crawl-4"),
+            declared_material=_material(config="c-new", semantics="crawl-4"),
+            capture_digest="d-old",
+            declared_digest="d-new",
+        )
+        is False
+    )
+
+
+def test_legacy_capture_without_material_compares_by_digest() -> None:
+    """Строка до схемы 14: материала нет — правило прежнее, перенос ничего не меняет."""
+    from core.pipeline.corpus_coverage import space_attests
+
+    assert (
+        space_attests(
+            capture_material=None,
+            declared_material=_material(config="c1", semantics="crawl-4"),
+            capture_digest="same",
+            declared_digest="same",
+        )
+        is True
+    )
+    assert (
+        space_attests(
+            capture_material=None,
+            declared_material=_material(config="c1", semantics="crawl-4"),
+            capture_digest="old",
+            declared_digest="new",
+        )
+        is False
+    )
+    assert (
+        space_attests(
+            capture_material=None,
+            declared_material=_material(config="c1", semantics="crawl-4"),
+            capture_digest=None,
+            declared_digest="new",
+        )
+        is None
+    )
+
+
+def test_broken_space_json_reads_as_absent_material() -> None:
+    """Испорченная строка — «материала нет», а не «пространство другое»."""
+    from core.pipeline.corpus_coverage import parse_space_material
+
+    assert parse_space_material("") is None
+    assert parse_space_material("{не json") is None
+    assert parse_space_material('["не словарь"]') is None
+    assert parse_space_material('{"a": 1}') == {"a": 1}
+
+
+def test_capture_material_keeps_root_complete_across_formula_change() -> None:
+    """Сквозь покрытие: расхождение отпечатков из-за формулы не обнуляет ``complete``."""
+    from core.pipeline.corpus_coverage import encode_space_material
+
+    capture = dataclasses.replace(
+        _capture(policy_digest="d-old"),
+        space_json=encode_space_material(
+            _material(config="c-old", semantics="crawl-3")
+        ),
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[capture],
+        declared_space_digest="d-new",
+        declared_space_material=_material(config="c-new", semantics="crawl-4"),
+    )
+    assert coverage.roots[0].complete is True
+    assert coverage.roots[0].policy_matched is None
+    assert coverage.complete is True
+
+
+def test_capture_material_limit_change_zeroes_root_complete() -> None:
+    """Сквозь покрытие: те же правила, другие лимиты — носителя нет."""
+    from core.pipeline.corpus_coverage import encode_space_material
+
+    capture = dataclasses.replace(
+        _capture(policy_digest="d-old"),
+        space_json=encode_space_material(
+            _material(config="c-old", semantics="crawl-4")
+        ),
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[capture],
+        declared_space_digest="d-new",
+        declared_space_material=_material(config="c-new", semantics="crawl-4"),
+    )
+    assert coverage.roots[0].policy_matched is False
+    assert coverage.roots[0].complete is False
+    assert coverage.complete is False

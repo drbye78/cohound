@@ -46,7 +46,12 @@ from core.domain.enums import (
     CrawlPolicyScopeKind,
 )
 from core.domain.models import SeedsConfig
-from core.pipeline.digests import crawl_policy_digest, crawl_space_digest
+from core.pipeline.crawl_frontier import CRAWL_SEMANTICS
+from core.pipeline.digests import (
+    crawl_policy_digest,
+    crawl_space_digest,
+    crawl_space_material,
+)
 from core.ports.state import CrawlPolicyRow
 from core.util.rate_limit import normalize_host
 
@@ -278,6 +283,11 @@ class CrawlPolicyResolution:
     digest: str
     #: Отпечаток объявленного пространства (режимы + лимиты) — носитель I2d.
     space_digest: str
+    #: **Материал** того же пространства (режимы + ``crawl_config_digest`` + версия
+    #: семантики обхода) — то, из чего считается ``space_digest``. Нужен снятию: по
+    #: нему расхождение отпечатков объясняется («сменилась формула» ≠ «сменилось
+    #: пространство»), а не превращается в «другое пространство» целиком.
+    space_material: dict[str, Any] | None = None
     #: Per-run запросы ``--refresh-scope`` в разобранном виде (они вошли в ``digest``).
     requested: tuple[RequestedScope, ...] = ()
     #: Запросы, не совпавшие ни с одним объявленным корнем: видимы, но решения не меняют.
@@ -334,6 +344,9 @@ class CrawlPolicyResolution:
         return {
             "digest": self.digest,
             "space_digest": self.space_digest,
+            # Материал — рядом с отпечатком: по нему читатель объясняет расхождение
+            # («сменилась формула» ≠ «сменились лимиты»), а не выводит его заново.
+            "space_material": self.space_material,
             "decisions": [item.as_dict() for item in self.decisions],
             "requested": [item.raw for item in self.requested],
             "unmatched_requested": [item.raw for item in self.unmatched_requested],
@@ -834,11 +847,28 @@ def resolve_crawl_policy(
         ),
         crawl_config_digest=crawl_config_digest,
     )
+    # Тот же материал — рядом с отпечатком, а не вместо него: снятие несёт его, чтобы
+    # следующий прогон мог объяснить расхождение отпечатков, а не только обнаружить.
+    space_material = crawl_space_material(
+        (
+            (
+                decision.product_id,
+                decision.scope_kind.value,
+                decision.host,
+                decision.path,
+                decision.mode.value,
+            )
+            for decision in decisions
+        ),
+        crawl_config_digest=crawl_config_digest,
+        semantics=CRAWL_SEMANTICS,
+    )
     return CrawlPolicyResolution(
         decisions=tuple(decisions),
         unmatched=unmatched,
         digest=digest,
         space_digest=space_digest,
+        space_material=space_material,
         requested=requests,
         unmatched_requested=unmatched_requested,
     )

@@ -69,7 +69,7 @@ def test_schema_version(conn: sqlite3.Connection) -> None:
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()
     assert row is not None
-    assert row["value"] == STATE_SCHEMA_VERSION == "13"
+    assert row["value"] == STATE_SCHEMA_VERSION == "14"
 
 
 @pytest.mark.parametrize(

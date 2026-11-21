@@ -23,14 +23,30 @@
         --run-db ~/.cohound/stands/ru-pg-dbms/runs/ru-pg-dbms-145ad66ca3f9/cohound.db \\
         --allow-foreign-schema --json
 
+    # носители текущими правилами (после смены формулы):
+    python scripts/measure_golden_ceiling.py --catalog … --golden … \\
+        --run-db …/cohound.db --allow-foreign-schema \\
+        --state-db …/state.db --run-id ru-pg-dbms-… --json
+
 ``--allow-foreign-schema`` обязателен, если ``schema_version`` БД прогона не равна текущей:
 вердикты читаются как исторический факт, а не пересчитываются (AGENTS §1.2: артефакт
 старше документа, но и он относится к своим условиям).
+
+**Два способа получить носители — и они отвечают на разные вопросы.**
+
+* без ``--state-db``: читается **записанное** покрытие прогона (``corpus_coverage``) — то,
+  что прогон решил своей версией правил на свою дату;
+* с ``--state-db … --run-id …``: носители **пересчитываются текущими правилами** по
+  первичным артефактам — снятиям ``capture`` из ``state.db`` и счётчикам фронтьера из
+  ``crawl_sessions.provenance_json``. Это единственный способ сравнить правила: записанный
+  ``complete`` отвечает на вопрос прежней формулы, и рост на нём был бы эффектом правки
+  прибора, а не методологии.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sqlite3
 import sys
@@ -55,7 +71,13 @@ from core.pipeline.absence_reach import (  # noqa: E402
 from core.pipeline.digests import catalog_digest  # noqa: E402
 from core.store.sqlite import SCHEMA_VERSION  # noqa: E402
 
-__all__ = ["absent_stratum", "main", "read_carriers", "read_cells"]
+__all__ = [
+    "absent_stratum",
+    "main",
+    "read_carriers",
+    "read_carriers_from_state",
+    "read_cells",
+]
 
 
 def absent_stratum(
@@ -131,6 +153,156 @@ def read_carriers(conn: sqlite3.Connection) -> dict[str, ProductCarrier]:
             complete=bool(row["complete"]),
             roots=roots,
             skipped_by_policy=(row["reason"] or "") == "crawl_policy_skipped",
+        )
+    return out
+
+
+def read_carriers_from_state(
+    conn: sqlite3.Connection,
+    state_db: Path,
+    run_id: str,
+) -> dict[str, ProductCarrier]:
+    """Носители ``bounded``, **пересчитанные текущими правилами** по снятиям ``state.db``.
+
+    Зачем отдельный путь. ``corpus_coverage.roots_json`` — это то, что прогон решил
+    **своей** версией правил на свою дату. После смены правил (0.6.0: ``robots`` —
+    граница сайта; 0.7.0: пропуск политики — переиспользование, и ``complete`` требует
+    наблюдённости корня) записанный ``complete`` отвечает на старый вопрос, и сравнивать
+    с ним новое правило нельзя — иначе «стало лучше» было бы эффектом правки прибора.
+
+    Поэтому здесь читаются **первичные** артефакты: снятия ``capture`` из ``state.db``
+    (у них свой ``complete``, ``policy_digest``, ``observed_how``, дата) и объявленные
+    корни из БД прогона, а решение принимает **доменная** :func:`derive_corpus_coverage`
+    — та же функция, что пишет покрытие в живом прогоне. Копии правила в приборе нет.
+
+    ``declared_space_digest`` берётся из снятий **самого прогона**: ``_record_root_capture``
+    и ``_persist_corpus_coverage`` получают его из одного и того же резолва политики,
+    поэтому внутри прогона они равны **по построению**, а не по догадке. Если снятия
+    прогона дают разные отпечатки (резолв менялся внутри прогона — это дефект), прибор
+    отказывает: усреднять такое значило бы выдумать объявленное пространство.
+
+    ``state.db`` читается **сырым** ``sqlite3``: файл стенда может быть старой версии
+    схемы (``SchemaVersionMismatch`` у ``connect_state``), а читать исторический артефакт
+    надо уметь. Колонки ``space_json`` в файле ≤ 13 нет — тогда материал отсутствует, и
+    сравнение идёт по отпечатку, как и было до схемы 14.
+    """
+    from core.pipeline.corpus_coverage import derive_corpus_coverage
+    from core.ports.state import CaptureRow
+
+    declared_roots: dict[str, list[str]] = {}
+    for row in conn.execute("select product_id, roots_json from corpus_coverage"):
+        declared_roots[row["product_id"]] = [
+            str(item.get("root_url"))
+            for item in json.loads(row["roots_json"] or "[]")
+            if item.get("root_url")
+        ]
+
+    state = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    state.row_factory = sqlite3.Row
+    try:
+        columns = {row[1] for row in state.execute("PRAGMA table_info(capture)")}
+        select = [
+            "capture_id",
+            "product_id",
+            "root_url",
+            "started_at",
+            "finished_at",
+            "complete",
+            "observed_how",
+            "run_id",
+            "policy_digest",
+            "actor",
+            "superseded_by",
+        ]
+        if "space_json" in columns:
+            select.append("space_json")
+        captures: list[CaptureRow] = []
+        for row in state.execute(
+            f"select {', '.join(select)} from capture"  # noqa: S608 - имена из списка выше
+        ):
+            captures.append(
+                CaptureRow(
+                    capture_id=row["capture_id"],
+                    product_id=row["product_id"],
+                    root_url=row["root_url"],
+                    started_at=row["started_at"],
+                    finished_at=row["finished_at"],
+                    complete=bool(row["complete"]),
+                    observed_how=row["observed_how"],
+                    run_id=row["run_id"],
+                    policy_digest=row["policy_digest"],
+                    space_json=row["space_json"] if "space_json" in columns else None,
+                    actor=row["actor"],
+                    superseded_by=row["superseded_by"],
+                )
+            )
+    finally:
+        state.close()
+
+    # ``complete`` в файле отвечает на вопрос **своей** формулы на свою дату: под 0.5.0
+    # отказ ``robots`` делал корень неисчерпанным, под 0.7.0 ``complete`` требует ещё и
+    # наблюдённости. Поэтому флаг пересчитывается тем же предикатом, что в живом прогоне
+    # (:func:`core.pipeline.corpus._root_capture_complete`), по первичным счётчикам
+    # фронтьера из ``crawl_sessions.provenance_json``. Копии формулы здесь нет.
+    #
+    # ``observed`` берётся как ``pages_fetched > 0``: список отказов ``robots`` в
+    # провенанс не пишется, и корень, у которого ноль страниц **только** из-за отказов,
+    # прочтётся как ненаблюдённый. Направление ошибки консервативное — прибор
+    # недосчитывает носители, а не выдумывает их.
+    from core.pipeline.corpus import _root_capture_complete
+
+    provenance: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in conn.execute("select provenance_json from crawl_sessions"):
+        payload = json.loads(row["provenance_json"] or "{}")
+        for root in (payload.get("effective_limits") or {}).get("roots") or []:
+            provenance[(str(root.get("product_id")), str(root.get("root")))] = root
+    restored: list[CaptureRow] = []
+    for capture in captures:
+        root = provenance.get((capture.product_id, capture.root_url))
+        if root is None:
+            restored.append(capture)
+            continue
+        incomplete = bool(root.get("truncated") or root.get("skipped_documents"))
+        observed = int(root.get("pages_fetched") or 0) > 0
+        restored.append(
+            dataclasses.replace(
+                capture,
+                complete=_root_capture_complete(
+                    incomplete=incomplete, observed=observed
+                ),
+            )
+        )
+    captures = restored
+
+    own = {
+        capture.policy_digest
+        for capture in captures
+        if capture.run_id == run_id and capture.policy_digest
+    }
+    if len(own) > 1:
+        raise SystemExit(
+            f"снятия прогона {run_id} несут разные отпечатки пространства: "
+            f"{sorted(own)} — объявленное пространство не определено"
+        )
+    declared_digest = next(iter(own)) if own else None
+
+    out: dict[str, ProductCarrier] = {}
+    for product_id, roots in declared_roots.items():
+        coverage = derive_corpus_coverage(
+            product_id=product_id,
+            items=(),
+            truncated=False,
+            computed_at="1970-01-01T00:00:00+00:00",
+            declared_roots=roots,
+            captures=[
+                capture for capture in captures if capture.product_id == product_id
+            ],
+            declared_space_digest=declared_digest,
+        )
+        out[product_id] = ProductCarrier(
+            complete=coverage.complete,
+            roots=tuple(coverage.roots),
+            skipped_by_policy=(coverage.reason or "") == "crawl_policy_skipped",
         )
     return out
 
@@ -232,6 +404,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="читать БД другой schema_version (только чтение, вердикты не пересчитываются)",
     )
+    parser.add_argument(
+        "--state-db",
+        type=Path,
+        help=(
+            "state.db пакета: пересчитать носители текущими правилами по снятиям "
+            "(требует --run-id), а не читать записанное покрытие"
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        help="прогон, чьи снятия объявляют пространство (вместе с --state-db)",
+    )
     parser.add_argument("--json", action="store_true", help="машинный вывод")
     args = parser.parse_args(argv)
 
@@ -240,7 +424,13 @@ def main(argv: list[str] | None = None) -> int:
     golden = load_golden(args.golden)
     conn = _open_run_db(args.run_db, args.allow_foreign_schema)
     try:
-        carriers = read_carriers(conn)
+        if (args.state_db is None) != (args.run_id is None):
+            raise SystemExit("--state-db и --run-id задаются вместе")
+        carriers = (
+            read_carriers(conn)
+            if args.state_db is None
+            else read_carriers_from_state(conn, args.state_db, args.run_id)
+        )
         cells = read_cells(conn)
         run = conn.execute("select catalog_version from runs limit 1").fetchone()
         run_catalog_version = run["catalog_version"] if run is not None else None
