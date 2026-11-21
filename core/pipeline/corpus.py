@@ -376,6 +376,7 @@ from core.ports.types import (
     FetchPlan,
 )
 from core.util.index_partition import build_root as _partition_root
+from core.util.network_breaker import BreakerPolicy, NetworkBreaker
 from core.util.rate_limit import RateLimiter, normalize_host
 
 __all__ = [
@@ -5393,6 +5394,15 @@ def _build_corpus(
             on_root_done=_root_done,
             on_product_done=_close_product,
             lane_limit_for=lambda plan: contexts[str(plan.product_id)].lane_axis or 1,
+            # Размыкатель сети: длительное исчезновение канала не должно молча
+            # превращать всю оставшуюся когорту в провалы («не смотрели» ≠ «не нашли»,
+            # I2d). Политика — **исполнение**, не условие измерения: состав корпуса она
+            # не меняет (необработанное остаётся ``pending`` и добывается следующим
+            # проходом), поэтому в ``run_id`` не входит. Дефолты объявлены в
+            # ``core/util/network_breaker.py``; объявление их в ``deploy.yaml`` — отдельное
+            # решение владельца (это была бы новая ось и новый ``run_id``, а не тихий
+            # сдвиг исполнения).
+            network_breaker=NetworkBreaker(BreakerPolicy()),
             # Teardown: durable-факт «документ добыт» не отбрасывается — прерывание краула
             # называет, сколько строк очереди конверсии осталось ``pending``.
             abort=partial(

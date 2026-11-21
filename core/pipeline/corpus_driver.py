@@ -60,6 +60,20 @@ FIFO по записям волны).
 Браузерные фетчи когорты при этом **сериализуются**, и это публикуемый факт, а не потолок:
 число фетчей и суммарное ожидание волн с браузерным элементом уходят строкой в ``notes``.
 
+**Размыкатель сети — здесь, а не в воркерах.** Если канал пропал целиком, честные повторы
+фетча превратили бы всю оставшуюся когорту в провалы, а «мы не смотрели» и «посмотрели и не
+нашли» — разные факты (I2d). Наблюдение поэтому стоит на главном потоке драйвера: исходы
+волны уже собраны из пула, а состояние процессов не разделяется — общий счётчик в воркерах
+был бы ложью.
+
+Срабатывание (:mod:`core.util.network_breaker`: N отказов «ответа не было» на M разных
+хостах) **называется** строкой ``network_paused`` в ``errors`` с числами и хостами и даёт
+паузу: выдача новых волн встаёт, уже отправленные доживают в пулах. После паузы прогон
+**продолжается** — для моргающего канала (переключение wifi, короткий обрыв VPN) это
+дешевле остановки, которая превратила бы блип в брошенную когорту. Если пауза не помогла и
+серия собралась снова, ``BreakerPolicy.max_trips`` исчерпан: выдача прекращается, остаток
+честно остаётся ``pending`` (не ``failed``), сеанс финализируется с названной причиной.
+
 **Teardown.** Каждый допущенный корень обязан либо завершиться, либо быть **названным** в
 ``errors``: при исключении живые генераторы закрываются (их ``finally`` исполняются
 сейчас, а не при сборке мусора), а ``abort`` называет, сколько строк очереди конверсии
@@ -78,19 +92,54 @@ from core.pipeline.corpus_drain import (
     RootPlan,
     WaveOutcomes,
     WavePlan,
+    WaveRequest,
     _await_wave,
     _dispatch_wave,
 )
 from core.pipeline.corpus_index import _CorpusStageTimings
 from core.pipeline.corpus_ingest import LocalFetch
 from core.pipeline.crawl_frontier import Frontier
+from core.ports.crawl_errors import TERMINAL_FETCH_ERRORS, CrawlError
 from core.ports.types import RawPage
+from core.util.network_breaker import NetworkBreaker
 
 #: Потолок одного мультиплексированного ожидания, секунды. Это **не** таймаут фетча
 #: (его у пула нет и быть не должно): ``FIRST_COMPLETED`` будит драйвер на первом готовом
 #: future. Потолок — страховка от вырожденного набора: пустое множество future'ов или
 #: полоса, чей future уже отменён снаружи, иначе оставили бы драйвер в вечном ``wait``.
 _LANE_WAIT_TIMEOUT_S = 0.25
+
+
+def _fetch_silence(exc: BaseException | None) -> bool:
+    """Отказ **без ответа**: таймаут, обрыв, DNS — канал, а не адресат.
+
+    Признак берётся из таксономии порта, а не из текста ошибки: транзиентный
+    :class:`CrawlError` **без** ``http_status`` — это ровно «запрос не дошёл».
+    Исключены терминальные классы (отказ политики, SSRF, «ресурса нет», потолок,
+    движок не поднялся): это решения, а не наблюдения о канале.
+
+    ``5xx``/``4xx``/``304`` сюда не попадают намеренно: сервер ответил, значит канал
+    жив, и размыкать сеть из-за одного больного хоста нельзя (см.
+    :mod:`core.util.network_breaker`).
+    """
+    if exc is None or not isinstance(exc, CrawlError):
+        return False
+    if isinstance(exc, TERMINAL_FETCH_ERRORS):
+        return False
+    return getattr(exc, "http_status", None) is None
+
+
+def _fetch_answered(exc: BaseException | None) -> bool:
+    """Был ли ответ (в том числе ``4xx``/``5xx``) — тогда канал подал признак жизни.
+
+    Ответом считается любой :class:`CrawlError` с ``http_status``: ``404``, ``403``,
+    ``503`` и ``304`` одинаково доказывают, что запрос дошёл и адресат отвечает.
+    Прочие исключения (дефект транспорта) — не наблюдение о канале: они не сбрасывают
+    серию, но и не удлиняют её.
+    """
+    if exc is None or not isinstance(exc, CrawlError):
+        return False
+    return getattr(exc, "http_status", None) is not None
 
 
 @dataclass(frozen=True)
@@ -191,6 +240,8 @@ def drive_roots(
     on_product_done: Callable[[str], None] | None = None,
     lane_limit_for: Callable[[RootPlan], int | None] | None = None,
     abort: Callable[[str], None] | None = None,
+    network_breaker: NetworkBreaker | None = None,
+    sleep: Callable[[float], None] = time.sleep,
     label: str = "",
 ) -> list[RootOutcome]:
     """Провести корни когорты полосами и вернуть их исходы в порядке завершения.
@@ -234,6 +285,20 @@ def drive_roots(
     :param abort: teardown-хук фазы: вызывается при исключении и **называет** число
         строк очереди конверсии, оставшихся ``pending`` (durable-очередь переживает
         прерывание; «сколько не сконвертировано» обязано быть видно).
+    :param network_breaker: размыкатель сети (:mod:`core.util.network_breaker`).
+        Наблюдение идёт здесь, на главном потоке: исходы волны уже собраны из пула, а
+        состояние процессов не разделяется — общий счётчик в воркерах был бы ложью.
+        При срабатывании в ``errors`` пишется строка ``network_paused`` с числом отказов,
+        хостов и секунд паузы, а выдача новых волн встаёт на ``pause_s``. Пока
+        ``max_trips`` не исчерпан, прогон после паузы **продолжается** (моргающий канал
+        дешевле переждать, чем бросить когорту); исчерпан — выдача прекращается и цикл
+        выходит штатно: отправленное доживает, необработанное остаётся ``pending`` (это
+        факт «не смотрели», а не ``failed`` — I2d). ``None`` — наблюдения нет (прежнее
+        поведение байт-в-байт).
+    :param sleep: исполнение паузы (``sleep(seconds)``). Инъектируется тестами: машина
+        часов не имеет, поэтому ожидание проверяется без реального сна. Спит **главный**
+        поток драйвера, а не воркеры: пауза — это «не выдаём новые запросы», а не
+        «останавливаем уже отправленные».
     :param label: префикс строк ``errors``.
     :param errors: канал видимости фазы: прерванный корень обязан быть назван.
     :returns: исходы в порядке завершения корней.
@@ -268,6 +333,85 @@ def drive_roots(
     #: не отменяется тем, что прогон прервали.
     browser_entries_total = 0
     browser_wait_total = 0.0
+    #: Причина остановки выдачи волн (``None`` — сеть не размыкалась либо паузы ещё не
+    #: исчерпаны). Ставится только когда ``BreakerPolicy.max_trips`` исчерпан: пауза не
+    #: помогла, канал мёртв. Тогда новые волны не выдаются, а необработанное остаётся
+    #: ``pending`` — «не смотрели» не превращается в ``failed`` (I2d).
+    pause_reason: str | None = None
+
+    def _observe_wave(request: WaveRequest, outcomes: WaveOutcomes) -> None:
+        """Накормить размыкатель исходами волны; срабатывание — пауза, затем продолжение.
+
+        Признак «ответа не было» берётся у **класса отказа**
+        (:func:`_fetch_silence`), а не из текста ошибки: разбор сообщений был бы
+        вторым правилом рядом с таксономией порта и разошёлся бы с ней молча.
+        Запись волны без живого фетча (``fetch is None``: блэклист, resume,
+        исчерпанные попытки, терминальный класс) о канале не говорит ничего — она
+        пропускается, а не считается ответом.
+
+        **Срабатывание = пауза, а не остановка.** Строка ``network_paused`` с числами и
+        хостами пишется в ``errors`` всегда — пауза обязана быть видимой. Дальше решает
+        ``max_trips``: пока он не исчерпан, прогон после паузы **продолжается** (канал
+        мог ожить, и для моргающего канала это дешевле брошенной когорты), исчерпан —
+        ставится ``pause_reason`` и выдача прекращается.
+
+        **Спит главный поток драйвера.** Уже отправленные волны при этом продолжают
+        исполняться в пулах: их future'ы живут, и по возвращении из сна драйвер их
+        соберёт. Поэтому «пауза» здесь означает «не выдаём новые запросы», а не
+        «останавливаем работу»: добытое не теряется, а сеть получает перерыв.
+
+        **Остаток волны после срабатывания не разбирается** (``return`` сразу после паузы):
+        его отказы относятся к серии «до паузы» и ничего не говорят о том, ожил ли канал
+        после неё, — вердикт «ожил/не ожил» даёт следующая волна, набранная уже после
+        паузы. Иначе волна шире порога (а она легко несёт 4–10 записей при
+        ``max_workers`` 10 / ``host_concurrency`` 5) давала бы два срабатывания подряд и
+        исчерпывала паузы, не проверив канал ни разу.
+
+        Счётчики машины после срабатывания обнулены, поэтому продолжение начинает новую
+        серию — и вторая серия подряд упрётся в ``exhausted``, а не будет копиться вечно.
+        """
+        nonlocal pause_reason
+        breaker = network_breaker
+        if breaker is None or pause_reason is not None:
+            return
+        for entry, fetch in zip(request.entries, outcomes.fetch, strict=True):
+            if fetch is None:
+                continue
+            if fetch.page is not None:
+                breaker.note_response()
+                continue
+            if _fetch_silence(fetch.exc):
+                host = entry.desc.host if entry.desc is not None else ""
+                if host and breaker.note_silence(host):
+                    trip = breaker.last_trip
+                    if trip is None:
+                        # Инвариант машины: ``True`` возвращается только при
+                        # срабатывании, и провенанс пишется в тот же момент.
+                        raise AssertionError(
+                            "network_breaker: срабатывание без провенанса"
+                        )
+                    errors.append(
+                        f"crawl-драйвер{label}: network_paused: "
+                        f"{trip.consecutive} отказов без ответа на "
+                        f"{len(trip.hosts)} хостах "
+                        f"({', '.join(trip.hosts)}), пауза {trip.pause_s:.0f} с "
+                        f"({breaker.trips} из {breaker.policy.max_trips})"
+                    )
+                    if breaker.exhausted:
+                        pause_reason = (
+                            f"crawl-драйвер{label}: network_paused: паузы исчерпаны "
+                            f"({breaker.trips} из {breaker.policy.max_trips}) — канал "
+                            "не ожил, новые волны не выдаются, необработанное остаётся "
+                            "pending"
+                        )
+                        errors.append(pause_reason)
+                        return
+                    # Пауза и продолжение: переждать и вернуться к обычной работе.
+                    # Остаток волны не разбираем — его отказы из серии «до паузы».
+                    sleep(trip.pause_s)
+                    return
+            elif _fetch_answered(fetch.exc):
+                breaker.note_response()
 
     def _account_browser(lane: _Lane) -> None:
         """Перенести браузерные числа полосы в итог когорты ровно один раз."""
@@ -445,6 +589,9 @@ def drive_roots(
         lane.request = None
         lane.wait_started = None
         lane.outcomes = _await_wave(request, timings=lane.timings)
+        # Наблюдение канала — **до** коммита: исходы уже собраны в родительском
+        # процессе, и здесь же видно, был ли ответ у каждой записи волны.
+        _observe_wave(request, lane.outcomes)
         # Ожидание полосы целиком — в тот же бакет «участок фетча»: после ``wait``
         # вызовы ``result`` внутри ``_await_wave`` уже не спят. При полосах это сумма
         # ожиданий корней, а не wall time продукта (он публикуется строкой продукта) —
@@ -505,7 +652,10 @@ def drive_roots(
         pending: Any = _NO_PENDING
         while True:
             # (1) Допуск корней: полоса — слот, корни берутся в авторском порядке.
-            while queue_open and len(lanes) < lanes_limit:
+            # Паузы исчерпаны — корней не допускаем: новый корень это новые запросы.
+            while (
+                queue_open and len(lanes) < lanes_limit and pause_reason is None
+            ):
                 if pending is _NO_PENDING:
                     pending = next(queue, _NO_PLAN)
                 if pending is _NO_PLAN:
@@ -534,6 +684,10 @@ def drive_roots(
             # (2) Допуск волн: право на host'ы выдаётся в авторском порядке корней,
             # поэтому припаркованный корень не блокирует остальных, а ждёт своей очереди.
             for lane in list(lanes):
+                if pause_reason is not None:
+                    # Паузы исчерпаны: ни одной новой волны. Уже отправленные доживают
+                    # в (3) и коммитятся — добытое не отбрасывается.
+                    break
                 if lane.wave is None or lane.request is not None:
                     continue
                 if lane.wave.hosts & claimed:
@@ -548,6 +702,12 @@ def drive_roots(
             # (3) Мультиплексированное ожидание по объединению future'ов всех полос.
             in_flight = [lane for lane in lanes if lane.request is not None]
             if not in_flight:
+                if pause_reason is not None:
+                    # Паузы исчерпаны и отправленного больше нет — штатный выход.
+                    # Необработанное не «провалилось»: строки очереди остаются
+                    # ``pending``, а сеанс финализируется с названной причиной
+                    # (запись уже в ``errors``).
+                    break
                 if lanes:
                     # Ждать нечего, но это ещё не застой. Волна **без живого фетча**
                     # (resume/retained, блэклист, исчерпанные попытки) коммитится сразу
@@ -601,6 +761,15 @@ def drive_roots(
                 _settle(lane)
                 if lane.done:
                     _finish(lane)
+        if pause_reason is not None and lanes:
+            # Ни один допущенный корень не выпадает молча и при паузе: он либо завершился,
+            # либо назван. «Не добыто» — не «провалилось»: строки очереди остаются
+            # ``pending``, и следующий проход продолжит с них.
+            names = ", ".join(lane.plan.root_url for lane in lanes)
+            errors.append(
+                f"crawl-драйвер{label}: network_paused: корней без исхода "
+                f"{len(lanes)} (не добыто, остаётся pending): {names}"
+            )
     except BaseException as exc:
         # Ни один допущенный корень не выпадает молча: он либо завершился, либо назван.
         if lanes:

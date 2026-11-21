@@ -97,6 +97,11 @@ class _OriginState:
     #: Сколько раз попытка фетча была повторена на этом origin'е (повтор берёт свой слот
     #: лимитера). Отличает «один запрос» от «повтор после 5xx» без вычитания.
     retries: int = 0
+    #: Сколько миллисекунд origin проспал в **бэкоффе** между попытками (план 26 §21.1).
+    #: Это цена вежливости к серверу, ответившему ``5xx``/``408``/``429``: пауза
+    #: складывается со слотом лимитера, а не заменяет его, поэтому в окно/темп она не
+    #: входит и публикуется отдельным числом. Провенанс, не контракт.
+    backoff_ms: int = 0
     foreign_hosts: dict[str, int] = field(default_factory=dict)
 
 
@@ -287,6 +292,22 @@ class CrawlPacing:
             state = self._origins.setdefault(origin, _OriginState())
             state.retries += 1
 
+    def backoff(self, product_id: str, host: str, backoff_ms: int) -> None:
+        """Учесть проспанное в бэкоффе время на ``host`` (провенанс, не контракт).
+
+        Вызывается **после** фетча, из того же места, где пишутся ``fetch_started_at``/
+        ``fetch_ms``: сумма пауз известна только по завершении попыток. Отдельное число,
+        потому что пауза складывается со слотом лимитера, а не заменяет его — если бы она
+        попадала в окно ``request``, наблюдённый темп и конкурентность завысились бы
+        ровно на время сна, которого к хосту не было.
+        """
+        if backoff_ms <= 0:
+            return
+        origin = normalize_host(host)
+        with self._lock:
+            state = self._origins.setdefault(origin, _OriginState())
+            state.backoff_ms += int(backoff_ms)
+
     def snapshot(self) -> dict[str, Any]:
         """Снимок наблюдений: ``{hosts, products, total}`` (детерминированный порядок).
 
@@ -306,6 +327,7 @@ class CrawlPacing:
                     state.http_requests,
                     state.http_observed,
                     state.retries,
+                    state.backoff_ms,
                     dict(state.foreign_hosts),
                 )
                 for host, state in self._origins.items()
@@ -332,6 +354,7 @@ class CrawlPacing:
         total_http: int = 0
         total_http_observed = False
         total_retries = 0
+        total_backoff_ms = 0
         total_foreign: dict[str, int] = {}
         for host in sorted(origins):
             (
@@ -345,6 +368,7 @@ class CrawlPacing:
                 http_requests,
                 http_observed,
                 retries,
+                backoff_ms,
                 foreign,
             ) = origins[host]
             all_values.extend(values)
@@ -366,6 +390,9 @@ class CrawlPacing:
                 "foreign_hosts": dict(sorted(foreign.items())),
                 # Сколько попыток было повтором (каждая — новый слот лимитера).
                 "retries": retries,
+                # Сколько миллисекунд origin проспал в бэкоффе между попытками: цена
+                # вежливости, отдельная от окна (пауза складывается со слотом лимитера).
+                "backoff_ms": backoff_ms,
             }
             if http_observed:
                 total_http += int(http_requests)
@@ -379,6 +406,7 @@ class CrawlPacing:
             total_first_wall = _earliest(total_first_wall, first_wall)
             total_last_wall = _latest(total_last_wall, last_wall)
             total_retries += retries
+            total_backoff_ms += backoff_ms
 
         products_block: dict[str, dict[str, Any]] = {}
         products_values: dict[str, list[int]] = {}
@@ -446,6 +474,8 @@ class CrawlPacing:
             "foreign_hosts": dict(sorted(total_foreign.items())),
             # Повторы по всем origin'ам: `items + retries` — сколько фетч-попыток было.
             "retries": total_retries,
+            # Сумма проспанного в бэкоффе: цена вежливости, не время ответа хоста.
+            "backoff_ms": total_backoff_ms,
         }
         return {
             "hosts": hosts,

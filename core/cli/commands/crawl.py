@@ -111,6 +111,7 @@ from core.pipeline.crawl_metric import build_crawl_metric
 from core.pipeline.crawl_policy import (
     CrawlPolicyConflict,
     PolicyDecision,
+    capture_spaces_by_root,
     declared_roots,
     observations_by_root,
     resolve_crawl_policy,
@@ -138,6 +139,7 @@ from core.pipeline.runner import RunContext
 from core.ports.state import CrawlPolicyRow, UrlStateRow
 from core.store.state_sqlite import state_db_path
 from core.store.state_store import (
+    read_capture_spaces,
     read_crawl_observations,
     read_crawl_policy_rows,
     read_url_next_checks,
@@ -884,7 +886,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
     if rows:
         header = (
             f"{'host':<28} {'items':>6} {'requests':>9} {'http':>6} {'retr':>5} "
-            f"{'req/s':>8} {'peak':>5} {'wait_s':>8} {'min_ivl_s':>10} "
+            f"{'bkoff_ms':>8} {'req/s':>8} {'peak':>5} {'wait_s':>8} {'min_ivl_s':>10} "
             f"{'med_ivl_s':>10} {'declared_s':>11} {'short':>11} {'p50_ms':>7} "
             f"{'p95_ms':>7} {'unknown':>8} {'foreign':>10}"
         )
@@ -903,6 +905,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                 + f"{row['host']:<28} {row['items']:>6} {row['requests']:>9} "
                 f"{_fmt_metric(row.get('http_requests'), 0):>6} "
                 f"{_fmt_metric(row.get('retries'), 0):>5} "
+                f"{_fmt_metric(row.get('backoff_ms'), 0):>8} "
                 f"{_fmt_metric(row.get('requests_per_s')):>8} "
                 f"{_fmt_metric(row.get('in_flight_max'), 0):>5} "
                 f"{_fmt_metric(row.get('limiter_waited_s')):>8} "
@@ -921,7 +924,8 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
             lines.append(
                 "  pacing total: hosts={hosts} products={products} requests={requests} "
                 "req/s={rate} in_flight_max={peak} limiter_waits={waits} "
-                "limiter_waited_s={waited} http_requests={http} retries={retries} foreign_hosts={foreign}".format(
+                "limiter_waited_s={waited} http_requests={http} retries={retries} "
+                "backoff_ms={backoff} foreign_hosts={foreign}".format(
                     hosts=pacing_total.get("hosts", 0),
                     products=pacing_total.get("products", 0),
                     requests=pacing_total.get("requests", 0),
@@ -931,6 +935,7 @@ def _print_crawl_metric(metric: dict[str, Any]) -> list[str]:
                     waited=_fmt_metric(pacing_total.get("limiter_waited_s")),
                     http=_fmt_metric(pacing_total.get("http_requests"), 0),
                     retries=pacing_total.get("retries", 0),
+                    backoff=pacing_total.get("backoff_ms", 0),
                     foreign=",".join(
                         f"{host}={count}"
                         for host, count in sorted(
@@ -1716,6 +1721,7 @@ def policy_list(args: argparse.Namespace) -> int:
     db_path = state_db_path(paths.state, Path(package).name)
     rows = read_crawl_policy_rows(db_path)
     observed = observations_by_root(read_crawl_observations(db_path), roots)
+    spaces = capture_spaces_by_root(read_capture_spaces(db_path), roots)
     now = _dt.datetime.now(_dt.UTC)
     try:
         resolution = resolve_crawl_policy(
@@ -1724,6 +1730,7 @@ def policy_list(args: argparse.Namespace) -> int:
             roots=roots,
             now=now,
             observed_at=observed,
+            capture_spaces=spaces,
         )
     except CrawlPolicyConflict as exc:
         raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc

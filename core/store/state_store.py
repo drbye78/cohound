@@ -187,6 +187,54 @@ def read_crawl_observations(db_path: str | Path) -> dict[tuple[str, str], str]:
         conn.close()
 
 
+def read_capture_spaces(
+    db_path: str | Path,
+) -> list[tuple[str, str, str | None, str | None]]:
+    """Снятия корней как носители пространства: ``(product_id, root_url, digest, space_json)``.
+
+    Новейшее снятие каждого ``(product_id, root_url)`` идёт **первым**: порядок и есть
+    ответ на вопрос «какое снятие последнее», поэтому второй формулы «что свежее» у
+    вызывающего нет (``capture_spaces_by_root`` берёт первое вхождение). Отозванные
+    (``superseded_by``) исключены: явный отзыв обязан побеждать свежесть.
+
+    Читает **только** (``mode=ro``): ``plan`` обещает ничего не писать. Отсутствующий
+    файл, битая база и файл прежней схемы (без ``capture.space_json``) — ``[]``:
+    пространство неизвестно, а не «снятий не было»; решение тогда идёт по часам (A3).
+    """
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT product_id, root_url, policy_digest, space_json FROM capture"
+            " WHERE superseded_by IS NULL"
+            " ORDER BY product_id, root_url, COALESCE(finished_at, '') DESC,"
+            " started_at DESC, capture_id DESC"
+        )
+        seen: set[tuple[str, str]] = set()
+        result: list[tuple[str, str, str | None, str | None]] = []
+        for row in rows:
+            key = (str(row["product_id"]), str(row["root_url"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                (
+                    key[0],
+                    key[1],
+                    None if row["policy_digest"] is None else str(row["policy_digest"]),
+                    None if row["space_json"] is None else str(row["space_json"]),
+                )
+            )
+        return result
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        conn.close()
+
+
 def read_url_next_checks(db_path: str | Path) -> list[UrlStateRow]:
     """Все строки ``url_state`` (``mode=ro``) — для публикации сроков per-URL.
 

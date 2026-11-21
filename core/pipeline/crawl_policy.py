@@ -46,6 +46,7 @@ from core.domain.enums import (
     CrawlPolicyScopeKind,
 )
 from core.domain.models import SeedsConfig
+from core.pipeline.corpus_coverage import parse_space_material, space_attests
 from core.pipeline.crawl_frontier import CRAWL_SEMANTICS
 from core.pipeline.digests import (
     crawl_policy_digest,
@@ -66,6 +67,8 @@ __all__ = [
     "PolicyExecution",
     "PolicyRecord",
     "RequestedScope",
+    "RootSpace",
+    "capture_spaces_by_root",
     "declared_roots",
     "normalize_policy_host",
     "normalize_policy_path",
@@ -82,8 +85,10 @@ SOURCE_PACKAGE = "package"
 SOURCE_OPERATOR = "operator"
 
 #: Машинный токен причины, когда **весь корень** пропущен политикой (сеть запрещена и
-#: корпус из сохранённого не собран). Тот же токен идёт в ``incomplete_reasons`` продукта
-#: и в ``truncated_products`` — канал честности ``HOST_OUT_OF_SHARD_REASON`` (план 19 §P2).
+#: корпус из сохранённого не собран). Токен идёт в **провенанс** продукта
+#: (``corpus_coverage.reason``, запись корня, ``policy_skips``/``policy_zero_reasons``) и
+#: **не** в ``incomplete_reasons``/``truncated_products``: с 0.7.0 пропуск политикой —
+#: переиспользование, а не неполнота (полноту решают снятия, I2d; AGENTS §6).
 CRAWL_POLICY_SKIPPED_REASON = "crawl_policy_skipped"
 
 #: Причина отказа сети по режиму ``network_denied`` (провенанс корня).
@@ -130,6 +135,24 @@ class DeclaredRoot:
     path: str = ""
     #: URL сида-объявления (адрес для человека и для отчёта о сроке), не тождество.
     root_url: str = field(default="", compare=False)
+
+
+@dataclass(frozen=True)
+class RootSpace:
+    """Снятие корня как носитель **пространства**: отпечаток и его материал.
+
+    Нужен решению ``scheduled``: расписание отвечает «когда обновлять», но не «в каком
+    пространстве собран корпус». Если последний обход корня шёл при других лимитах или
+    режимах, переиспользование измерило бы старое пространство — поэтому расхождение
+    превращает ``reuse`` в ``refresh`` (решение владельца 21.11.2026: «если меняется сама
+    схема краула, нормальный прогон приравнивается к онлайн-прогону»).
+
+    ``None`` в любом поле — «неизвестно» (A3): строка прежней схемы или битая запись;
+    тогда решение идёт по часам, как до появления сверки.
+    """
+
+    policy_digest: str | None = None
+    space_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +203,11 @@ class PolicyDecision:
     #: URL объявленного корня, к которому относится решение (адрес, не область записи:
     #: у product-записи ``host``/``path`` пусты). Нужен отчёту о сроке обхода.
     root_url: str | None = None
+    #: Совпало ли пространство последнего снятия корня с объявленным (``True``/``False``/
+    #: ``None`` — неизвестно). ``False`` делает решение ``refresh`` независимо от часов:
+    #: переиспользовать корпус, собранный в другом пространстве, значило бы измерять его.
+    #: В дайджест не входит отдельным полем: следствие уже видно в ``decision``.
+    space_matches: bool | None = None
 
     @property
     def scope(self) -> str:
@@ -209,6 +237,7 @@ class PolicyDecision:
             "created_at": self.created_at,
             "policy_id": self.policy_id,
             "root_url": self.root_url,
+            "space_matches": self.space_matches,
         }
 
 
@@ -665,23 +694,61 @@ def observations_by_root(
     return result
 
 
+def capture_spaces_by_root(
+    captures: Iterable[tuple[str, str, str | None, str | None]],
+    roots: Sequence[DeclaredRoot],
+) -> dict[tuple[str, str, str], RootSpace]:
+    """Снятия (``product_id``, ``root_url``, отпечаток, материал) → ключи объявленных корней.
+
+    Ключ — ``(product_id, host, path)``, тот же, что у наблюдений и у решения: снятие
+    адресует **корень**, а не область записи политики. URL, не совпавший ни с одним
+    объявленным корнем, отбрасывается молча — это не ошибка, а прошлое объявление (корень
+    могли убрать), и выдумывать по нему решение запрещено.
+
+    Первое вхождение побеждает: порядок задаёт читатель (``state_store`` отдаёт новейшее
+    снятие первым), поэтому второй формулы «что свежее» здесь нет.
+    """
+    keys = {(root.product_id, root.host, root.path) for root in roots}
+    result: dict[tuple[str, str, str], RootSpace] = {}
+    for product_id, root_url, digest, space_json in captures:
+        host, path = _split_url(root_url)
+        key = (str(product_id), host, path)
+        if not host or key not in keys or key in result:
+            continue
+        result[key] = RootSpace(policy_digest=digest, space_json=space_json)
+    return result
+
+
 def _decision_for(
     record: PolicyRecord,
     *,
     now: _dt.datetime,
     observed_at: _dt.datetime | None,
     requested: bool = False,
+    space_matches: bool | None = None,
 ) -> str:
     """Эффективное решение записи: режим, а для ``scheduled`` — ``refresh``/``reuse``.
 
-    Нет наблюдения ⇒ ``refresh`` (первичный дискавери). Иначе ``refresh``, когда
-    ``now - observed_at >= interval_hours``, и ``reuse`` — до срока. Ручной запрос
-    ``--refresh-scope`` делает решение ``refresh`` независимо от часов: иначе
-    поверхность решений утверждала бы «не обновляли» про прогон, который обновил корень.
+    Порядок причин — от самой сильной к самой слабой:
+
+    1. ручной запрос ``--refresh-scope`` — ``refresh`` независимо от часов: иначе
+       поверхность решений утверждала бы «не обновляли» про прогон, который обновил корень;
+    2. **объявленное пространство разошлось** с пространством последнего снятия корня
+       (``space_matches is False``) — ``refresh``: корпус собран при других лимитах или
+       режимах, и переиспользование измерило бы старое пространство, а не объявленное
+       (решение владельца 21.11.2026);
+    3. нет наблюдения ⇒ ``refresh`` (первичный дискавери);
+    4. иначе ``refresh``, когда ``now - observed_at >= interval_hours``, и ``reuse`` — до срока.
+
+    ``space_matches is None`` — «неизвестно» (A3): снятия нет, материал не записан или
+    различие объясняется сменой **формулы** обхода. Отсутствие факта не выдаётся за
+    расхождение, и решение идёт по часам, как до появления сверки.
     """
     if record.mode is not CrawlPolicyMode.SCHEDULED:
         return record.mode.value
     if requested:
+        return "refresh"
+    if space_matches is False:
         return "refresh"
     interval = int(record.interval_hours or 0)
     if observed_at is None:
@@ -741,6 +808,7 @@ def resolve_crawl_policy(
     observed_at: Mapping[tuple[str, str, str], _dt.datetime] | None = None,
     requested: Sequence[RequestedScope] | None = None,
     crawl_config_digest: str | None = None,
+    capture_spaces: Mapping[tuple[str, str, str], RootSpace] | None = None,
 ) -> CrawlPolicyResolution:
     """Разрешает эффективную политику по объявленным корням (план 19 §4/§6.1).
 
@@ -755,6 +823,11 @@ def resolve_crawl_policy(
     :param crawl_config_digest: отпечаток лимитов краула (``crawl_control_digest``,
         ``declared.crawl_config_digest``). Входит **только** в ``space_digest``: лимиты
         определяют исчерпываемое пространство, но не поверхность решений.
+    :param capture_spaces: пространство последнего снятия каждого корня
+        (:func:`capture_spaces_by_root`). Решение ``scheduled`` читает его как второй
+        якорь рядом с часами: расхождение пространства делает ``refresh`` даже при
+        неистёкшем интервале, потому что переиспользовать корпус из другого пространства
+        значило бы измерять не то, что объявлено. ``None``/неизвестное — решение по часам.
     :raises CrawlPolicyConflict: равная специфичность с разными режимами.
     """
     records = [*package_records(package_policy), *operator_records(operator_rows)]
@@ -764,7 +837,11 @@ def resolve_crawl_policy(
     )
     observed = dict(observed_at or {})
     requests = tuple(requested or ())
-    decisions: list[PolicyDecision] = []
+    spaces = dict(capture_spaces or {})
+    # Проход 1: какая запись действует на каждом корне. Материал пространства считается
+    # из **объявленных режимов** этих записей, то есть до решений: ``decision`` в него не
+    # входит (I2d), поэтому сверка с снятием не зависит от часов и цикла нет.
+    selected: list[tuple[DeclaredRoot, PolicyRecord, bool]] = []
     for root in ordered_roots:
         candidates = [record for record in records if _matches(record, root)]
         if not candidates:
@@ -772,14 +849,62 @@ def resolve_crawl_policy(
         groups: dict[tuple[int, int, int], list[PolicyRecord]] = {}
         for record in candidates:
             groups.setdefault(_specificity(record), []).append(record)
-        chosen = _choose(groups[max(groups)])
+        selected.append(
+            (root, _choose(groups[max(groups)]), any(r.matches(root) for r in requests))
+        )
+    space_digest = crawl_space_digest(
+        (
+            (
+                chosen.product_id,
+                chosen.scope_kind.value,
+                chosen.host,
+                chosen.path,
+                chosen.mode.value,
+            )
+            for _root, chosen, _requested in selected
+        ),
+        crawl_config_digest=crawl_config_digest,
+    )
+    # Тот же материал — рядом с отпечатком, а не вместо него: снятие несёт его, чтобы
+    # следующий прогон мог объяснить расхождение отпечатков, а не только обнаружить.
+    space_material = crawl_space_material(
+        (
+            (
+                chosen.product_id,
+                chosen.scope_kind.value,
+                chosen.host,
+                chosen.path,
+                chosen.mode.value,
+            )
+            for _root, chosen, _requested in selected
+        ),
+        crawl_config_digest=crawl_config_digest,
+        semantics=CRAWL_SEMANTICS,
+    )
+    decisions: list[PolicyDecision] = []
+    for root, chosen, is_requested in selected:
         root_observed = observed.get((root.product_id, root.host, root.path))
-        is_requested = any(request.matches(root) for request in requests)
+        root_space = spaces.get((root.product_id, root.host, root.path))
+        # Без объявленного ``crawl_config_digest`` пространство не объявлено, и сверка
+        # не имеет стороны сравнения: сравнение с ``None`` дало бы ложное «разошлось» и
+        # превратило бы, например, ``crawl policy list`` (он лимитов не резолвит) в
+        # «все корни требуют обхода». ``None`` — «неизвестно» (A3), решение по часам.
+        space_matches = (
+            None
+            if root_space is None or crawl_config_digest is None
+            else space_attests(
+                capture_material=parse_space_material(root_space.space_json),
+                declared_material=space_material,
+                capture_digest=root_space.policy_digest,
+                declared_digest=space_digest,
+            )
+        )
         decision = _decision_for(
             chosen,
             now=_as_utc(now),
             observed_at=root_observed,
             requested=is_requested,
+            space_matches=space_matches,
         )
         network_mode, corpus_source, reason = _execution_axes(
             mode=chosen.mode,
@@ -806,6 +931,7 @@ def resolve_crawl_policy(
                 policy_id=chosen.policy_id,
                 reason=reason,
                 root_url=root.root_url or None,
+                space_matches=space_matches,
             )
         )
     unmatched = tuple(
@@ -830,38 +956,6 @@ def resolve_crawl_policy(
             decision.corpus_source.value,
         )
         for decision in decisions
-    )
-    # Удостоверяемое пространство считается из **тех же** решений вторым материалом:
-    # объявленный режим + лимиты. ``decision`` здесь намеренно **не** берётся — оно
-    # решает «когда смотреть», а не «что исчерпано» (I2d).
-    space_digest = crawl_space_digest(
-        (
-            (
-                decision.product_id,
-                decision.scope_kind.value,
-                decision.host,
-                decision.path,
-                decision.mode.value,
-            )
-            for decision in decisions
-        ),
-        crawl_config_digest=crawl_config_digest,
-    )
-    # Тот же материал — рядом с отпечатком, а не вместо него: снятие несёт его, чтобы
-    # следующий прогон мог объяснить расхождение отпечатков, а не только обнаружить.
-    space_material = crawl_space_material(
-        (
-            (
-                decision.product_id,
-                decision.scope_kind.value,
-                decision.host,
-                decision.path,
-                decision.mode.value,
-            )
-            for decision in decisions
-        ),
-        crawl_config_digest=crawl_config_digest,
-        semantics=CRAWL_SEMANTICS,
     )
     return CrawlPolicyResolution(
         decisions=tuple(decisions),

@@ -2911,6 +2911,11 @@ def _fetch_with_paced_retries(
         if stats.started_at is not None:
             desc.fetch_started_at = stats.started_at
             desc.fetch_ms = stats.fetch_ms
+        # Бэкофф — отдельным числом (план 26 §21.1): он складывается со слотом лимитера,
+        # а не заменяет его, поэтому не входит ни в ``fetch_ms`` попытки, ни в окно
+        # ``pacing.request``. Пишется по факту: 0 пауз — 0 миллисекунд, без «не измеряли».
+        if pacing is not None:
+            pacing.backoff(desc.pid, desc.host, stats.backoff_ms)
 
 
 def local_fetch(
