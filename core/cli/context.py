@@ -320,13 +320,18 @@ def _crawl_policy_resolution(
     """
     from core.config.crawl_policy import CrawlPolicyConfig
     from core.pipeline.crawl_policy import (
+        capture_spaces_by_root,
         declared_roots,
         observations_by_root,
         parse_requested_scopes,
         resolve_crawl_policy,
     )
     from core.store.state_sqlite import state_db_path
-    from core.store.state_store import read_crawl_observations, read_crawl_policy_rows
+    from core.store.state_store import (
+        read_capture_spaces,
+        read_crawl_observations,
+        read_crawl_policy_rows,
+    )
 
     roots = declared_roots(seed_config)
     policy = getattr(inputs, "crawl_policy", None) or CrawlPolicyConfig()
@@ -340,6 +345,7 @@ def _crawl_policy_resolution(
     package = getattr(args, "package", None)
     rows: list[Any] = []
     observed: dict[tuple[str, str, str], _dt.datetime] = {}
+    spaces: dict[tuple[str, str, str], Any] = {}
     if package and Path(package).is_dir():
         paths = getattr(args, "paths", None)
         if paths is None:
@@ -347,6 +353,9 @@ def _crawl_policy_resolution(
         db_path = state_db_path(paths.state, Path(package).name)
         rows = read_crawl_policy_rows(db_path)
         observed = observations_by_root(read_crawl_observations(db_path), roots)
+        # Второй якорь решения ``scheduled``: пространство последнего снятия корня.
+        # Расхождение с объявленным делает ``refresh`` даже до срока (0.7.0+).
+        spaces = capture_spaces_by_root(read_capture_spaces(db_path), roots)
     return resolve_crawl_policy(
         package_policy=policy,
         operator_rows=rows,
@@ -355,6 +364,7 @@ def _crawl_policy_resolution(
         observed_at=observed,
         requested=requested,
         crawl_config_digest=crawl_config_digest,
+        capture_spaces=spaces,
     )
 
 
@@ -629,6 +639,10 @@ def _artifacts_payload(artifacts: Any) -> dict[str, Any]:
         # таблицы (файл не создавался); «таблиц нет» против «таблицы не искали» различимы
         # в блоке ``tables`` манифеста, а не в пустом CSV.
         "tables": _path(getattr(artifacts, "tables", None)),
+        # План 28 §10: трасса локальных вызовов оценщика — путь к таблице. ``None`` —
+        # вызовов не записано (файл не создавался); «профиль не включён» и «модель не
+        # звала» различает поле контракта ``tool_profile``, а не пустой файл.
+        "tool_calls": _path(getattr(artifacts, "tool_calls", None)),
         # A3: качество поддержки карты — путь к файлу с двумя замерами и их адресами.
         # Числа публикуются и строкой-заметкой (см. ``commands/report.py``), путь нужен,
         # чтобы оператор знал, куда смотреть.
@@ -2731,7 +2745,11 @@ def _resolve_phases(
     passports_dir = _resolve_passports_dir(args, paths)
     # Импорт локальный: ``execution_axes`` сам импортирует из этого модуля (парсеры и
     # хелперы осей), поэтому на уровне модуля получился бы цикл. Функция — чистая.
-    from core.cli.execution_axes import resolve_query_lang, resolve_retrieval_profile
+    from core.cli.execution_axes import (
+        resolve_query_lang,
+        resolve_retrieval_profile,
+        resolve_tool_profile,
+    )
 
     raw_root = str(paths.corpus_raw) if paths is not None else "corpus_raw"
     # 09 §8.1–§8.5: тот же корень, что у ``IndexBuilderPort`` (composition root), —
@@ -2834,6 +2852,16 @@ def _resolve_phases(
         # порядок из кода — тот же дефект D2, из-за которого профиль резолвится здесь.
         "query_lang": resolve_query_lang(
             getattr(args, "query_lang", None), deploy_config
+        ),
+        # План ``28`` §9: профиль локальных инструментов — тот же резолвер, что дал
+        # контракту каноническую строку (``tool_profile`` → ``run_id``). Объект, а не
+        # строка: фаза исполняет набор и бюджет, а не разбирает объявление. Второй
+        # формулы нет — та же чистая функция тех же входов, поэтому контракт и
+        # исполнение разойтись не могут.
+        "tool_profile": resolve_tool_profile(
+            getattr(args, "tool_profile", None),
+            getattr(args, "tool_max_calls", None),
+            deploy_config,
         ),
         # D2: доменные профили (из domain_profiles.yaml) + явное переопределение
         # оси fetch (--render-modes); резолв FetchPlan — в pipeline Ш5.

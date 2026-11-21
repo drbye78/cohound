@@ -50,6 +50,7 @@ from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.config.run_config import (
     _CATALOG_COLUMNS,
     _GOLDEN_COLUMNS,
+    CATALOG_OPTIONAL_COLUMNS,
     load_baselines,
     load_catalog,
     load_cohort,
@@ -485,7 +486,9 @@ def _safe_join(base: str | Path, *parts: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _catalog_cells(row: CatalogRow, include_deprecated: bool) -> list[_Cell]:
+def _catalog_cells(
+    row: CatalogRow, include_deprecated: bool, include_optional: bool = False
+) -> list[_Cell]:
     cells: list[_Cell] = [
         row.param_id,
         row.title,
@@ -499,6 +502,16 @@ def _catalog_cells(row: CatalogRow, include_deprecated: bool) -> list[_Cell]:
         json.dumps(row.concept_terms, ensure_ascii=False, sort_keys=True) if row.concept_terms else "",
         "|".join(row.search_langs),
     ]
+    if include_optional:
+        # Порядок — ровно ``CATALOG_OPTIONAL_COLUMNS``: заголовок и строки собираются из
+        # одного объявления, иначе колонки поехали бы относительно заголовка.
+        cells.extend(
+            [
+                row.semantics,
+                row.evidence,
+                row.param_class.value if row.param_class else "",
+            ]
+        )
     if include_deprecated:
         cells.extend(["true" if row.deprecated else "false", row.replaced_by or ""])
     return cells
@@ -787,9 +800,26 @@ def save_artifact(package_dir: str | Path, name: str, data: Any) -> Path:
     rows = list(data)
     if name == "catalog":
         include_deprecated = any(row.deprecated or row.replaced_by for row in rows)
-        header = CATALOG_WRITE_COLUMNS if include_deprecated else _CATALOG_COLUMNS
+        # План 28: необязательные колонки (семантика/подсказка/класс) пишутся только
+        # тогда, когда они **есть хотя бы в одной строке**. Иначе запись старого пакета
+        # добавила бы три пустые колонки — то есть объявила бы поля, которых в пакете нет
+        # (A3: отсутствие не выдаётся за пустое значение). Наличие — по содержимому, а не
+        # по флагу вызывающего: второго источника истины не заводим.
+        include_optional = any(
+            row.semantics or row.evidence or row.param_class is not None for row in rows
+        )
+        header: tuple[str, ...] = _CATALOG_COLUMNS
+        if include_optional:
+            header = (*header, *CATALOG_OPTIONAL_COLUMNS)
+        if include_deprecated:
+            header = (*header, "deprecated", "replaced_by")
         return atomic_write_csv(
-            path, header, [_catalog_cells(row, include_deprecated) for row in _sorted_catalog(rows)]
+            path,
+            header,
+            [
+                _catalog_cells(row, include_deprecated, include_optional)
+                for row in _sorted_catalog(rows)
+            ],
         )
     if name == "baselines":
         return atomic_write_csv(path, BASELINE_WRITE_COLUMNS, [_baseline_cells(row) for row in _sorted_baselines(rows)])

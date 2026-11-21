@@ -112,8 +112,13 @@ def test_schema_version_is_additive_bump() -> None:
     3.27.0 — методология 0.4.0: колонка ``cell_evidence.scope_acceptance`` **удалена**
     вместе с per-cell подписью (публикацию ``❌`` авторизует гейт G4); таблица не менялась,
     файлы ≤ 3.26.0 отвергаются гейтом версии.
+
+    3.28.0 — план ``28`` §9: добавлена таблица ``cell_tool_calls`` (трасса вызовов
+    локальных инструментов — провенанс ячейки) и индекс ``idx_chunks_doc`` по
+    ``corpus_chunks(doc_id)``; проверяемая таблица не менялась, файлы ≤ 3.27.0
+    отвергаются гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.27.0"
+    assert SCHEMA_VERSION == "3.28.0"
     conn = connect(":memory:")
     try:
         tables = {

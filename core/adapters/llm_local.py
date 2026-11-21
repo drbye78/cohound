@@ -13,7 +13,20 @@ vLLM/SGLang у нас): vLLM/SGLang могут быть бэкендом обл�
 ``web_search``, и конструктор/``complete`` этого адаптера их тоже не принимают и не
 передают в HTTP-запрос. Search-enabled модели живут за другим портом
 (``ports/search.py``); смешивать контуры запрещено (§7.2/§7.4). В HTTP-payload
-отправляются только ``model``/``messages``/``temperature``/``seed``/``response_format``.
+``complete`` отправляются только ``model``/``messages``/``temperature``/``seed``/
+``response_format``.
+
+**Локальные инструменты — отдельный метод, а не расширение ``complete``.** Метод
+:meth:`LocalEvaluator.turn` обслуживает порт ``LocalToolCallerPort``: он отправляет
+провайдеру **ровно** объявленные схемы инструментов (``tools[].function``) и
+``tool_choice="auto"``. Инструменты **локальные**: их исполняет ядро
+(``core/pipeline/local_tools.py``), адаптер только передаёт запрос модели и возвращает
+её просьбы; ни ``web_search``, ни какого-либо другого входа в сеть, кроме endpoint'а
+LLM, у адаптера нет и здесь не появляется. Отдельный метод, а не поле в ``LLMRequest``,
+держит I18 структурно: наличие ``turn`` не делает ``complete`` способным вызывать
+инструменты. ``response_format`` в режиме инструментов **не отправляется**: грамматика
+constrained decoding и tool-calling конфликтуют в одном запросе у OI-совместимых
+серверов, поэтому провенанс такого хода честно называет ``decoder="none"``.
 
 **Constrained decoding — форма, не семантика.** Реальный путь передаёт JSON Schema
 ячейки (``response_format={"type": "json_schema", ...}``), из которой OI-совместимый
@@ -74,7 +87,14 @@ from pydantic import BaseModel, ValidationError
 
 from core.domain import LLMCellOutput
 from core.domain.enums import Decoder, ReasoningEffort
-from core.ports.llm import LLMRequest, LLMResponse, TokenUsage
+from core.domain.tools import ToolInvocation, ToolSpec
+from core.ports.llm import (
+    LLMRequest,
+    LLMResponse,
+    TokenUsage,
+    ToolTurn,
+    ToolTurnRequest,
+)
 from core.util.hashing import content_hash
 from core.util.retry import retry_after_header
 
@@ -92,6 +112,7 @@ __all__ = [
     "GenerateFn",
     "LocalEvaluator",
     "ReasoningWireUnsupported",
+    "ToolCallRefused",
     "decoder_wire_type",
     "endpoint_host",
     "normalize_api_base",
@@ -225,6 +246,21 @@ class EvaluatorUnavailable(RuntimeError):
     """Оценщик недоступен: нет HTTP-зависимости и не внедрён ``generate``."""
 
 
+class ToolCallRefused(EvaluationError):
+    """Модель попросила вызвать инструмент, которого **нет** в объявленном наборе.
+
+    Отказ, а не «пропустим и продолжим». Набор инструментов — объявленный вход
+    измерения (:class:`core.domain.tools.ToolProfile`): вызов имени вне набора означал бы,
+    что модель исполняет то, чего прогон не объявлял, и вердикт перестал бы быть
+    функцией объявленных входов. Молчаливый пропуск выглядел бы как «модель ничего не
+    просила», то есть как другой ход при том же входе.
+
+    Наследует :class:`EvaluationError`: это отказ **формы ответа**, и путь обработки у
+    него тот же (``evaluation_failed`` с retry ≤ ``max_retries``, §7.1), но машинный
+    ``reason="tool_not_allowed"`` отличает его от невалидного JSON в журнале вызовов.
+    """
+
+
 def _reasoning_tokens_of(usage_raw: dict[str, Any]) -> int:
     """Токены рассуждения из ``usage`` (0 — провайдер не назвал).
 
@@ -253,6 +289,71 @@ def _reasoning_tokens_of(usage_raw: dict[str, Any]) -> int:
 def _httpx_available() -> bool:
     """Установлен ли ``httpx`` (без импорта пакета)."""
     return importlib.util.find_spec("httpx") is not None
+
+
+def _tool_wire(spec: ToolSpec) -> dict[str, Any]:
+    """Схема объявленного инструмента в форме OI-совместимого ``tools[]``.
+
+    Переводится **объявленный** :class:`ToolSpec`, а не реализация инструмента: иначе
+    набор доступных модели вызовов описывался бы кодом, который эти вызовы исполняет, и
+    менялся бы без смены идентичности прогона.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": dict(spec.parameters),
+        },
+    }
+
+
+def _tool_arguments(
+    raw: Any,
+    *,
+    name: str,
+    finish_reason: str | None,
+    usage: TokenUsage,
+) -> dict[str, Any]:
+    """Аргументы вызова из ``function.arguments`` (OI отдаёт JSON-**строкой**).
+
+    Три допустимые формы: отсутствие аргументов (``{}`` — инструмент без параметров),
+    уже разобранное отображение (часть совместимых серверов) и JSON-строка. Невалидный
+    JSON и не-объект — отказ: ``ToolInvocation`` с угаданными аргументами означал бы
+    вызов, которого модель не просила.
+    """
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if not isinstance(raw, str):
+        raise EvaluationError(
+            f"аргументы вызова «{name}» обязаны быть JSON-объектом или строкой, "
+            f"получено {type(raw).__name__}",
+            reason="invalid_json",
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise EvaluationError(
+            f"аргументы вызова «{name}» — невалидный JSON: {exc}",
+            reason="invalid_json",
+            raw=raw,
+            finish_reason=finish_reason,
+            usage=usage,
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise EvaluationError(
+            f"аргументы вызова «{name}» обязаны быть JSON-объектом, "
+            f"получено {type(parsed).__name__}",
+            reason="invalid_json",
+            raw=raw,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+    return parsed
 
 
 #: Seed оценщика по умолчанию — то же значение, что передаёт composition root
@@ -653,6 +754,201 @@ class LocalEvaluator:
             reasoning=reasoning,
         )
 
+    def turn(self, req: ToolTurnRequest) -> ToolTurn:
+        """Один ход диалога с **локальными** инструментами (``LocalToolCallerPort``, §7).
+
+        Провайдеру уходят **ровно** объявленные схемы (``req.allowed_tools``) и
+        ``tool_choice="auto"``: набор инструментов — объявленный вход измерения, а не то,
+        что модель выберет по ходу. Просьба вызвать имя вне набора —
+        :class:`ToolCallRefused`, а не «пропустим»: иначе ход описывал бы исполнение,
+        которого прогон не объявлял.
+
+        **Инструменты локальные.** Их исполняет ядро (``core/pipeline/local_tools.py``) по
+        корпусу прогона; адаптер только передаёт просьбы модели. Ни ``web_search``, ни
+        другого входа в сеть, кроме endpoint'а LLM, здесь нет — I18 остаётся структурной.
+
+        **``response_format`` не отправляется.** Constrained decoding (грамматика из JSON
+        Schema) и tool-calling конфликтуют в одном запросе у OI-совместимых серверов,
+        поэтому форма ответа держится pydantic-парсом, а провенанс хода честно называет
+        ``decoder="none"`` (:attr:`LLMResponse.decoder` у финального ответа). Это
+        видимый факт, а не тихое понижение: ``TurnRequest`` не несёт метки механизма, и
+        выдумывать её нельзя.
+
+        Ответ разбирается одним путём с :meth:`complete`: ``choices[0].message.content``
+        проходит через :meth:`_parse` (та же проверка формы/инвариантов и те же
+        ``raw``/``finish_reason``/``usage`` в отказе). Пустой ход (ни вердикта, ни
+        вызовов) — отказ формы: ячейка не должна молча стать ``❓`` из-за пустого ответа.
+
+        :raises ToolCallRefused: имя инструмента вне ``req.allowed_tools``.
+        :raises EvaluationError: невалидный JSON/форма, пустой ход, обрыв по потолку.
+        :raises EvaluatorUnavailable: нет ``httpx`` (шов ``generate`` ход не обслуживает:
+            он возвращает текст, а не структуру вызова, и подделывать её здесь нельзя).
+        """
+        specs = tuple(req.allowed_tools)
+        allowed = frozenset(spec.name for spec in specs)
+        if len(allowed) != len(specs):
+            raise ValueError(
+                "ToolTurnRequest.allowed_tools: имена инструментов обязаны быть уникальны"
+            )
+        seed = req.seed if req.seed is not None else self.seed
+        temperature = req.temperature if req.temperature is not None else self.temperature
+        model_id = req.model_id or self.model_id
+        effort = (
+            req.reasoning_effort
+            if req.reasoning_effort is not None
+            else self.reasoning_effort
+        )
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": req.prompt}],
+            "temperature": temperature,
+            "seed": seed,
+            "stream": False,
+        }
+        payload.update(reasoning_wire(model_id, effort))
+        max_tokens = req.max_tokens if req.max_tokens is not None else self.max_tokens
+        if max_tokens is not None:
+            payload["max_tokens"] = int(max_tokens)
+        if specs:
+            # Ровно объявленный набор, в объявленном порядке: набор — вход измерения.
+            payload["tools"] = [_tool_wire(spec) for spec in specs]
+            payload["tool_choice"] = "auto"
+        # ``response_format`` намеренно отсутствует: грамматика и tool-calling не
+        # совмещаются в одном запросе у OI-совместимых серверов. Форму держит ``_parse``.
+        with self._usage_lock:
+            self._calls += 1
+        data = self._post_chat(payload)
+        return self._turn_from_response(data, req=req, allowed=allowed)
+
+    def _turn_from_response(
+        self, data: Any, *, req: ToolTurnRequest, allowed: frozenset[str]
+    ) -> ToolTurn:
+        """Разбирает ответ провайдера в :class:`ToolTurn` (вызовы либо вердикт).
+
+        Оба пусты — отказ формы (``reason="empty_turn"``), а не пустой ``ToolTurn``:
+        вызывающий обязан увидеть, что модель не ответила ни тем, ни другим, а не
+        получить объект, из которого непонятно, что произошло.
+        """
+        message, finish_reason, usage, reasoning = self._envelope(data)
+        with self._usage_lock:
+            self._prompt_tokens += usage.prompt_tokens
+            self._completion_tokens += usage.completion_tokens
+            self._reasoning_tokens += usage.reasoning_tokens
+        raw_message = json.dumps(message, ensure_ascii=False, default=str)
+        calls_raw = message.get("tool_calls") if isinstance(message, dict) else None
+        if calls_raw:
+            calls = tuple(
+                self._tool_invocation(
+                    item,
+                    allowed=allowed,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                )
+                for item in calls_raw
+            )
+            return ToolTurn(
+                tool_calls=calls,
+                raw=raw_message,
+                finish_reason=finish_reason,
+            )
+        content = message.get("content") if isinstance(message, dict) else None
+        if (content is None or content == "") and finish_reason == "length":
+            limit = self.max_tokens if self.max_tokens is not None else "серверный"
+            raise EvaluationError(
+                "генерация оценщика оборвана по потолку токенов "
+                f"(finish_reason=length, max_tokens={limit}): увеличьте "
+                "llm.<slot>.max_tokens — модель израсходовала бюджет на reasoning",
+                reason="length",
+                finish_reason=finish_reason,
+                raw=content if isinstance(content, str) else "",
+                usage=usage,
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise EvaluationError(
+                "ход не содержит ни вердикта, ни вызова инструмента "
+                f"(content={type(content).__name__}, finish_reason={finish_reason!r})",
+                reason="empty_turn",
+                finish_reason=finish_reason,
+                raw=raw_message,
+                usage=usage,
+            )
+        try:
+            output = self._parse(req.response_schema, content)
+        except EvaluationError as exc:
+            # Путь отказа обязан назвать ответ — как у :meth:`complete`.
+            if exc.raw is None:
+                exc.raw = content
+            if exc.usage is None:
+                exc.usage = usage
+            if exc.finish_reason is None:
+                exc.finish_reason = finish_reason
+            if exc.reasoning is None:
+                exc.reasoning = reasoning
+            raise
+        return ToolTurn(
+            final=LLMResponse(
+                output=output,
+                raw=content,
+                prompt_hash=content_hash(req.prompt),
+                # В режиме инструментов грамматика не навязывалась — провенанс это
+                # называет, а не приписывает адаптеру объявленный механизм.
+                decoder=Decoder.NONE.value,
+                finish_reason=finish_reason,
+                usage=usage,
+                reasoning=reasoning,
+            ),
+            raw=content,
+            finish_reason=finish_reason,
+        )
+
+    def _tool_invocation(
+        self,
+        item: Any,
+        *,
+        allowed: frozenset[str],
+        finish_reason: str | None,
+        usage: TokenUsage,
+    ) -> ToolInvocation:
+        """Элемент ``tool_calls`` → :class:`ToolInvocation` (имя проверяется по набору)."""
+        function = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(function, dict):
+            raise EvaluationError(
+                f"tool_calls: элемент без function: {item!r}",
+                reason="invalid_json",
+                raw=json.dumps(item, ensure_ascii=False, default=str),
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise EvaluationError(
+                f"tool_calls: пустое имя инструмента: {item!r}",
+                reason="invalid_json",
+                raw=json.dumps(item, ensure_ascii=False, default=str),
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+        if name not in allowed:
+            declared = ", ".join(sorted(allowed)) or "набор пуст"
+            raise ToolCallRefused(
+                f"модель запросила инструмент «{name}» вне объявленного набора "
+                f"({declared}): вызов не исполняется, потому что набор инструментов — "
+                "объявленный вход измерения",
+                reason="tool_not_allowed",
+                raw=json.dumps(item, ensure_ascii=False, default=str),
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+        return ToolInvocation(
+            name=name,
+            arguments=_tool_arguments(
+                function.get("arguments"),
+                name=name,
+                finish_reason=finish_reason,
+                usage=usage,
+            ),
+        )
+
     # ------------------------------------------------------------------
     # Предпроверка ключа (health-check, не измерение)
     # ------------------------------------------------------------------
@@ -780,7 +1076,6 @@ class LocalEvaluator:
         :class:`ReasoningWireUnsupported` **до** отправки: тихий пропуск параметра выдал бы
         «уровень не выбран» за «уровень объявлен».
         """
-        headers = self._headers()
         model_id = req.model_id or self.model_id
         effort = (
             req.reasoning_effort
@@ -810,16 +1105,26 @@ class LocalEvaluator:
             # (в живом прогоне: манифест ``json_object``, провод ``json_schema``).
             payload["response_format"] = self._response_format(req)
         # I18: tools/web_search в запрос НЕ добавляются — здесь их нет по построению.
-        #
-        # Один клиент на адаптер: ``httpx.post`` создаёт клиент на вызов, а при
-        # параллельных вызовах это лишнее TLS-рукопожатие на каждый. Пул соединений
-        # ограничен ``max_connections`` (≥ объявленного числа вызовов в полёте).
+        return self._extract(self._post_chat(payload))
+
+    def _post_chat(self, payload: dict[str, Any]) -> Any:
+        """Один POST на ``/v1/chat/completions`` и разбор тела ответа в ``data``.
+
+        Один путь на боевой вызов (:meth:`_http_complete`) и на ход с инструментами
+        (:meth:`turn`): иначе два места по-своему решали бы, что считать отказом
+        транспорта, а что — ответом провайдера, и журнал вызовов читался бы по-разному в
+        зависимости от того, был ли включён профиль инструментов.
+
+        Один клиент на адаптер: ``httpx.post`` создаёт клиент на вызов, а при
+        параллельных вызовах это лишнее TLS-рукопожатие на каждый. Пул соединений
+        ограничен ``max_connections`` (≥ объявленного числа вызовов в полёте).
+        """
         client = self._http_client()
         try:
             response = client.post(
                 self._completions_url(),
                 json=payload,
-                headers=headers,
+                headers=self._headers(),
                 timeout=self.timeout,
             )
         except Exception as exc:  # httpx.HTTPError/JSON-ошибки транспорта
@@ -848,14 +1153,13 @@ class LocalEvaluator:
                 provider_body=body,
             )
         try:
-            data = response.json()
+            return response.json()
         except Exception as exc:  # JSON-ошибка транспорта
             raise EvaluationError(
                 f"HTTP-вызов оценщика не удался: {type(exc).__name__}: {exc}",
                 reason="http_error",
                 status_code=response.status_code,
             ) from exc
-        return self._extract(data)
 
     def _completions_url(self) -> str:
         """Адрес генерации: каноническая база + ``/v1/chat/completions``.
@@ -931,35 +1235,12 @@ class LocalEvaluator:
 
         Метка остановки и ``usage`` читаются **до** проверок: отказ по потолку тоже
         израсходовал токены, и путь отказа обязан их назвать (журнал вызовов).
+
+        Оболочка ответа разбирается **одним** местом (:meth:`_envelope`) — её же читает
+        ход с инструментами: два разбора одного ответа разошлись бы молча.
         """
-        try:
-            choice = data["choices"][0]
-            message = choice["message"]
-            content = message["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise EvaluationError(
-                f"неожиданная форма ответа сервера: {data!r}", reason="http_error"
-            ) from exc
-        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
-        if not isinstance(finish_reason, str):
-            finish_reason = None
-        usage_raw = data.get("usage") or {}
-        if not isinstance(usage_raw, dict):
-            # Неожиданная форма расхода — «не названо», а не измеренный ноль.
-            usage_raw = {}
-        # Рассуждение провайдер называет по-разному: ``completion_tokens_details.
-        # reasoning_tokens`` (OI-совместимая форма) либо ``completion_thinking_tokens``
-        # (плоское поле части совместимых серверов). Оба — часть ``completion``, поэтому
-        # не прибавляются к нему, а публикуются отдельной статьёй (провенанс стоимости).
-        usage = TokenUsage(
-            prompt_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
-            completion_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
-            reasoning_tokens=_reasoning_tokens_of(usage_raw),
-        )
-        # Текст рассуждения, если провайдер его отдал (замер 06.11.2026: отдаёт).
-        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
-        if not isinstance(reasoning, str) or not reasoning:
-            reasoning = None
+        message, finish_reason, usage, reasoning = self._envelope(data)
+        content = message.get("content") if isinstance(message, dict) else None
         if (content is None or content == "") and finish_reason == "length":
             limit = self.max_tokens if self.max_tokens is not None else "серверный"
             error = EvaluationError(
@@ -985,6 +1266,45 @@ class LocalEvaluator:
             error.reasoning = reasoning
             raise error
         return content, usage, finish_reason, reasoning
+
+    def _envelope(
+        self, data: Any
+    ) -> tuple[Any, str | None, TokenUsage, str | None]:
+        """Оболочка ответа провайдера: ``message``, ``finish_reason``, ``usage``, reasoning.
+
+        Единственный разбор ``choices[0]`` на модуль: им пользуются и обычный вызов
+        (:meth:`_extract`), и ход с инструментами (:meth:`_turn_from_response`).
+        ``content`` здесь **не** требуется: у хода с вызовами его может не быть вовсе,
+        и это не «неожиданная форма», а другой вид ответа.
+        """
+        try:
+            choice = data["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EvaluationError(
+                f"неожиданная форма ответа сервера: {data!r}", reason="http_error"
+            ) from exc
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if not isinstance(finish_reason, str):
+            finish_reason = None
+        usage_raw = (data.get("usage") or {}) if isinstance(data, dict) else {}
+        if not isinstance(usage_raw, dict):
+            # Неожиданная форма расхода — «не названо», а не измеренный ноль.
+            usage_raw = {}
+        # Рассуждение провайдер называет по-разному: ``completion_tokens_details.
+        # reasoning_tokens`` (OI-совместимая форма) либо ``completion_thinking_tokens``
+        # (плоское поле части совместимых серверов). Оба — часть ``completion``, поэтому
+        # не прибавляются к нему, а публикуются отдельной статьёй (провенанс стоимости).
+        usage = TokenUsage(
+            prompt_tokens=int(usage_raw.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
+            reasoning_tokens=_reasoning_tokens_of(usage_raw),
+        )
+        # Текст рассуждения, если провайдер его отдал (замер 06.11.2026: отдаёт).
+        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+        if not isinstance(reasoning, str) or not reasoning:
+            reasoning = None
+        return message, finish_reason, usage, reasoning
 
     def _import_http(self) -> Any:
         """Лениво импортирует ``httpx``; при отсутствии — ``EvaluatorUnavailable``."""

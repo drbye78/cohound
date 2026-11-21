@@ -105,6 +105,29 @@ def _no_network_llm_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run_module, "_probe_llm_key", lambda *args, **kwargs: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_network_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preflight сети в тестах не ходит в реальную сеть — по той же причине, что проба ключа.
+
+    ``run`` проверяет связность объявленных хостов **до** фаз (дешёвый отказ вместо сотен
+    провалов на корпусе). Хосты при этом — данные фикстуры (``p1.test``, ``docs.test``), а
+    не теста: они не резолвятся ни на одном хосте, поэтому без подмены каждый
+    ``main(["run", …])`` с фазой ``corpus`` падал бы с ``EXIT_USAGE``/``network`` — и это
+    был бы отказ не о коде, а о DNS песочницы (измерено 22.11.2026: **40** падений в
+    ``tests/cli``, все с одной строкой «не отвечают: p1.test»).
+
+    Подменяется **точка вызова** в composition root, а не функция проверки: сам preflight и
+    его три исхода проверяются напрямую (``tests/cli/test_run_network_preflight.py``), где
+    зонд инъецируется аргументом. Тест, которому нужен настоящий отказ прогона по сети,
+    восстанавливает функцию сам — исключение видно в коде теста, а не прячется в фикстуре.
+    """
+    from core.cli.commands import run as run_module
+
+    monkeypatch.setattr(
+        run_module, "preflight_network", lambda **kwargs: (None, ())
+    )
+
+
 @pytest.fixture
 def isolated_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

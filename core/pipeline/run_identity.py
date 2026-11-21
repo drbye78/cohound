@@ -65,7 +65,7 @@ class DeclaredAxesLike(Protocol):
 
     ``pipeline`` **не** импортирует ``cli`` (слои): конкретный носитель —
     :class:`core.cli.execution_axes.DeclaredExecutionAxes` (composition root). Здесь
-    описан только контракт доступа: девять объявленных осей, без наблюдаемых величин.
+    описан только контракт доступа: объявленные оси, без наблюдаемых величин.
 
     **Все члены — read-only свойства, а не поля.** Носитель объявлен
     ``@dataclass(frozen=True)``: его поля записывать нельзя, и порт с изменяемыми
@@ -175,6 +175,15 @@ class DeclaredAxesLike(Protocol):
     #: Меняет лексическую выдачу, значит вердикты; версия движка сюда не входит.
     @property
     def lexical_spec(self) -> dict[str, Any] | None: ...
+
+    #: План ``28`` §9: **профиль локальных инструментов оценщика** —
+    #: ``ToolProfile.canonical()`` (``expand_to_section,table_row;max_calls=4``).
+    #: Условие измерения: набор доступных вызовов меняет то, что модель может
+    #: адресовать, то есть набор доказательств и вердикт. ``None`` — ось не передана
+    #: (чистые вызовы/legacy-конструкторы); объявленный путь без инструментов даёт
+    #: стабильную строку ``-;max_calls=0``, а не ``None``.
+    @property
+    def tool_profile(self) -> str | None: ...
 
 
 def _declared(declared: DeclaredAxesLike | None, name: str) -> Any:
@@ -405,6 +414,14 @@ def build_execution_contract(
         # который даёт стабильный дайджест пустого множества.
         "baselines_digest": _declared(declared, "baselines_digest"),
         "baseline_facts_digest": _declared(declared, "baseline_facts_digest"),
+        # План ``28`` §9: профиль локальных инструментов оценщика — **условие
+        # измерения** (что модель может адресовать, то есть какие доказательства
+        # достижимы), поэтому 37-е поле контракта. Значение — каноническая строка
+        # ``ToolProfile.canonical()``: путь без инструментов выразим (``-;max_calls=0``),
+        # иначе «старый код» и «новый код без инструментов» стали бы неразличимы.
+        # Трасса вызовов (``cell_tool_calls``) сюда не входит: она известна только после
+        # исполнения, а ``run_id`` обязан быть вычислим до сборки портов.
+        "tool_profile": _declared(declared, "tool_profile"),
         "lexical_spec": _declared(declared, "lexical_spec"),
         "extractor_stack": _declared(declared, "extractor_stack"),
         # 16-runs-schema-boundary §4.2: устройство эмбеддера. Объявленная ось

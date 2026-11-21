@@ -30,6 +30,7 @@ from core.domain.models import (
     SeedEntry,
     SeedsConfig,
 )
+from core.domain.tools import NO_TOOL_PROFILE, ToolProfile
 from core.pipeline.digests import (
     EXECUTION_CONTRACT_FIELDS,
     baseline_facts_digest,
@@ -724,3 +725,31 @@ def test_pdf_limits_product_layer_changes_crawl_config_digest() -> None:
         product_axes={"p1": ProductCrawlAxes(pdf_max_pages=500)},
     )
     assert len({base, with_product, other_limit}) == 3
+
+def test_tool_profile_is_a_contract_condition() -> None:
+    """Профиль инструментов — 37-е поле контракта (план 28 §9), а не провенанс.
+
+    Набор доступных вызовов меняет то, что модель может адресовать (раздел документа,
+    строку таблицы), то есть набор доказательств и вердикт. Без поля два прогона с
+    разными инструментами жили бы под одним ``run_id`` — тот же класс дефекта, что был
+    у ``prompt_template`` до своей правки. Трасса вызовов (``cell_tool_calls``) в
+    контракт **не** входит: она известна только после исполнения.
+    """
+    assert "tool_profile" in EXECUTION_CONTRACT_FIELDS
+    assert len(EXECUTION_CONTRACT_FIELDS) == 37
+
+    with_tools = _contract_values()
+    with_tools["tool_profile"] = ToolProfile(
+        name="t1", tools=("expand_to_section",), max_calls=2
+    ).canonical()
+    without_tools = _contract_values()
+    without_tools["tool_profile"] = NO_TOOL_PROFILE.canonical()
+    assert execution_contract_digest(with_tools) != execution_contract_digest(without_tools)
+
+    # Путь без инструментов выразим и стабилен: ``-;max_calls=0`` — объявленное значение,
+    # а не ``None``. Иначе «старый код» и «новый код без инструментов» стали бы двумя
+    # необъявленными состояниями.
+    assert NO_TOOL_PROFILE.canonical() == "-;max_calls=0"
+    assert execution_contract_digest(without_tools) == execution_contract_digest(
+        {**_contract_values(), "tool_profile": "-;max_calls=0"}
+    )

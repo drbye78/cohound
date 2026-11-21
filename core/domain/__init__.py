@@ -94,6 +94,7 @@ from core.domain.enums import (
     MeasurementOrigin,
     OnboardingState,
     Origin,
+    ParamClass,
     ParamType,
     PdfDevice,
     PdfPipeline,
@@ -243,6 +244,14 @@ from core.domain.scoring import (
     scoring_policy_spec,
     sensitivity,
 )
+from core.domain.tools import (
+    NO_TOOL_PROFILE,
+    ToolInvocation,
+    ToolOutcome,
+    ToolProfile,
+    ToolSpec,
+    ToolTraceEntry,
+)
 
 # RUF022 (сортировка ``__all__``) неприменим по существу: порядок здесь — **слои**
 # (enums → константы → models → …), и каждый блок несёт свой комментарий. Алфавитная
@@ -303,7 +312,14 @@ __all__ = [  # noqa: RUF022
     "MeasurementOrigin",
     "OnboardingState",
     "Origin",
+    "ParamClass",
     "ParamType",
+    "NO_TOOL_PROFILE",
+    "ToolInvocation",
+    "ToolOutcome",
+    "ToolProfile",
+    "ToolSpec",
+    "ToolTraceEntry",
     "ProductMode",
     "ProductScope",
     "PublishabilityClass",

@@ -33,6 +33,7 @@ from core.domain import (
     FetchMode,
     GoldenTier,
     InheritanceMode,
+    ParamClass,
     ParamType,
     RankingPolicy,
     RateLimitSpec,
@@ -124,6 +125,71 @@ def test_load_catalog_happy() -> None:
     assert showcase.param_type is ParamType.SHOWCASE
     assert showcase.absence_rule is AbsenceRuleType.DISTRIBUTION_ABSENCE
     assert showcase.concept_terms == {"ru": ["b"], "en": ["b"]}
+
+
+def test_load_catalog_without_semantics_columns_loads_as_before() -> None:
+    """Пакет без новых колонок грузится как раньше: «не заполнено», а не выдумка.
+
+    ``semantics``/``evidence`` — пустая строка, ``param_class`` — ``None``: «не объявлено»
+    отличимо от объявленного значения, и промпт печатает слот только при непустом.
+    """
+    rows = load_catalog(FIXTURES / "catalog.csv")
+    assert all(row.semantics == "" for row in rows)
+    assert all(row.evidence == "" for row in rows)
+    assert all(row.param_class is None for row in rows)
+
+
+def test_load_catalog_reads_semantics_evidence_and_param_class(tmp_path: Path) -> None:
+    """21.11.2026 (план 28): три необязательные колонки читаются в ``CatalogRow``."""
+    path = _write(
+        tmp_path,
+        "catalog.csv",
+        "param_id,title,module,group,importance,param_type,rule,absence_rule,"
+        "role_binding,concept_terms,search_langs,semantics,evidence,param_class\n"
+        "param_z,Параметр Z,mod_a,grp,Баз,fact,граница зачёта,explicit,role_a,,ru,"
+        "\"Что спрашивается; не смежное свойство.\",\"release notes дистрибутива\",value\n",
+    )
+    rows = load_catalog(path)
+    assert len(rows) == 1
+    assert rows[0].semantics == "Что спрашивается; не смежное свойство."
+    assert rows[0].evidence == "release notes дистрибутива"
+    assert rows[0].param_class is ParamClass.VALUE
+
+
+def test_load_catalog_empty_optional_cells_are_not_filled(tmp_path: Path) -> None:
+    """Пустая ячейка новой колонки — «не заполнено»: ``""``/``None``, а не дефолт."""
+    path = _write(
+        tmp_path,
+        "catalog.csv",
+        "param_id,title,module,group,importance,param_type,rule,absence_rule,"
+        "role_binding,concept_terms,search_langs,semantics,evidence,param_class\n"
+        "param_z,Параметр Z,mod_a,grp,Баз,fact,граница зачёта,explicit,role_a,,ru,,,\n",
+    )
+    row = load_catalog(path)[0]
+    assert row.semantics == ""
+    assert row.evidence == ""
+    assert row.param_class is None
+
+
+def test_load_catalog_unknown_param_class_is_a_visible_refusal(tmp_path: Path) -> None:
+    """Неизвестный ``param_class`` — отказ с именем файла, номером строки и значением.
+
+    Тихий дефолт превратил бы опечатку в класс, а класс решает, что считается ответом
+    (``value`` требует величины), — угадывать его нельзя (A3).
+    """
+    path = _write(
+        tmp_path,
+        "catalog.csv",
+        "param_id,title,module,group,importance,param_type,rule,absence_rule,"
+        "role_binding,concept_terms,search_langs,semantics,evidence,param_class\n"
+        "param_z,Параметр Z,mod_a,grp,Баз,fact,граница зачёта,explicit,role_a,,ru,,,capabilty\n",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        load_catalog(path)
+    message = str(excinfo.value)
+    assert "catalog.csv" in message
+    assert "capabilty" in message
+    assert "строка 2" in message
 
 
 def test_load_baselines_happy() -> None:

@@ -66,6 +66,7 @@ from core.cli.errors import (
     LintFailure,
 )
 from core.cli.execution_axes import (
+    add_tool_axis_flags,
     declared_status_dict_version,
     resolve_declared_axes,
     resolve_query_lang,
@@ -83,6 +84,7 @@ from core.cli.wiring import (
     llm_host_notices,
     manifest_deploy_fields,
     preflight_extraction_budget,
+    preflight_network,
     resolve_and_build_search_adapter,
     resolve_extraction_budget,
     run_db_path,
@@ -98,6 +100,7 @@ from core.config.deploy import (
 )
 from core.domain import (
     CrawlItemStatus,
+    CrawlNetworkMode,
     CrawlRunConfig,
     CrawlSessionStatus,
     ProductScope,
@@ -110,7 +113,11 @@ from core.pipeline.corpus_freshness import (
     document_observation_freshness,
 )
 from core.pipeline.crawl_frontier import resolve_pdf_device
-from core.pipeline.crawl_policy import CrawlPolicyConflict
+from core.pipeline.crawl_policy import (
+    CrawlPolicyConflict,
+    CrawlPolicyResolution,
+    declared_roots,
+)
 from core.pipeline.crawl_session import (
     default_session_id,
     read_provenance,
@@ -253,6 +260,40 @@ def _reconcile_declared_retirements(state_store: Any, seed_config: Any) -> None:
         if any(seed.is_enabled for seed in getattr(product, "seeds", ()) or ()):
             continue
         state_store.reconcile_seed_set(product_id, [])
+
+
+def _network_preflight_hosts(
+    *,
+    policy_resolution: CrawlPolicyResolution,
+    seed_config: Any,
+    refresh_policy: RefreshPolicy,
+) -> list[str]:
+    """Хосты, для которых политика прогона **действительно требует** сети (N3, §21.3).
+
+    Пустой список означает «проверку не выполнять вовсе»: прогону без сети отказывать
+    нечем. Два независимых условия, и оба обязательны:
+
+    * run-политика не ``offline``/``frozen`` — иначе ноль запросов по определению
+      (``RefreshPolicy``: корпус из чанков ``state.db`` либо из ``corpus_raw``);
+    * у корня эффективный ``network_mode`` = ``fetch`` — ``deny`` (в том числе
+      ``scheduled``/``on_request``, разрешённые в ``deny``) означает «ни одного сетевого
+      вызова», и недоступность его хоста не делает прогон неисполнимым.
+
+    Хосты берутся из **объявленных корней** и дедуплицируются по хосту, а не по URL:
+    проверка связности — свойство хоста, и один хост, объявленный десятью корнями,
+    должен стоить одного пробы.
+    """
+    if refresh_policy in (RefreshPolicy.OFFLINE, RefreshPolicy.FROZEN):
+        return []
+    hosts: list[str] = []
+    for root in declared_roots(seed_config):
+        mode = policy_resolution.execution_for(
+            root.product_id, root.root_url
+        ).network_mode
+        if mode is CrawlNetworkMode.FETCH and root.host not in hosts:
+            hosts.append(root.host)
+    return hosts
+
 
 def _blocked_payload(
     run_id: str,
@@ -1327,6 +1368,29 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                         exit_code=EXIT_USAGE,
                     )
 
+            # N3 (план 26 §21.3): preflight сети — дешёвый отказ вместо сотен провалов на
+            # фазе корпуса. Проверка идёт **один раз до фаз**, по объявленным хостам
+            # (дедуп по хосту, не по URL): по URL корпуса не ходим. Запускается только
+            # если политика краула действительно требует сети — прогону без сети
+            # (``--refresh offline``/``frozen``, ``network_mode=deny`` у всех корней)
+            # отказывать нечем, поэтому проверка для него не выполняется вовсе. Это не
+            # измерение: в ``run_id`` не входит, в корпус не пишет, вердиктов не меняет.
+            if "corpus" in _phases_until(args.until):
+                network_hosts = _network_preflight_hosts(
+                    policy_resolution=policy_resolution,
+                    seed_config=seed_config,
+                    refresh_policy=refresh_policy,
+                )
+                if network_hosts:
+                    net_error, net_warnings = preflight_network(hosts=network_hosts)
+                    config_notices.extend(net_warnings)
+                    if net_error is not None:
+                        raise CliError(
+                            net_error.describe(),
+                            code="network",
+                            exit_code=EXIT_USAGE,
+                        )
+
             ports = _resolve_ports(
                 args,
                 deploy_config,
@@ -1999,6 +2063,10 @@ def configure(sub: Any) -> None:
         help="retrieval_cutoff_K (I20) выреза ретривала для фазы оценки; дефолт — "
         "DEFAULT_RETRIEVAL_CUTOFF_K (10)",
     )
+    # План 28 §9: профиль локальных инструментов оценщика — объявленная ось контракта
+    # (``tool_profile`` → ``run_id``). Тот же регистратор, что у ``plan``: форма флагов
+    # одна, паритет проверяется тестом, читающим собранные парсеры.
+    add_tool_axis_flags(p_run)
     p_run.add_argument(
         "--query-lang",
         dest="query_lang",

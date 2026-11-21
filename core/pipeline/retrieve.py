@@ -307,7 +307,9 @@ def rrf_fuse_chunks(
 
     Провенанс (``content_hash``/``build_id``/``text``/``heading_path``/``product_id``)
     берётся из первого встреченного источника; при расхождении предпочитается dense
-    (векторный индекс хранит точный ``build_id`` сборки).
+    (векторный индекс хранит точный ``build_id`` сборки). ``context_prefix``/``table_ref``
+    переносятся тем же путём: это метаданные фрагмента, и потеря адреса таблицы на слиянии
+    означала бы, что шапка таблицы печатается только на одном из двух профилей ретривала.
 
     Приоритет dense действует **только для согласованных данных**: если у одного и того
     же ``chunk_id`` расходятся ``content_hash`` или ``product_id``, слияние отвергается
@@ -345,6 +347,7 @@ def rrf_fuse_chunks(
             build_id=provenance[cid].build_id,
             score=scores[cid],
             context_prefix=provenance[cid].context_prefix,
+            table_ref=provenance[cid].table_ref,
         )
         for cid in ordered
     ]

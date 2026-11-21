@@ -1,7 +1,7 @@
 """coHound — конкретное операционное хранилище ``SqliteStore`` (L3, W3/T3.1, W3/T3.4).
 
 Реализует ``StorePort`` и ``GateStore`` (``core/ports/store.py``) поверх схемы §4.4
-(``core/store/sqlite.py``: 16 таблиц + ``schema_meta``, индексы, триггеры I4/I6/I7/I13/I18).
+(``core/store/sqlite.py``: таблицы, индексы, триггеры I4/I6/I7/I13/I18).
 Также реализует ``domain.anchors.SourceResolver`` (T3.4): детерминированный
 резолв ``source_id`` → URL + ``content_hash`` без сети (I10/I15/I19).
 
@@ -58,12 +58,14 @@ from core.domain import (
     SourceScope,
     Status,
     TerminationReason,
+    ToolTraceEntry,
 )
 from core.domain.doc_blocks import blocks_from_json, blocks_to_json
 from core.domain.doc_tables import table_ref_to_json, tables_from_json, tables_to_json
 from core.domain.ocr_probe import OCR_PROBE_VALUES
 from core.domain.page_map import page_map_from_json, page_map_to_json
 from core.ports.store import CorpusArtifactRow, PlanInputsConflict, RunIndexRef
+from core.ports.tools import ToolCallRecord
 from core.ports.types import Chunk
 from core.store.sqlite import SchemaVersionMismatch, connect, connect_read_only
 from core.store.sqlite_rows import (
@@ -344,6 +346,13 @@ def _declared_ocr_probe(value: Any) -> str | None:
     «проверено и работает».
     """
     return value if isinstance(value, str) and value in OCR_PROBE_VALUES else None
+
+
+# ``ToolCallRecord`` объявлен в портах (``core/ports/tools.py``) и реэкспортируется здесь
+# ради прежних импортов: строку собирает ``pipeline`` (``evaluate_batch``), а пишет
+# ``store``, и импорт ``pipeline → store`` запрещён матрицей слоёв (§4.1). Одно
+# определение вместо двух: адрес ячейки в записи вызова не должен разъехаться между
+# писателем и читателем.
 
 
 class SqliteStore:
@@ -1134,6 +1143,114 @@ class SqliteStore:
                 notes=protocol.get("notes"),
             )
 
+    # -- трасса локальных инструментов (план ``28`` §9) ------------------- #
+    #: Колонки ``cell_tool_calls`` (порядок обязан совпадать с ``_TOOL_CALL_ROW``).
+    _TOOL_CALL_COLUMNS = (
+        "run_id",
+        "product_id",
+        "param_id",
+        "seq",
+        "tool",
+        "args_json",
+        "ok",
+        "chars",
+        "reason",
+    )
+
+    def save_tool_calls(self, run_id: str, entries: Sequence[ToolCallRecord]) -> int:
+        """Пакетная запись трассы вызовов инструментов ячейки; возвращает число строк.
+
+        **Идемпотентность — по ячейке, а не по строке.** Затронутые ячейки
+        ``(product_id, param_id)`` сначала очищаются, затем пишутся пришедшие строки —
+        в одной транзакции. ``INSERT OR REPLACE`` по первичному ключу сам по себе этого
+        не даёт: повторный прогон ячейки с **меньшим** числом вызовов оставил бы хвост
+        ``seq`` от прошлого прогона, и трасса перестала бы быть функцией последней
+        записи («сколько вызовов стоил вердикт» читалось бы по смеси двух прогонов).
+
+        Пустой вход — ничего не пишет и не стирает: «трассы нет» и «трасса пустая» —
+        разные факты, и второе должно быть выражено явно вызывающим, а не побочным
+        эффектом пустого списка.
+
+        :param run_id: прогон (внешний ключ на ``runs``); чужая строка — отказ БД.
+        :param entries: строки трассы; ``entry.seq`` — порядок вызова внутри ячейки.
+        :returns: число записанных строк.
+        """
+        if not entries:
+            return 0
+        touched = sorted({(row.product_id, row.param_id) for row in entries})
+        placeholders = ", ".join("?" for _ in self._TOOL_CALL_COLUMNS)
+        insert_sql = (
+            f"INSERT OR REPLACE INTO cell_tool_calls ({', '.join(self._TOOL_CALL_COLUMNS)})"  # noqa: S608 - имена из _TOOL_CALL_COLUMNS, значения — bind
+            f" VALUES ({placeholders})"
+        )
+        delete_sql = (
+            "DELETE FROM cell_tool_calls WHERE run_id = ? AND product_id = ? AND param_id = ?"
+        )
+        rows = [
+            (
+                run_id,
+                row.product_id,
+                row.param_id,
+                int(row.entry.seq),
+                row.entry.name,
+                _as_json_text(dict(row.entry.arguments)),
+                1 if row.entry.ok else 0,
+                int(row.entry.chars),
+                row.entry.reason,
+            )
+            for row in entries
+        ]
+        with self.conn:
+            self.conn.executemany(
+                delete_sql, [(run_id, product_id, param_id) for product_id, param_id in touched]
+            )
+            self.conn.executemany(insert_sql, rows)
+        return len(rows)
+
+    def iter_tool_calls(self, run_id: str) -> Iterator[ToolCallRecord]:
+        """Трасса прогона по ``product_id, param_id, seq`` (аудит и отчёт).
+
+        Порядок — адрес ячейки, затем порядок вызова: трасса читается как
+        последовательность ходов, а не как множество строк. Пустой итератор — вызовов
+        не записано (причина — профиль без инструментов либо модель не звала; это
+        различает поле контракта ``tool_profile``, а не таблица).
+        """
+        sql = (
+            f"SELECT {', '.join(self._TOOL_CALL_COLUMNS)} FROM cell_tool_calls"  # noqa: S608 - имена из _TOOL_CALL_COLUMNS, run_id — bind
+            " WHERE run_id = ? ORDER BY product_id, param_id, seq"
+        )
+        for row in self.conn.execute(sql, (run_id,)):
+            arguments = _parse_json_text(row["args_json"])
+            yield ToolCallRecord(
+                product_id=row["product_id"],
+                param_id=row["param_id"],
+                entry=ToolTraceEntry(
+                    seq=int(row["seq"]),
+                    name=row["tool"],
+                    arguments=arguments if isinstance(arguments, Mapping) else {},
+                    ok=bool(row["ok"]),
+                    chars=int(row["chars"] or 0),
+                    reason=row["reason"],
+                ),
+            )
+
+    def count_tool_calls(self, run_id: str) -> int | None:
+        """Число записанных вызовов прогона; ``None`` — трассы нет ни одной строки.
+
+        Почему ``None``, а не ``0``. «Вызовов не было» и «трассы не было» таблица
+        различить не может: при профиле без инструментов в неё не пишет никто, и
+        отсутствие строк — то же самое, что отсутствие вызовов. Напечатать в отчёте
+        ``0`` значило бы утверждать первое («инструменты были, но не звались»), а это
+        ложь о прогоне без инструментов. Различить факты может только поле контракта
+        ``tool_profile``: отчёт читает его вместе с этим числом. Поэтому здесь — «строк
+        нет» (``None``) либо их число; ноль не возвращается никогда.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM cell_tool_calls WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        count = int(row["n"]) if row is not None else 0
+        return count if count else None
+
     # -- llm scenarios / manifest ---------------------------------------- #
     def save_llm_scenarios(self, bindings: list[ScenarioBinding]) -> None:
         """Upsert маршрутизации модель→сценарий (I21). ``evaluator`` без веб-тула (I18)."""
@@ -1293,6 +1410,7 @@ class SqliteStore:
                 " crawl_provenance_json = ?,"
                 " crawl_strategy = ?, crawl_rate_limit = ?,"
                 " crawl_config_digest = ?, registry_spec_digest = ?,"
+                " tool_profile = ?,"
                 " execution_contract_digest = ?,"
                 " manual_artifacts_digest = ?, manual_artifacts_json = ?,"
                 " partial_docs_json = ?,"
@@ -1334,6 +1452,10 @@ class SqliteStore:
                     manifest.crawl_rate_limit,
                     manifest.crawl_config_digest,
                     manifest.registry_spec_digest,
+                    # План 28 §9 (3.28.0): профиль локальных инструментов — условие
+                    # измерения (поле контракта). Без записи ``hound diff`` печатал
+                    # «предел диагностики» вместо оси. ``None`` — не записано (не «пусто»).
+                    manifest.tool_profile,
                     manifest.execution_contract_digest,
                     manifest.manual_artifacts_digest,
                     json.dumps(
@@ -3287,6 +3409,10 @@ class SqliteStore:
             crawl_config_digest=row["crawl_config_digest"],
             # §13/E2: дайджест package-scoped спецификаций реестров (граница ``execution_change``).
             registry_spec_digest=row["registry_spec_digest"],
+            # План 28 §9 (3.28.0): профиль локальных инструментов — поле контракта,
+            # поэтому ``hound diff`` называет его осью, а не «пределом диагностики».
+            # NULL → ``None`` (не записано), а не «инструментов нет».
+            tool_profile=row["tool_profile"],
             # 09 §12.5: отпечаток условий измерения (граница ``methodology_change``).
             # NULL → ``None`` (legacy-прогон; дайджест не фабрикуется).
             execution_contract_digest=row["execution_contract_digest"],
@@ -3468,6 +3594,26 @@ class SqliteStore:
             params.append(product_id)
         sql += " ORDER BY product_id, chunk_no, chunk_id"
         for row in self.conn.execute(sql, params):
+            yield self._row_to_chunk(row)
+
+    def iter_chunks_by_doc(self, doc_id: str) -> Iterator[Chunk]:
+        """Чанки одного документа по ``chunk_no, chunk_id`` (план ``28`` §9).
+
+        Адрес инструмента — **документ**, а не сборка: выборка по ``build_id`` ради
+        одного документа читала бы сотни тысяч чанков на каждый вызов инструмента.
+        Индекс ``idx_chunks_doc`` объявлен в DDL (схема 3.28.0) ровно под этот запрос:
+        замер 21.11.2026 на стенде (253 306 чанков) — 153 мс/док без индекса.
+
+        Отсутствующий ``doc_id`` — пустой итератор, а не исключение: «документа нет в
+        корпусе прогона» — штатный ответ инструмента и обязан быть отличим от сбоя.
+        Порядок детерминирован (``chunk_no, chunk_id``), поэтому раздел документа
+        собирается в том же порядке, в каком его читает человек.
+        """
+        sql = (
+            f"SELECT {', '.join(self._CHUNK_COLUMNS)} FROM corpus_chunks"  # noqa: S608 - имена из _CHUNK_COLUMNS, doc_id — bind
+            " WHERE doc_id = ? ORDER BY chunk_no, chunk_id"
+        )
+        for row in self.conn.execute(sql, (doc_id,)):
             yield self._row_to_chunk(row)
 
     def has_corpus_chunks(

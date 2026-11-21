@@ -174,6 +174,8 @@ FORMER_SHIM_COLUMNS: dict[str, tuple[str, ...]] = {
         "cycle_id",
         "cohort_digest",
         "seeds_digest",
+        # План 28 §9 (3.28.0): профиль локальных инструментов — поле контракта (37-е).
+        "tool_profile",
     ),
     "cells": (
         "review_reason",
@@ -350,8 +352,15 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
     3.27.0 (методология 0.4.0, решение владельца 19.11.2026) — колонка
     ``cell_evidence.scope_acceptance`` **удалена**: per-cell подписи человека больше нет,
     публикацию ``❌`` авторизует гейт G4. Шимов нет: прогоны ≤ 3.26.0 отвергаются гейтом.
+
+    3.28.0 (план ``28`` §9) — таблица ``cell_tool_calls`` (трасса вызовов локальных
+    инструментов: провенанс, не условие измерения — в контракт входит профиль
+    ``tool_profile``) и индекс ``idx_chunks_doc`` по ``corpus_chunks(doc_id)``: инструмент
+    адресует документ, а без индекса ``WHERE doc_id = ?`` сканировал корпус (замер
+    21.11.2026: 153 мс/док на 253 306 чанках). Шимов нет: прогоны ≤ 3.27.0 отвергаются
+    гейтом версии.
     """
-    assert SCHEMA_VERSION == "3.27.0"
+    assert SCHEMA_VERSION == "3.28.0"
 
     conn = connect(":memory:")
     try:
@@ -402,6 +411,30 @@ def test_boundary_columns_exist_on_fresh_db_and_version_is_pinned() -> None:
         assert "roots_json" in coverage_cols
         cell_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cells)")}
         assert "absence_as_of" in cell_cols
+
+        # 3.28.0 (план 28 §9): трасса вызовов инструментов — провенанс ячейки. PK несёт
+        # адрес ячейки и порядок вызова: он же служит индексом чтения трассы прогона.
+        trace_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(cell_tool_calls)")
+        }
+        assert trace_cols == {
+            "run_id",
+            "product_id",
+            "param_id",
+            "seq",
+            "tool",
+            "args_json",
+            "ok",
+            "chars",
+            "reason",
+        }
+        # Индекс адреса инструмента объявлен в DDL: без него ``WHERE doc_id = ?``
+        # сканирует корпус (замер 21.11.2026: 153 мс/док на 253 306 чанках).
+        indexes = {
+            r["name"]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert "idx_chunks_doc" in indexes
 
         tables = {
             r["name"]

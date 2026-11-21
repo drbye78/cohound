@@ -59,6 +59,7 @@ from core.domain.models import (
     CrawlSessionProvenance,
     Satellite,
 )
+from core.domain.tools import NO_TOOL_PROFILE, ToolProfile
 from core.pipeline.block_provenance import blocks_summary
 from core.pipeline.block_provenance import human_line as blocks_human_line
 from core.pipeline.compute import bundle_for_run
@@ -116,7 +117,9 @@ from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
 from core.pipeline.table_provenance import human_line as tables_human_line
 from core.pipeline.table_provenance import tables_summary
+from core.pipeline.tool_provenance import human_line as tool_calls_human_line
 from core.ports.extractor import ExtractorPort
+from core.ports.llm import LocalToolCallerPort
 from core.ports.types import FetchMode
 from core.util.rate_limit import RateLimiter
 
@@ -1070,6 +1073,7 @@ def build_phases(
     crawl_only: bool = False,
     consume_only: bool = False,
     llm_concurrency: int = 1,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
 ) -> dict[str, PhaseFn]:
     """Возвращает реестр ``{phase_name: PhaseFn}`` для не-гейтовых фаз конвейера.
 
@@ -1215,6 +1219,13 @@ def build_phases(
         оценщика держать в полёте. Дефолт ``1`` — последовательно, поведение байт-в-байт.
         В контракт/``run_id`` не входит: время фазы — не условие измерения. Запись в store
         остаётся однопоточной (см. :func:`core.pipeline.evaluate.evaluate_batch`).
+    :param tool_profile: объявленный профиль локальных инструментов оценщика
+        (:class:`core.domain.tools.ToolProfile`) — **тот же** резолвнутый объект, чья
+        каноническая строка вошла в контракт (``tool_profile`` → ``run_id``). Composition
+        root передаёт его из ``DeclaredExecutionAxes``; ``NO_TOOL_PROFILE`` здесь — только
+        модульный вызов без оси (тесты/DI), а не второй дефолт прод-пути. Транспорт
+        (``LocalToolCallerPort``) берётся из ``ctx.ports.evaluator``: адаптер реализует его
+        отдельным методом (I18 — ``complete`` инструментов не получает).
 
     Каждое замыкание детерминировано и не импортирует адаптеры; единственный
     межфазовый канал — замыкание ``holder`` (см. docstring модуля).
@@ -1532,6 +1543,16 @@ def build_phases(
             str(pid): tuple(getattr(passport, "satellites", ()) or ())
             for pid, passport in (passports or {}).items()
         }
+        # Транспорт инструментов — оценщик, если он реализует ``LocalToolCallerPort``
+        # (структурная проверка ``runtime_checkable``-протокола: объявлен ``turn``).
+        # Инструменты живут **отдельным** методом: ``complete`` их не получает (I18),
+        # поэтому «оценщик есть» не значит «инструменты исполнимы».
+        evaluator_port = getattr(ctx.ports, "evaluator", None)
+        tool_caller = (
+            evaluator_port
+            if isinstance(evaluator_port, LocalToolCallerPort)
+            else None
+        )
         return evaluate_phase(
             plan=plan,
             ports=ctx.ports,
@@ -1577,6 +1598,14 @@ def build_phases(
             # Ось исполнения Ш6: число вызовов оценщика в полёте (не условие измерения,
             # поэтому в ``run_id`` не входит). Дефолт 1 — прежний последовательный путь.
             llm_concurrency=llm_concurrency,
+            # План ``28`` §9: профиль инструментов — тот же объект, чья каноническая
+            # строка вошла в контракт. Транспорт — оценщик, если он реализует
+            # ``LocalToolCallerPort`` (структурная проверка: ``turn`` объявлен отдельным
+            # методом, ``complete`` инструментов не получает — I18). Иначе ``None``: при
+            # включённом профиле фаза откажет ``ToolWiringError`` — профиль объявлен, а
+            # исполнять нечем, и это правильный отказ, а не тихий откат.
+            tool_profile=tool_profile,
+            tool_caller=tool_caller,
             # V3: объявленная политика повтора — **тот же** объект, что дал
             # ``run_id`` (``DeclaredExecutionAxes.evaluation_policy``). Фаза исполняет
             # его ``max_retries`` вместо литерала; ``None`` (оси нет) — дефолт модуля.
@@ -1967,6 +1996,16 @@ def build_phases(
         # поэтому хвост называет носитель иначе: сами блоки — у документа, адрес блока у
         # цитаты — в ``evidence_pages.csv``. Строка нужна затем, чтобы оператор увидел
         # **два** факта: сколько структуры и на какой части корпуса вопрос не задавался.
+        # План 28 §10: цена вердикта — той же advisory-строкой. Она называет и число
+        # вызовов, и провалы: «профиль объявлен, вызовов нет» — видимый дефект проводки,
+        # а не отсутствие эффекта.
+        tool_calls_line = tool_calls_human_line(
+            getattr(artifacts, "tool_calls_summary", None)
+        )
+        if tool_calls_line:
+            pending.append(
+                f"отчёт: {tool_calls_line} (трасса: outputs/tool_calls.csv)"
+            )
         blocks_line = blocks_human_line(getattr(artifacts, "blocks_summary", None))
         if blocks_line:
             pending.append(

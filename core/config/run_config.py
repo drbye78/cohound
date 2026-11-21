@@ -40,6 +40,7 @@ from core.domain.enums import (
     GoldenTier,
     Importance,
     InheritanceMode,
+    ParamClass,
     ParamType,
     SourceKind,
     Status,
@@ -56,6 +57,7 @@ from core.domain.models import (
 )
 
 __all__ = [
+    "CATALOG_OPTIONAL_COLUMNS",
     "cross_check_products",
     "load_baseline_facts",
     "load_baselines",
@@ -85,6 +87,14 @@ _CATALOG_COLUMNS = (
     "concept_terms",
     "search_langs",
 )
+#: Необязательные колонки каталога (план 28, 21.11.2026): авторская семантика параметра,
+#: подсказка «где искать» и класс параметра. Обязательными они **не** объявлены: старые
+#: пакеты без них грузятся как раньше (``""``/``None`` — «не заполнено», а не выдумка).
+#: Держатся отдельно от :data:`_CATALOG_COLUMNS`, потому что этот кортеж — ещё и
+#: объявленный набор колонок **записи** каталога (``package_io.CATALOG_WRITE_COLUMNS``), и
+#: добавление в него сделало бы колонки обязательными для чтения.
+CATALOG_OPTIONAL_COLUMNS = ("semantics", "evidence", "param_class")
+
 _BASELINE_COLUMNS = ("baseline_id", "param_id", "inheritance_mode")
 #: Колонки ``sources/baseline_facts.csv`` (план 27 §3.3). Обязательны только четыре
 #: идентифицирующие; остальные читаются как пустые, если колонки нет в файле.
@@ -263,14 +273,43 @@ def load_catalog(path: str | Path) -> list[CatalogRow]:
     пакет без них грузится с дефолтами (``False``/``None``) — обратная совместимость.
     Валидаторы домена: ``param_id`` — slug в нижнем регистре; ``showcase`` → ``rule``
     упоминает публичную величину/метрику.
+
+    С 21.11.2026 (план 28) читаются ещё три **необязательные** колонки —
+    ``semantics``/``evidence``/``param_class``: они несут авторскую семантику параметра,
+    подсказку «где искать» и природу вопроса. Пакет без них грузится как раньше
+    (``""``/``""``/``None`` — «не заполнено»). Пустая ячейка — не «пустая семантика»:
+    слот промпта печатается только при непустом значении, поэтому отсутствие видно как
+    отсутствие. Неизвестное значение ``param_class`` — видимый отказ с именем файла,
+    номером строки и самим значением: тихий дефолт превратил бы опечатку в класс.
     """
     rows: list[CatalogRow] = []
+    where = f"catalog.csv ({path})"
     for lineno, row in _iter_csv(path, _CATALOG_COLUMNS, "catalog.csv"):
         try:
             rows.append(_catalog_row(row))
         except (ValidationError, ValueError) as exc:
-            raise ValueError(f"catalog.csv строка {lineno}: {exc}") from exc
+            raise ValueError(f"{where} строка {lineno}: {exc}") from exc
     return rows
+
+
+def _param_class(raw: str | None) -> ParamClass | None:
+    """Разбирает ``param_class``: пусто → ``None``, неизвестное значение → отказ.
+
+    Отказ называет и значение, и допустимые варианты: «неизвестно» здесь неотличимо от
+    опечатки, а класс параметра решает, что считается ответом (``value`` требует
+    величины), поэтому угадывать его нельзя (A3).
+    """
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip()
+    try:
+        return ParamClass(value)
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in ParamClass)
+        raise ValueError(
+            f"param_class={value!r}: неизвестный класс параметра; ожидается одно из: "
+            f"{allowed}"
+        ) from exc
 
 
 def _catalog_row(row: dict[str, str | None]) -> CatalogRow:
@@ -287,6 +326,10 @@ def _catalog_row(row: dict[str, str | None]) -> CatalogRow:
         role_binding=_opt(row, "role_binding"),
         concept_terms=_parse_concept_terms(row.get("concept_terms")),
         search_langs=_split_items(row.get("search_langs")),
+        # План 28: необязательные колонки семантики. Пустая ячейка → «не заполнено».
+        semantics=_opt(row, "semantics") or "",
+        evidence=_opt(row, "evidence") or "",
+        param_class=_param_class(row.get("param_class")),
         # §13: опциональные колонки; при отсутствии — дефолтные значения модели.
         deprecated=_opt_bool(row, "deprecated"),
         replaced_by=_opt(row, "replaced_by"),

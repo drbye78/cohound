@@ -355,6 +355,23 @@ class ParamType(StrEnum):
     SHOWCASE = "showcase"
 
 
+class ParamClass(StrEnum):
+    """Класс параметра: природа вопроса, а не способ зачёта (план 28).
+
+    Источник — авторская разметка пакета (`param_class` в `parameter_semantics.jsonl`,
+    с 21.11.2026 — 12-я колонка каталога). Отличие от :class:`ParamType`: ``param_type``
+    говорит, как зачитывать величину (факт/витрина), ``param_class`` — что именно
+    спрашивается (возможность, элемент интерфейса, коммерческое предложение, величина).
+    Оценщик видит класс отдельным слотом: ``value``-параметр нельзя закрыть ссылкой на
+    описание механизма — нужна величина.
+    """
+
+    CAPABILITY = "capability"
+    GUI_FEATURE = "gui_feature"
+    OFFER = "offer"
+    VALUE = "value"
+
+
 class Importance(StrEnum):
     CRITICAL = "Кр"
     IMPORTANT = "Вж"

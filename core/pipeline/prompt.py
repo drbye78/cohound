@@ -22,21 +22,37 @@
 
 **``context_prefix``.** Контекст абзаца/заголовка печатается в шапке (``context:``), а не
 приклеивается к тексту: он не входит в цитатную сверку и не должен ею считаться. Поле
-есть у :class:`~core.ports.types.Chunk`; у ``RetrievedChunk`` его нет, поэтому на
-retrieval-пути строка отсутствует (это видимая граница порта, а не тихий пропуск).
+объявлено у обоих носителей (``Chunk`` и ``RetrievedChunk``) и доезжает до промпта на
+retrieval-пути.
 
 **Схема плейсхолдеров шаблона.** ``{{NAME}}``, где ``NAME`` — один из слотов
-(``PRODUCT_ID``, ``TITLE``, ``GROUP``, ``MODULE``, ``RULE``, ``ABSENCE_RULE``,
-``ABSENCE_GUIDANCE``, ``SATELLITES``, ``EXTRA_INSTRUCTIONS``, ``CHUNKS``). Подстановка —
+(``PRODUCT_ID``, ``TITLE``, ``GROUP``, ``MODULE``, ``SEMANTICS``, ``PARAM_CLASS``,
+``RULE``, ``ABSENCE_RULE``, ``ABSENCE_GUIDANCE``, ``SATELLITES``,
+``EXTRA_INSTRUCTIONS``, ``TOOLS``, ``CHUNKS``). Подстановка —
 **однопроходная** (``re.sub`` по токенам исходного шаблона), поэтому значения не
 пересканируются: ``{{...}}`` внутри текста чанка остаётся литеральным. Неизвестный слот в
 шаблоне — ``ValueError`` (шаблон и код рассинхронизированы — это ошибка сборки, не данных).
 
+**Семантика параметра (план 28, 21.11.2026).** ``semantics``/``param_class`` — авторские
+поля строки каталога. Они печатаются **вместе с подписью** и только при непустом значении
+(``СЕМАНТИКА: …`` / ``КЛАСС ПАРАМЕТРА: …``): пустая ячейка каталога не должна давать
+строку-подпись без значения. Подпись собирается здесь, а не в шаблоне, ровно для этого:
+шаблон печатает слот отдельной строкой, и пустое значение оставляет пустую строку — как
+``{{EXTRA_INSTRUCTIONS}}``.
+
+**Шапка таблицы (план 28 §4.0).** Если у чанка есть ``table_ref``, в шапку фрагмента
+добавляются строки ``таблица:`` / ``столбцы:`` / ``строка:`` из объекта
+:class:`~core.domain.doc_tables.ExtractedTable`. Это метаданные: они не входят в
+``chunk.text``, и шаблон прямо запрещает их цитировать. Нет объекта при известном
+адресе — печатается видимая пометка о деградации, а не тишина.
+
 **``prompt_hash``.** Ровно контракт :func:`core.util.hashing.prompt_hash`:
-``H(template_version, rule, absence_rule, group, module, sorted(chunk_ids))``. Сателлиты,
-заголовок параметра и отрендеренный текст в hash **не входят** — такова
-фиксированная формула §5/01 §5. Полный текст сохраняется в каталоге аудита
-(``prompts/{sha256(text)}.json``), чтобы аудит мог сверить содержимое.
+``H(template_version, rule, absence_rule, group, module, semantics, param_class,
+tool_instructions, table_material, sorted(chunk_ids))``. Всё, что печатается в тексте
+промпта и не является текстом чанка, обязано входить в материал hash — иначе два разных
+промпта несли бы один hash. Сателлиты, заголовок параметра и отрендеренный текст в hash
+**не входят** — такова фиксированная формула §5/01 §5. Полный текст сохраняется в каталоге
+аудита (``prompts/{sha256(text)}.json``), чтобы аудит мог сверить содержимое.
 
 **Адрес артефакта ≠ ``prompt_hash`` (замер 06.11.2026).** Формула §5 не покрывает ни
 ``product_id``, ни заголовок параметра, ни текст чанков, поэтому две разные ячейки
@@ -66,6 +82,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+from core.domain.doc_tables import ExtractedTable, TableKey, TableRef
 from core.domain.enums import AbsenceRuleType
 from core.domain.models import CatalogRow, Satellite
 from core.ports.types import Chunk
@@ -81,6 +98,7 @@ __all__ = [
     "TEMPLATE_VERSION",
     "CompiledPrompt",
     "PromptArchive",
+    "TableKey",
     "compile_prompt",
     "render_queries",
     "role_vocabulary_of",
@@ -143,7 +161,18 @@ PROMPT_HASH_CONFLICT = "prompt_hash_conflict"
 #:   Это ``execution_change`` (``prompt_template`` входит в контракт), поэтому ``run_id``
 #:   меняется у всех пакетов; ``prompt_hash`` покрывает ``group``/``module`` тем же
 #:   аргументом (см. :func:`core.util.hashing.prompt_hash`).
-TEMPLATE_VERSION = "evaluator_v6"
+#: * ``evaluator_v7`` (21.11.2026) — правила v6 дословно плюс четыре вещи, которых не было
+#:   ни в одной версии: (1) слоты ``{{SEMANTICS}}``/``{{PARAM_CLASS}}`` и абзац о том, что
+#:   авторская семантика — **определение вопроса**, а не доказательство (цитата по-прежнему
+#:   обязана быть подстрокой ТЕКСТА фрагмента); (2) абзац о табличной шапке фрагмента
+#:   (``таблица:``/``столбцы:``/``строка:``) и запрет цитировать её — это метаданные;
+#:   (3) слот ``{{TOOLS}}`` и абзац о том, что инструменты адресуют уже собранный материал,
+#:   а их вывод доказательством не является; (4) поле ``value`` в описании схемы ответа —
+#:   только для параметров класса ``value``. Причина: замер плана 28 §1–§2 показал, что
+#:   семантика (181/181 заполнена) и адрес табличного чанка до модели не доходили, а
+#:   ``value``-параметру (7 из 181) некуда было положить величину. Это ``execution_change``:
+#:   ``prompt_template`` меняется у всех пакетов.
+TEMPLATE_VERSION = "evaluator_v7"
 
 #: Каталог версионированных шаблонов (данные модуля, не пакет Python).
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
@@ -189,6 +218,11 @@ ABSENCE_GUIDANCE: dict[AbsenceRuleType, str] = {
 
 #: Любой из двух допустимых типов чанка на входе компиляции (у обоих есть ``chunk_id``/``text``).
 ChunkLike = Chunk | RetrievedChunk
+
+# ``TableKey`` реэкспортируется из ``core.domain.doc_tables`` (см. ``__all__`` и импорт
+# выше): модуль печатает шапку таблицы, и прежние импорты
+# ``from core.pipeline.prompt import TableKey`` остаются валидными. Своей копии нет —
+# иначе порт и промпт держали бы два определения одного ключа.
 
 #: Хвост ``chunk_id``, отделяющий номер фрагмента от идентификатора документа.
 #:
@@ -392,7 +426,90 @@ def _text_field(chunk: ChunkLike, name: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _render_chunk(chunk: ChunkLike, number: int) -> str:
+def _table_header_lines(
+    chunk: ChunkLike, tables: Mapping[TableKey, ExtractedTable] | None
+) -> list[str]:
+    """Строки шапки о таблице: подпись, столбцы, строки — или пометка деградации.
+
+    ``table_ref`` читается через ``getattr``: поле объявлено и у ``Chunk``, и у
+    ``RetrievedChunk``, но компиляция не должна падать на другом виде чанка (двойник в
+    тесте, будущий носитель). Адрес у ``RetrievedChunk`` заполняется ретривалом и
+    обогащением среза в ``evaluate_batch``; если он там ``None``, строки нет — и это
+    объявленное «неизвестно», а не «не таблица».
+
+    Три состояния, и они не сводятся друг к другу (A3):
+
+    * адреса нет — строк нет вовсе (кусок не из таблицы **или** адрес неизвестен;
+      различие публикуется отчётом, а не промптом);
+    * адрес есть, объекта нет — видимая пометка «адрес известен, объект не передан»:
+      молчание читалось бы как «таблица не нужна»;
+    * адрес есть и объект есть — подпись, имена столбцов и содержимое названных строк.
+
+    ``row_start``/``row_end`` — **включительные** 1-based номера строк данных
+    (:class:`~core.domain.doc_tables.TableRef`, так их и пишет чанкер: ``covered[0]+1`` …
+    ``covered[-1]+1``). Обе границы ``None`` — кусок содержит только шапку таблицы: тогда
+    называются столбцы, а строк нет.
+    """
+    ref = getattr(chunk, "table_ref", None)
+    if not isinstance(ref, TableRef):
+        return []
+    key: TableKey = (_document_id(chunk.chunk_id), ref.table_id)
+    table = tables.get(key) if tables else None
+    if table is None:
+        return [f"таблица: адрес известен, объект не передан ({key[1]})"]
+
+    if ref.row_start is None:
+        span = "строки данных в куске не названы"
+    elif ref.row_start == ref.row_end:
+        span = f"строка {ref.row_start}"
+    else:
+        span = f"строки {ref.row_start}–{ref.row_end}"
+    caption = (table.caption or "").strip()
+    if caption:
+        lines = [f"таблица: {caption} ({ref.table_id}) — {span}"]
+    else:
+        lines = [f"таблица: {ref.table_id} — {span}"]
+    if table.header:
+        lines.append("столбцы: " + " | ".join(table.header))
+    if ref.row_start is not None and ref.row_end is not None:
+        rows = table.rows[ref.row_start - 1 : ref.row_end]
+        for row in rows:
+            lines.append("строка: " + " | ".join(row))
+        expected = ref.row_end - ref.row_start + 1
+        if len(rows) != expected:
+            # Адрес называет строки, которых в объекте нет: это расхождение адреса и
+            # объекта, а не пустая таблица. Печатается, чтобы «строк не видно» не
+            # читалось как «строк нет».
+            lines.append(
+                f"строка: адрес называет {expected} строк, в объекте таблицы их "
+                f"{len(table.rows)}"
+            )
+    return lines
+
+
+def _table_material(
+    chunks: Sequence[ChunkLike], tables: Mapping[TableKey, ExtractedTable] | None
+) -> str:
+    """Канонический текст табличной шапки — материал ``prompt_hash``.
+
+    Шапка таблицы печатается в промпте, значит обязана входить в hash: иначе два разных
+    промпта (с шапкой и без) несли бы один ``prompt_hash``. Порядок — порядок уже
+    отсортированных чанков, поэтому материал не зависит от порядка входа. Чанк без
+    табличных строк материала не добавляет: ``""`` — «шапки таблицы в промпте нет».
+    """
+    parts: list[str] = []
+    for chunk in chunks:
+        lines = _table_header_lines(chunk, tables)
+        if lines:
+            parts.append(chunk.chunk_id + "\x1e" + "\x1f".join(lines))
+    return "\x1d".join(parts)
+
+
+def _render_chunk(
+    chunk: ChunkLike,
+    number: int,
+    tables: Mapping[TableKey, ExtractedTable] | None = None,
+) -> str:
     """Один фрагмент: структурная шапка + строка ``текст:`` + дословный текст (C7).
 
     Шапка — метаданные, отделённые от текста явной границей: цитатная сверка (I22)
@@ -402,7 +519,13 @@ def _render_chunk(chunk: ChunkLike, number: int) -> str:
 
     ``context_prefix`` печатается, только если он не повторяет ``heading_path``:
     markdown-чанкер кладёт туда тот же путь заголовков, и дубль стоил бы токенов,
-    ничего не добавляя.
+    ничего не добавляя. Поле объявлено у обоих носителей (``Chunk`` и
+    ``RetrievedChunk``), читается через ``getattr`` — компиляция не зависит от вида чанка.
+
+    Табличная шапка (``tables``) — тоже метаданные и стоит до ``текст:`` (см.
+    :func:`_table_header_lines`). ``tables=None`` — объекта таблицы нет ни у одного
+    фрагмента; поведение по умолчанию остаётся прежним, кроме видимой пометки у чанка
+    с известным адресом.
     """
     lines = [f"[фрагмент {number}]", f"source_id: {chunk.chunk_id}"]
     document = _document_id(chunk.chunk_id)
@@ -414,17 +537,22 @@ def _render_chunk(chunk: ChunkLike, number: int) -> str:
     context = _text_field(chunk, "context_prefix")
     if context and context != heading:
         lines.append(f"context: {context}")
+    lines.extend(_table_header_lines(chunk, tables))
     lines.append("текст:")
     lines.append(chunk.text)
     return "\n".join(lines)
 
 
-def _render_chunks(chunks: Sequence[ChunkLike]) -> str:
+def _render_chunks(
+    chunks: Sequence[ChunkLike],
+    tables: Mapping[TableKey, ExtractedTable] | None = None,
+) -> str:
     """Рендер фрагментов: шапка + дословный текст каждого (см. :func:`_render_chunk`)."""
     if not chunks:
         return "(нет фрагментов)"
     return "\n\n".join(
-        _render_chunk(chunk, number) for number, chunk in enumerate(chunks, 1)
+        _render_chunk(chunk, number, tables)
+        for number, chunk in enumerate(chunks, 1)
     )
 
 
@@ -436,11 +564,13 @@ def compile_prompt(
     satellites: Sequence[Satellite] = (),
     absence_rule: AbsenceRuleType | None = None,
     role_vocabulary: Collection[str] | None = None,
+    tables: Mapping[TableKey, ExtractedTable] | None = None,
+    tool_instructions: str = "",
 ) -> CompiledPrompt:
     """Механически компилирует промпт оценщика и его ``prompt_hash`` (§7.1/§5).
 
     :param param: строка каталога (``rule``, ``absence_rule``, ``role_binding``,
-        ``group``, ``module``, …).
+        ``group``, ``module``, ``semantics``, ``param_class``, …).
     :param product_id: продукт-скоуп ячейки (I17 — evidence только из его чанков).
     :param chunks: переданные оценщику фрагменты (``Chunk``|``RetrievedChunk``).
     :param satellites: сателлиты **этого** продукта (смешивать продукты нельзя: сателлит —
@@ -450,6 +580,14 @@ def compile_prompt(
     :param role_vocabulary: словарь ролей каталога (:func:`role_vocabulary_of`) — им
         отличается «роль чужого параметра» от «роли, которой в каталоге нет». ``None`` —
         прежнее строгое поведение (только точное совпадение роли).
+    :param tables: карта ``(документ, table_id) → ExtractedTable`` для табличных
+        фрагментов (:data:`TableKey`). Ключ парный, потому что ``table_id`` локален для
+        документа, а срез ячейки содержит фрагменты разных документов: карта по одному
+        ``table_id`` подставила бы таблицу одного документа к фрагменту другого. ``None``
+        (по умолчанию) — объекта таблицы нет: чанк с известным адресом получает видимую
+        пометку о деградации, остальные рендерятся как раньше.
+    :param tool_instructions: готовый текст блока инструментов. Пустая строка (по
+        умолчанию) — слот печатается пустым, как ``{{EXTRA_INSTRUCTIONS}}``.
 
     Слот ``{{EXTRA_INSTRUCTIONS}}`` шаблона подставляется **пустой строкой** и параметром
     не является: значения у него нет ни в одном объявленном входе, а текст выпущенных
@@ -458,8 +596,9 @@ def compile_prompt(
 
     Чанки упорядочиваются по ``chunk_id`` (детерминизм R7); ``chunk_ids`` уходят в
     ``prompt_hash`` уже отсортированными, поэтому hash не зависит от порядка входа.
-    ``group``/``module`` входят в материал hash (шаблон v6 печатает их): hash обязан
-    описывать текст, иначе два разных промпта несли бы один hash.
+    ``group``/``module``/``semantics``/``param_class``/``tool_instructions``/табличная
+    шапка входят в материал hash (шаблон v7 печатает их): hash обязан описывать текст,
+    иначе два разных промпта несли бы один hash.
     """
     resolved_absence = absence_rule if absence_rule is not None else param.absence_rule
     if not isinstance(resolved_absence, AbsenceRuleType):
@@ -468,6 +607,13 @@ def compile_prompt(
     ordered_chunks = sorted(chunks, key=lambda chunk: chunk.chunk_id)
     chunk_ids = sorted(chunk.chunk_id for chunk in ordered_chunks)
 
+    semantics = (param.semantics or "").strip()
+    raw_param_class = getattr(param, "param_class", None)
+    # ``model_copy(update=…)`` обходит валидацию, поэтому значение может прийти строкой:
+    # берётся ``value`` у enum и само значение у строки — рендер не должен падать на этом.
+    param_class = str(getattr(raw_param_class, "value", raw_param_class) or "")
+    table_material = _table_material(ordered_chunks, tables)
+
     digest = prompt_hash(
         TEMPLATE_VERSION,
         param.rule,
@@ -475,15 +621,23 @@ def compile_prompt(
         chunk_ids,
         group=param.group,
         module=param.module,
+        semantics=semantics,
+        param_class=param_class,
+        tool_instructions=tool_instructions,
+        table_material=table_material,
     )
 
     mapping: dict[str, str] = {
         "PRODUCT_ID": product_id,
         "TITLE": param.title,
-        # Группа и модуль — ориентир, а не доказательство (см. evaluator_v6.txt): они
+        # Группа и модуль — ориентир, а не доказательство (см. evaluator_v7.txt): они
         # уточняют, о какой части продукта правило, и не подменяют цитату.
         "GROUP": param.group,
         "MODULE": param.module,
+        # Семантика и класс печатаются с подписью и только при непустом значении: пустая
+        # ячейка каталога не должна давать строку-подпись без значения.
+        "SEMANTICS": f"СЕМАНТИКА: {semantics}" if semantics else "",
+        "PARAM_CLASS": f"КЛАСС ПАРАМЕТРА: {param_class}" if param_class else "",
         "RULE": param.rule,
         "ABSENCE_RULE": resolved_absence.value,
         "ABSENCE_GUIDANCE": ABSENCE_GUIDANCE[resolved_absence],
@@ -494,7 +648,9 @@ def compile_prompt(
         # значения у него нет: параметра нет ни у одного вызывающего. Подстановка пустой
         # строки сохраняет отрендеренный промпт байт-в-байт и не трогает текст шаблона.
         "EXTRA_INSTRUCTIONS": "",
-        "CHUNKS": _render_chunks(ordered_chunks),
+        # Инструменты — готовый текст вызывающего; пусто — пустая строка, не ``None``.
+        "TOOLS": tool_instructions,
+        "CHUNKS": _render_chunks(ordered_chunks, tables),
     }
     text = _fill_template(_load_template(TEMPLATE_VERSION), mapping)
 
@@ -511,13 +667,14 @@ def render_queries(
     param: CatalogRow,
     max_queries: int = 3,
     query_lang: str = "all",
+    evidence_query: bool = True,
 ) -> list[str]:
     """Собирает запросы Ш6 (S13): ``[title]`` + концепт-термины, ≤ ``max_queries``.
 
     Порядок детерминирован и не зависит от реализации/LLM (сохраняет симметрию I16):
     заголовок, затем термины объявленного языка, затем остальные в порядке
     :data:`_QUERY_LANG_ORDER`, затем прочие языки лексикографически; внутри языка —
-    порядок пакета.
+    порядок пакета; **последним** — подсказка автора «где искать» (``param.evidence``).
 
     :param query_lang: объявленная ось ``ru`` | ``en`` | ``all`` (``retrieval.query_lang``
         / ``--query-lang``). ``all`` — прежнее поведение (все языки), и оно остаётся
@@ -526,6 +683,10 @@ def render_queries(
         на языке каталога): на английском reference-корпусе это разница между 13 и 42
         ``present`` (замер 19.11.2026), на русской когорте — между hit@10 0.9211 (``ru``)
         и 0.8509 (``en``).
+    :param evidence_query: добавлять ли запрос из ``param.evidence``. Подсказка написана
+        на языке пакета, поэтому на англоязычном корпусе (``query_lang="en"``) она
+        вредила бы и не добавляется — это правило, а не настройка. Флаг существует для
+        вызывающих, которым нужен прежний состав запросов (разведка, приборы).
 
     **Дубликаты схлопываются (замер).** Автор каталога кладёт в ``concept_terms[lang][0]``
     полный заголовок параметра — иначе говоря, повторяет ``title``. Без схлопывания
@@ -535,6 +696,12 @@ def render_queries(
     сохраняет порядок первого появления, поэтому выбор «какие ≤3 запроса пойдут»
     остаётся тем же, что и прежде, — меняется только состав: вместо повтора приходит
     следующий по порядку термин.
+
+    **Подсказка «где искать» — адрес, а не доказательство.** ``evidence`` (план 28 §7.3)
+    называет место («release notes дистрибутива», «вывод команды версии») и потому
+    помогает ретривалу найти пропущенный материал (≈8 % ячеек). В промпт она не идёт:
+    иначе модель цитировала бы подсказку. Бюджет ``max_queries`` действует как раньше —
+    подсказка стоит последней и усекается вместе с остальными.
     """
     if max_queries < 0:
         raise ValueError("max_queries не может быть отрицательным")
@@ -552,9 +719,15 @@ def render_queries(
         # значило бы вернуть тот же дефект, от которого ось избавляет (бюджет 3 запроса
         # съедали термины не того языка).
         ordered_langs = [lang] if lang in terms else []
+    candidates = [param.title, *(t for item in ordered_langs for t in terms[item])]
+    # Подсказка автора — последней и только не на англоязычном корпусе: она написана на
+    # языке пакета (см. докстринг).
+    hint = (getattr(param, "evidence", "") or "").strip()
+    if evidence_query and hint and lang != "en":
+        candidates.append(hint)
     queries: list[str] = []
     seen: set[str] = set()
-    for candidate in [param.title, *(t for item in ordered_langs for t in terms[item])]:
+    for candidate in candidates:
         key = candidate.strip().casefold()
         if not key or key in seen:
             continue

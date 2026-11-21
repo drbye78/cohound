@@ -15,11 +15,13 @@ import json
 
 import pytest
 
+from core.domain.doc_tables import ExtractedTable, TableRef
 from core.domain.enums import (
     AbsenceRuleType,
     EvidenceState,
     Importance,
     Origin,
+    ParamClass,
     ParamType,
     Relationship,
     SatelliteState,
@@ -204,6 +206,276 @@ def test_group_and_module_reach_the_prompt_and_the_hash() -> None:
         param=other_module, product_id="p1", chunks=[_chunk("c1")]
     )
     assert changed_module.prompt_hash != compiled.prompt_hash
+
+
+def _param_block(text: str) -> str:
+    """Блок параметра промпта: от ``ПРОДУКТ:`` до ``САТЕЛЛИТЫ``.
+
+    Объяснения шаблона (где тоже встречаются слова «СЕМАНТИКА» и «ИНСТРУМЕНТЫ») в него не
+    входят — иначе проверка «пустое значение не печатает подписи» срабатывала бы на самом
+    описании формата.
+    """
+    return text[text.index("ПРОДУКТ:") : text.index("САТЕЛЛИТЫ")]
+
+
+def test_semantics_and_param_class_reach_the_prompt_and_the_hash() -> None:
+    """21.11.2026 (план 28): авторская семантика и класс параметра доходят до модели.
+
+    До правки они жили только в ``sources/parameter_semantics.jsonl`` и в промпт не
+    попадали: оценщик работал по таблице решений и названию, не зная, о чём спрашивают
+    (замер: 38 из 181 семантик несут ограничитель-исключение, в 28 из них его нет в
+    ``rule``). Hash обязан покрывать их — иначе два разных текста несли бы один hash.
+    """
+    base = _param()
+    baseline = compile_prompt(param=base, product_id="p1", chunks=[_chunk("c1")])
+
+    with_semantics = base.model_copy(
+        update={"semantics": "Что спрашивается; не смежное свойство."}
+    )
+    compiled = compile_prompt(param=with_semantics, product_id="p1", chunks=[_chunk("c1")])
+    assert "СЕМАНТИКА: Что спрашивается; не смежное свойство." in _param_block(compiled.text)
+    assert compiled.text != baseline.text
+    assert compiled.prompt_hash != baseline.prompt_hash
+
+    with_class = base.model_copy(update={"param_class": ParamClass.VALUE})
+    compiled_class = compile_prompt(
+        param=with_class, product_id="p1", chunks=[_chunk("c1")]
+    )
+    assert "КЛАСС ПАРАМЕТРА: value" in _param_block(compiled_class.text)
+    assert compiled_class.prompt_hash != baseline.prompt_hash
+    # Класс и семантика — разные факты: одна и та же семантика с разным классом даёт
+    # разные тексты и разные hash.
+    both = with_semantics.model_copy(update={"param_class": ParamClass.CAPABILITY})
+    assert (
+        compile_prompt(param=both, product_id="p1", chunks=[_chunk("c1")]).prompt_hash
+        != compiled.prompt_hash
+    )
+
+
+def test_empty_semantics_prints_no_label_and_no_garbage() -> None:
+    """Пустая семантика не печатает строки-подписи: «не заполнено» — это отсутствие.
+
+    Подпись собирается в коде, а не в шаблоне, ровно для этого: слот шаблона стоит
+    отдельной строкой, и пустое значение оставляет пустую строку, как
+    ``{{EXTRA_INSTRUCTIONS}}``, — но не «СЕМАНТИКА: » без значения.
+    """
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[_chunk("c1")])
+    block = _param_block(compiled.text)
+    assert "СЕМАНТИКА:" not in block
+    assert "КЛАСС ПАРАМЕТРА:" not in block
+    assert "None" not in compiled.text
+    assert "[]" not in compiled.text
+
+
+def test_table_header_printed_only_with_ref_and_table() -> None:
+    """Табличная шапка печатается при ``table_ref`` + объекте таблицы (план 28 §4.0).
+
+    Замер по промптам прогона: четверть ячеек получала табличный фрагмент, у которого
+    адрес лежал в БД, но в промпт не попадал — ни подписи, ни имён столбцов. Здесь
+    проверяется, что шапка печатается, что она стоит до ``текст:`` и что без адреса её нет.
+    """
+    table = ExtractedTable(
+        table_id="t0",
+        caption="Сравнение версий",
+        header=("Версия", "Есть"),
+        rows=(("15", "да"), ("16", "нет")),
+    )
+    chunk = Chunk(
+        chunk_id="doc#1",
+        chunk_no=1,
+        text="| 16 | нет |",
+        heading_path="Раздел",
+        context_prefix="Раздел",
+        content_hash="h",
+        table_ref=TableRef(table_id="t0", row_start=2, row_end=2),
+    )
+    compiled = compile_prompt(
+        param=_param(),
+        product_id="p1",
+        chunks=[chunk],
+        tables={("doc", "t0"): table},
+    )
+    data = _data_section(compiled.text)
+    assert "таблица: Сравнение версий (t0) — строка 2" in data
+    assert "столбцы: Версия | Есть" in data
+    assert "строка: 16 | нет" in data
+    assert data.index("столбцы:") < data.index("текст:")
+    assert data.index("строка: 16 | нет") < data.index("текст:")
+
+    # Без адреса у чанка табличных строк нет, даже если объект передан.
+    plain = Chunk(
+        chunk_id="doc#2",
+        chunk_no=2,
+        text="обычный текст",
+        heading_path="",
+        context_prefix="",
+        content_hash="h2",
+    )
+    plain_compiled = compile_prompt(
+        param=_param(), product_id="p1", chunks=[plain], tables={("doc", "t0"): table}
+    )
+    plain_data = _data_section(plain_compiled.text)
+    assert "таблица:" not in plain_data
+    assert "столбцы:" not in plain_data
+    assert "строка:" not in plain_data
+
+
+def test_table_header_without_object_is_visible_degradation() -> None:
+    """Адрес известен, объекта нет — печатается пометка, а не тишина.
+
+    Молчание читалось бы как «таблицы нет»: различие «не таблица» / «адрес неизвестен» /
+    «объект не передан» — три разных факта (A3), и промпт обязан назвать свой.
+    """
+    chunk = Chunk(
+        chunk_id="doc#1",
+        chunk_no=1,
+        text="| 16 | нет |",
+        heading_path="",
+        context_prefix="",
+        content_hash="h",
+        table_ref=TableRef(table_id="t0", row_start=2, row_end=2),
+    )
+    compiled = compile_prompt(param=_param(), product_id="p1", chunks=[chunk])
+    data = _data_section(compiled.text)
+    assert "таблица: адрес известен, объект не передан (t0)" in data
+    assert "столбцы:" not in data
+
+
+def test_table_header_is_metadata_and_quote_stays_in_chunk_text() -> None:
+    """Шапка таблицы — метаданные: текст фрагмента остаётся дословным, цитата — подстрокой.
+
+    I22 сверяет цитату с ``chunk.text``; строки ``таблица:``/``столбцы:``/``строка:`` в
+    это сравнение не входят и цитироваться не могут (шаблон это прямо запрещает).
+    """
+    text = "| 16 | нет |"
+    table = ExtractedTable(
+        table_id="t0",
+        caption="Сравнение версий",
+        header=("Версия", "Есть"),
+        rows=(("15", "да"), ("16", "нет")),
+    )
+    chunk = Chunk(
+        chunk_id="doc#1",
+        chunk_no=1,
+        text=text,
+        heading_path="Раздел",
+        context_prefix="Раздел",
+        content_hash="h",
+        table_ref=TableRef(table_id="t0", row_start=2, row_end=2),
+    )
+    compiled = compile_prompt(
+        param=_param(), product_id="p1", chunks=[chunk], tables={("doc", "t0"): table}
+    )
+    assert text in compiled.text
+    assert "ТАБЛИЦА В ШАПКЕ ФРАГМЕНТА" in compiled.text
+    assert "цитировать их нельзя" in compiled.text
+
+
+def test_table_id_is_document_local_and_map_key_is_paired() -> None:
+    """``table_id`` локален для документа: два документа с ``t0`` не путаются.
+
+    ``t0`` — это «первая таблица **этого** документа» (``core/domain/doc_tables.py``), а
+    срез ячейки регулярно содержит фрагменты разных документов. Карта по одному
+    ``table_id`` подставила бы таблицу одного документа к фрагменту другого — то есть
+    промпт показал бы модель чужую шапку под видом доказательства.
+    """
+    first = ExtractedTable(
+        table_id="t0",
+        caption="Таблица документа A",
+        header=("Версия", "Есть"),
+        rows=(("16", "нет"),),
+    )
+    second = ExtractedTable(
+        table_id="t0",
+        caption="Таблица документа B",
+        header=("Параметр", "Значение"),
+        rows=(("memory", "1 GB"),),
+    )
+    chunk_a = Chunk(
+        chunk_id="a#1",
+        chunk_no=1,
+        text="| 16 | нет |",
+        heading_path="",
+        context_prefix="",
+        content_hash="ha",
+        table_ref=TableRef(table_id="t0", row_start=1, row_end=1),
+    )
+    chunk_b = Chunk(
+        chunk_id="b#1",
+        chunk_no=1,
+        text="| memory | 1 GB |",
+        heading_path="",
+        context_prefix="",
+        content_hash="hb",
+        table_ref=TableRef(table_id="t0", row_start=1, row_end=1),
+    )
+    compiled = compile_prompt(
+        param=_param(),
+        product_id="p1",
+        chunks=[chunk_a, chunk_b],
+        tables={("a", "t0"): first, ("b", "t0"): second},
+    )
+    data = _data_section(compiled.text)
+    assert "Таблица документа A" in data
+    assert "Таблица документа B" in data
+    # Каждая шапка стоит при своём фрагменте: подпись A не уехала к тексту B.
+    assert data.index("Таблица документа A") < data.index("| 16 | нет |")
+    assert data.index("| 16 | нет |") < data.index("Таблица документа B")
+    assert data.index("Таблица документа B") < data.index("| memory | 1 GB |")
+
+
+def test_table_header_and_tool_instructions_change_the_hash() -> None:
+    """Материал hash покрывает всё, что меняет текст: шапку таблицы и инструменты."""
+    table = ExtractedTable(
+        table_id="t0",
+        caption="Подпись A",
+        header=("Версия", "Есть"),
+        rows=(("16", "нет"),),
+    )
+    chunk = Chunk(
+        chunk_id="doc#1",
+        chunk_no=1,
+        text="| 16 | нет |",
+        heading_path="",
+        context_prefix="",
+        content_hash="h",
+        table_ref=TableRef(table_id="t0", row_start=1, row_end=1),
+    )
+    without = compile_prompt(param=_param(), product_id="p1", chunks=[chunk])
+    with_table = compile_prompt(
+        param=_param(), product_id="p1", chunks=[chunk], tables={("doc", "t0"): table}
+    )
+    assert without.prompt_hash != with_table.prompt_hash
+
+    # Содержимое шапки тоже входит: другая подпись — другой текст — другой hash.
+    other_caption = ExtractedTable(
+        table_id="t0",
+        caption="Подпись B",
+        header=("Версия", "Есть"),
+        rows=(("16", "нет"),),
+    )
+    assert (
+        compile_prompt(
+            param=_param(),
+            product_id="p1",
+            chunks=[chunk],
+            tables={("doc", "t0"): other_caption},
+        ).prompt_hash
+        != with_table.prompt_hash
+    )
+
+    # Блок инструментов печатается в промпте — значит входит в материал hash.
+    with_tools = compile_prompt(
+        param=_param(),
+        product_id="p1",
+        chunks=[_chunk("c1")],
+        tool_instructions="инструменты: раздел документа",
+    )
+    without_tools = compile_prompt(param=_param(), product_id="p1", chunks=[_chunk("c1")])
+    assert "инструменты: раздел документа" in with_tools.text
+    assert with_tools.prompt_hash != without_tools.prompt_hash
+    # Пустой блок инструментов не печатает мусора и не меняет hash против прежнего входа.
+    assert "None" not in without_tools.text
 
 
 def test_established_satellite_via_model_construct() -> None:
@@ -485,6 +757,61 @@ def test_render_queries_collapses_duplicates_across_languages() -> None:
     assert render_queries(param, max_queries=10) == ["Параметр A", "xid", "xid64"]
 
 
+def test_evidence_query_is_added_last_and_not_on_english_corpus() -> None:
+    """Подсказка автора «где искать» — последний запрос и только не на ``en``.
+
+    Подсказка написана на языке пакета (план 28 §7.3): на англоязычном reference-корпусе
+    она вредила бы, поэтому при ``query_lang="en"`` не добавляется вовсе. Порядок
+    детерминирован: заголовок, термины, подсказка.
+    """
+    param = _param(concept_terms={"ru": ["r1"], "en": ["e1"]}).model_copy(
+        update={"evidence": "release notes дистрибутива"}
+    )
+    assert render_queries(param, max_queries=10, query_lang="all") == [
+        "Параметр A",
+        "r1",
+        "e1",
+        "release notes дистрибутива",
+    ]
+    assert render_queries(param, max_queries=10, query_lang="ru")[-1] == (
+        "release notes дистрибутива"
+    )
+    assert "release notes дистрибутива" not in render_queries(
+        param, max_queries=10, query_lang="en"
+    )
+    # Явный отказ вызывающего — прежний состав запросов (разведка/приборы).
+    assert "release notes дистрибутива" not in render_queries(
+        param, max_queries=10, query_lang="all", evidence_query=False
+    )
+
+
+def test_evidence_query_respects_max_queries_budget() -> None:
+    """Бюджет ретривала действует как раньше: подсказка стоит последней и усекается."""
+    param = _param(concept_terms={"ru": ["r1", "r2"]}).model_copy(
+        update={"evidence": "release notes дистрибутива"}
+    )
+    # Полный состав при достаточном бюджете.
+    assert render_queries(param, max_queries=10, query_lang="ru") == [
+        "Параметр A",
+        "r1",
+        "r2",
+        "release notes дистрибутива",
+    ]
+    # Бюджет 3 отдаёт заголовок и два термина — подсказка не вытесняет их.
+    assert render_queries(param, max_queries=3, query_lang="ru") == [
+        "Параметр A",
+        "r1",
+        "r2",
+    ]
+    assert len(render_queries(param, max_queries=2, query_lang="all")) == 2
+
+
+def test_evidence_query_collapses_duplicate_of_a_term() -> None:
+    """Подсказка, повторяющая уже выполненный запрос, слот не съедает."""
+    param = _param(concept_terms={"ru": ["r1"]}).model_copy(update={"evidence": "R1"})
+    assert render_queries(param, max_queries=10, query_lang="ru") == ["Параметр A", "r1"]
+
+
 # ---------------------------------------------------------------------------
 # I18 / I10 / I15 / I7 — гарантии текста промпта
 # ---------------------------------------------------------------------------
@@ -640,28 +967,31 @@ def test_absence_guidance_is_addressed_to_the_model_not_to_a_human(
     assert guidance in compiled.text
 
 
-def test_template_version_is_v6_and_older_ones_are_preserved() -> None:
+def test_template_version_is_v7_and_older_ones_are_preserved() -> None:
     """Смена текста шаблона — новая версия; старые файлы остаются провенансом прогонов.
 
-    19.11.2026: ``evaluator_v6`` = v5 дословно + слоты ``{{GROUP}}``/``{{MODULE}}`` и абзац
-    о том, что группа/модуль — ориентир, а не доказательство. Значение пересчитано по
-    файлу шаблона, а не подогнано: v5 остаётся на месте как провенанс прошлых прогонов.
+    21.11.2026: ``evaluator_v7`` = v6 дословно + слоты ``{{SEMANTICS}}``/``{{PARAM_CLASS}}``/
+    ``{{TOOLS}}``, абзацы о семантике и табличной шапке и поле ``value`` в схеме ответа.
+    Значение пересчитано по файлу шаблона, а не подогнано: v6 остаётся на месте как
+    провенанс прошлых прогонов.
     """
     from core.pipeline.prompt import TEMPLATES_DIR, _load_template
 
-    assert TEMPLATE_VERSION == "evaluator_v6"
+    assert TEMPLATE_VERSION == "evaluator_v7"
     v1 = TEMPLATES_DIR / "evaluator_v1.txt"
     v2 = TEMPLATES_DIR / "evaluator_v2.txt"
     v3 = TEMPLATES_DIR / "evaluator_v3.txt"
     v4 = TEMPLATES_DIR / "evaluator_v4.txt"
     v5 = TEMPLATES_DIR / "evaluator_v5.txt"
     v6 = TEMPLATES_DIR / "evaluator_v6.txt"
+    v7 = TEMPLATES_DIR / "evaluator_v7.txt"
     assert v1.is_file(), "старый шаблон удалять нельзя: он провенанс прошлых прогонов"
     assert v2.is_file()
     assert v3.is_file()
     assert v4.is_file()
     assert v5.is_file()
     assert v6.is_file()
+    assert v7.is_file()
     assert _load_template("evaluator_v1") != _load_template(TEMPLATE_VERSION)
     # v1/v2 остаются байт-в-байт тем, чем были: hash прошлых прогонов не должен «поехать».
     assert "❌ → absence-evidence" in _load_template("evaluator_v1")
@@ -676,6 +1006,13 @@ def test_template_version_is_v6_and_older_ones_are_preserved() -> None:
     assert "МОДУЛЬ: {{MODULE}}" in v6_text
     for line in v5_text.splitlines():
         assert line in v6_text, f"строка v5 потеряна в v6: {line!r}"
+    # v7 = v6 дословно плюс новый блок: ни одна строка v6 не потеряна.
+    v7_text = _load_template("evaluator_v7")
+    for line in v6_text.splitlines():
+        assert line in v7_text, f"строка v6 потеряна в v7: {line!r}"
+    for slot in ("{{SEMANTICS}}", "{{PARAM_CLASS}}", "{{TOOLS}}"):
+        assert slot in v7_text, f"слот {slot} не объявлен в v7"
+        assert slot not in v6_text, f"v6 не должен был содержать {slot}"
 
 
 # ---------------------------------------------------------------------------
@@ -758,14 +1095,14 @@ def test_prompt_template_identity_changes_with_version(
     Это версионная граница ``execution_versions``: шаблон — условие измерения (§7.1/§7.4),
     поэтому его смена обязана дать новый ``run_id``, а не правку текущего прогона.
     Проверяется вызовом: та же формула под другой версией даёт другое значение.
-    19.11.2026: текущая версия — ``evaluator_v6`` (группа/модуль в промпте); значение
-    пересчитано по файлу шаблона, а не подогнано.
+    21.11.2026: текущая версия — ``evaluator_v7`` (семантика, табличная шапка, инструменты);
+    значение пересчитано по файлу шаблона, а не подогнано.
     """
     from core.pipeline import prompt as prompt_module
     from core.pipeline.run_identity import prompt_template_identity
 
     identity = prompt_template_identity()
-    assert identity.startswith("evaluator_v6@")
+    assert identity.startswith("evaluator_v7@")
     monkeypatch.setattr(prompt_module, "TEMPLATE_VERSION", "evaluator_v5")
     assert prompt_template_identity() != identity
     assert prompt_template_identity().startswith("evaluator_v5@")

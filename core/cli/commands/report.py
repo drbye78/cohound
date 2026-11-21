@@ -36,6 +36,7 @@ from core.pipeline.partial_docs import human_line as partial_docs_human_line
 from core.pipeline.report import manifest_payload, write_reports
 from core.pipeline.support_quality import support_quality_line
 from core.pipeline.table_provenance import human_line as tables_human_line
+from core.pipeline.tool_provenance import human_line as tool_calls_human_line
 
 
 def run(args: argparse.Namespace) -> int:
@@ -154,6 +155,12 @@ def run(args: argparse.Namespace) -> int:
     blocks_line = blocks_human_line(getattr(artifacts, "blocks_summary", None))
     if blocks_line:
         notes.append(blocks_line)
+    # План 28 §10: цена вердикта — строкой. Без неё «инструмент не звали» и «звали и
+    # провалился» в выводе команды неотличимы, а трасса лежит в файле, который никто не
+    # откроет без повода.
+    tool_calls_line = tool_calls_human_line(getattr(artifacts, "tool_calls_summary", None))
+    if tool_calls_line:
+        notes.append(f"{tool_calls_line} (трасса: outputs/tool_calls.csv)")
     # A3: качество поддержки карты — строкой, как и частичность. Три замера
     # (поддержка не о предмете, концентрация) не меняют вердиктов, но именно они
     # объясняют, почему карта «зелёная» при почти пустом доказательстве.

@@ -77,6 +77,7 @@ from core.cli.execution_axes import (
     add_frozen_source_flag,
     add_refresh_scope_flag,
     add_serp_rounds_flag,
+    add_tool_axis_flags,
     contract_flag_values,
     declared_status_dict_version,
     identity_flag_values,
@@ -150,6 +151,11 @@ def _declared_payload(
         "crawl_config_digest": declared.crawl_config_digest,
         "serp_rounds": declared.serp_rounds,
         "serp_source": declared.serp_source,
+        # План 28 §9: профиль инструментов — слагаемое контракта. Печатается строкой
+        # (``-;max_calls=0`` — путь без инструментов): оператор видит, каким профилем
+        # получен ``run_id``, а не только хеш. ``None`` — резолвер не вызывался (план с
+        # ``--run-id``), и это не подменяется дефолтом.
+        "tool_profile": declared.tool_profile,
         "retrieval_profile": contract_flags.get("retrieval_profile"),
         "cutoff_K": contract_flags.get("cutoff_K"),
         # План 26 O2: те же исполненные параметры, что ушли в контракт.
@@ -213,6 +219,9 @@ def _axis_lines(payload: dict[str, Any]) -> list[str]:
         f"contract: {digest}",
         f"deploy: profile={payload.get('deploy_profile') or '—'}",
         f"crawl axes: digest={payload.get('crawl_config_digest') or '—'}",
+        # План 28 §9: профиль инструментов — условие измерения, поэтому печатается рядом
+        # с прочими «чем я измеряю», а не только в хеше.
+        f"tools: profile={payload.get('tool_profile') or '—'}",
         f"serp: rounds={payload.get('serp_rounds')} "
         f"(source: {payload.get('serp_source') or '—'})",
         f"retrieval: profile={payload.get('retrieval_profile') or '—'} "
@@ -511,6 +520,10 @@ def configure(sub: Any) -> None:
     # ``run``/``crawl run``; значение входит в контракт (``frozen_source``).
     add_frozen_source_flag(p_plan)
     add_serp_rounds_flag(p_plan)
+    # План 28 §9: профиль локальных инструментов оценщика — объявленная ось контракта
+    # (``tool_profile`` → ``run_id``). Тот же регистратор, что у ``run``: форма флагов
+    # одна, паритет проверяется тестом ``tests/cli/test_tool_profile_axis.py``.
+    add_tool_axis_flags(p_plan)
     # §13/I16/I20 + 09 §6.2: **весь** материал ``run_id``, который приходит флагами
     # (контракт, seed-набор, цикл, объём, политика наблюдения); флаги порождены инвентарём
     # ``CONTRACT_FLAGS`` (не второй список), паритет с ``run``/``crawl`` — в тесте,

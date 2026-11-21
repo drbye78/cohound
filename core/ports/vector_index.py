@@ -19,6 +19,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from core.domain.doc_tables import TableRef
+
 
 @dataclass(frozen=True)
 class VectorQuery:
@@ -38,6 +40,15 @@ class RetrievedChunk:
     fence, маркер цитаты. Он **не** входит в валидацию цитат (I22 сверяет ``text``), но
     без него оценщик видит строку таблицы без имён столбцов и продолжение листинга без
     языка. Поэтому поле доезжает до промпта, а не остаётся только в хранилище.
+
+    ``table_ref`` — адрес куска **внутри таблицы** (:class:`~core.domain.doc_tables.TableRef`).
+    Это метаданные фрагмента, а не ось ретривала: ``text`` от них не меняется, поэтому
+    цитата по-прежнему сверяется с ним (I22). ``None`` — **не** «кусок не из таблицы», а
+    «адрес неизвестен»; различие объявлено в ``core/domain/doc_tables.py`` (читатель таблиц
+    их не даёт либо адрес не сопоставлен). Поле стоит последним с дефолтом: существующие
+    конструкторы (адаптеры индексов, двойники в тестах) не обязаны его знать, а
+    ``pipeline`` заполняет его там, где адрес действительно прочитан (RRF-слияние несёт
+    провенанс плеча, ``evaluate_batch`` обогащает срез из корпуса).
     """
 
     chunk_id: str
@@ -48,6 +59,7 @@ class RetrievedChunk:
     build_id: str
     score: float
     context_prefix: str = ""
+    table_ref: TableRef | None = None
 
 
 @dataclass(frozen=True)

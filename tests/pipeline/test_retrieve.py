@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from core.domain.doc_tables import TableRef
 from core.pipeline.retrieve import (
     PROFILE_DESCRIPTIONS,
     RetrievalBuildMismatch,
@@ -221,6 +222,26 @@ def test_rrf_preserves_provenance() -> None:
     assert fused[0].content_hash == "h-c1"
     assert fused[0].heading_path == "H-c1"
     assert fused[0].build_id == "b-dense"  # dense-провенанс приоритетен
+
+
+def test_rrf_carries_the_table_address() -> None:
+    """Адрес таблицы переживает слияние: иначе шапка печаталась бы только на одном плече.
+
+    ``table_ref`` — метаданные фрагмента, а не счёт. Плечи несут его по-разному (dense
+    приоритетен по ``build_id``), но адрес обязан доехать до промпта при любом профиле:
+    «шапка есть на R1 и нет на R2» была бы разницей условий измерения, а не набором
+    доказательств. Расхождение адресов у одного ``chunk_id`` — не повод выбирать одно
+    плечо молча: проверка согласованности касается ``content_hash``/``product_id``
+    (:func:`_check_shared_chunk`), а адрес берётся из приоритетного провенанса.
+    """
+    ref = TableRef("t0", 1, 2)
+    lexical = [_chunk("c1"), _chunk("c2")]
+    dense = [replace(_chunk("c1", build="b-dense"), table_ref=ref), _chunk("c3")]
+    fused = {chunk.chunk_id: chunk for chunk in rrf_fuse_chunks(lexical, dense)}
+
+    assert fused["c1"].table_ref == ref
+    assert fused["c2"].table_ref is None
+    assert fused["c3"].table_ref is None
 
 
 def test_r2_cutoff_k_applied() -> None:

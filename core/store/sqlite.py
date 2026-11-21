@@ -150,7 +150,23 @@ from core.util.schema_gate import (  # noqa: F401 - реэкспорт: пове
 #: отпечатка каталога и объявленного пространства (продолжала действовать на параметры,
 #: которых подписывающий не видел) и дублировала машинное условие I2d. Шимов нет: файлы
 #: ≤ 3.26.0 отвергаются гейтом версии, прогон переносится пересозданием.
-SCHEMA_VERSION = "3.27.0"
+#:
+#: 3.28.0 (план ``28`` §9, локальные инструменты оценщика): таблица ``cell_tool_calls`` —
+#: **трасса** вызовов инструментов ячейки. Это провенанс, а не условие измерения: в
+#: ``EXECUTION_CONTRACT_FIELDS`` входит **профиль** (``tool_profile``), потому что набор
+#: доступных вызовов меняет набор доказательств, а сама трасса известна только после
+#: исполнения, то есть не может быть частью ``run_id`` (он вычислим до сборки портов).
+#: Без таблицы «почему вердикт такой» и «сколько вызовов стоил прогон» остаются строками
+#: журнала: отчёт собирается из БД и обязан читать трассу без памяти прогона.
+#:
+#: Заодно индекс ``idx_chunks_doc`` по ``corpus_chunks(doc_id)``: инструмент адресует
+#: **раздел документа**, и выборка чанков одного документа — штатная операция фазы оценки
+#: (``StorePort.iter_chunks_by_doc``). Замер 21.11.2026 на стенде (253 306 чанков):
+#: ``WHERE doc_id = ?`` без индекса — 153 мс/док (скан корпуса на каждый вызов), с
+#: индексом — выборка по адресу. Колонка в DDL уже была; добавлен только индекс, поэтому
+#: текст чанков и ``content_hash`` не меняются.
+#: Шимов нет: файлы ≤ 3.27.0 отвергаются гейтом версии, прогон переносится пересозданием.
+SCHEMA_VERSION = "3.28.0"
 
 DDL = """
 PRAGMA journal_mode = WAL;
@@ -207,6 +223,13 @@ CREATE TABLE IF NOT EXISTS runs (
     crawl_rate_limit      TEXT,                        -- §13/Backlog B: канон. форма rate_limit (execution_change)
     crawl_config_digest   TEXT,                        -- §13/N6: дайджест разрешённой конфигурации контроля краула (execution_change)
     registry_spec_digest  TEXT,                        -- §13/E2: дайджест package-scoped спецификаций реестров (execution_change)
+    -- План 28 §9 (схема 3.28.0): **условие измерения** — каноническая строка профиля
+    -- локальных инструментов оценщика (``ToolProfile.canonical()``: ``t1+t4;max_calls=2``).
+    -- Поле контракта (37-е в ``EXECUTION_CONTRACT_FIELDS``), поэтому без колонки
+    -- ``hound diff`` не мог назвать ось и печатал «предел диагностики». NULL — не записано
+    -- (строка прошлой схемы/модульный вызов), а не «профиль пуст»: пустой профиль даёт
+    -- стабильную строку ``-;max_calls=0``.
+    tool_profile          TEXT,
     execution_contract_digest TEXT,                    -- §13/09 §12.5: отпечаток условий измерения (methodology_change boundary)
     previous_run_id       TEXT,                        -- 09 §12.3: прогон, против которого считался этот (lineage)
     change_class          TEXT,                        -- §13: класс изменения относительно предыдущего прогона
@@ -505,6 +528,34 @@ CREATE TABLE IF NOT EXISTS cell_evidence (
     partition_build_id TEXT,                            -- партиция чанка-evidence (09 §8.1)
     doc_version_id    TEXT,                             -- O5: адрес версии документа (dv_...); NULL = не записано
     retrieved_at      TEXT
+);
+
+-- План ``28`` §9: **трасса** вызовов локальных инструментов оценщика — провенанс ячейки,
+-- а не условие измерения. В ``EXECUTION_CONTRACT_FIELDS`` входит профиль
+-- (``tool_profile``): он объявлен до прогона и меняет набор доказательств. Трасса
+-- известна только после исполнения, поэтому в ``run_id`` её нет — иначе идентичность
+-- стала бы функцией исполнения.
+--
+-- ``seq`` — порядок вызова внутри ячейки (0-based): он и делает трассу трассой, а не
+-- множеством. ``args_json`` — аргументы как их прислала модель (провенанс, а не схема:
+-- схема объявлена в ``core.domain.tools.ToolSpec``). ``ok``/``reason`` различают
+-- «инструмент ответил» и «вызов отклонён» — молчаливый пропуск запрещён. ``chars`` —
+-- длина видимого модели текста: цена вызова, по которой считается стоимость профиля.
+--
+-- PK ``(run_id, product_id, param_id, seq)`` — он же индекс чтения трассы прогона:
+-- отдельный индекс по ``run_id`` был бы вторым индексом на тот же префикс.
+CREATE TABLE IF NOT EXISTS cell_tool_calls (
+    run_id      TEXT NOT NULL,
+    product_id  TEXT NOT NULL,
+    param_id    TEXT NOT NULL,
+    seq         INTEGER NOT NULL,                      -- порядок вызова в ячейке (0-based)
+    tool        TEXT NOT NULL,                         -- имя объявленного инструмента
+    args_json   TEXT,                                  -- аргументы вызова (JSON); NULL = не записаны
+    ok          INTEGER NOT NULL,                      -- 1 — исполнен, 0 — отклонён с причиной
+    chars       INTEGER,                               -- длина текста, видимого модели
+    reason      TEXT,                                  -- причина отказа (ok=0)
+    PRIMARY KEY (run_id, product_id, param_id, seq),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
 -- S9: персистентные решения гейтов G1–G4 (носитель reviewed_by, аудит-след).
@@ -816,6 +867,10 @@ CREATE INDEX IF NOT EXISTS idx_archive_observations_run ON archive_observations(
 
 CREATE INDEX IF NOT EXISTS idx_cells_run_state  ON cells(run_id, state);CREATE INDEX IF NOT EXISTS idx_chunks_product   ON corpus_chunks(product_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_build     ON corpus_chunks(build_id);
+-- План ``28`` §9: адрес инструмента — документ, а не сборка. Без индекса
+-- ``WHERE doc_id = ?`` сканирует корпус (замер 21.11.2026: 153 мс/док на 253 306
+-- чанках), а инструмент зовут на каждый фрагмент ячейки.
+CREATE INDEX IF NOT EXISTS idx_chunks_doc       ON corpus_chunks(doc_id);
 CREATE INDEX IF NOT EXISTS idx_log_run_phase    ON search_log(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_cell ON cell_evidence(run_id, product_id, param_id);
 CREATE INDEX IF NOT EXISTS idx_gate_run         ON gate_decisions(run_id, gate);

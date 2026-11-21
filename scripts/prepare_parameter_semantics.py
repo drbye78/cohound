@@ -25,9 +25,11 @@ I2b/I2c/I2d), `concept_terms` (термины ретривала; второй �
 жёлтым (правило работает, но граница ⚠️/❌ требует решения человека).
 
 **`apply` не переписывает пакет молча.** Он собирает `catalog.csv` из подтверждённых
-записей, меняя только `rule`/`absence_rule`/`concept_terms`, и требует `--out`: правка
-каталога — `execution_change` (дайджест каталога входит в `run_id`), и это решение
-человека, а не побочный эффект прибора.
+записей, меняя только размеченные человеком поля — `rule`, `absence_rule`,
+`concept_terms`, `semantics`, `evidence`, `param_class` (и `title`, если он задан), — и
+требует `--out`: правка каталога — `execution_change` (дайджест каталога входит в
+`run_id`), и это решение человека, а не побочный эффект прибора. Важность, модуль,
+группа, тип и роль берутся из текущего каталога как есть: их прибор не размечает.
 
 **`absence_rule` меняет карту, и это не косметика.** `explicit` доказуем цитатой
 отрицания вендора; `parameter_reference` и `distribution_absence` публикуются как `❌`
@@ -467,12 +469,26 @@ def _fail(title: str, problems: list[str]) -> None:
 def apply_catalog(records: list[dict[str, Any]], package: Path, out: Path) -> None:
     """Собирает `catalog.csv` из размеченных записей, не трогая остальные колонки.
 
-    Меняются ровно четыре поля — `rule`, `absence_rule`, `concept_terms` и (если задан)
-    `title`; `module`/`group`/`importance`/`param_type`/`role_binding`/`search_langs`
-    берутся из текущего каталога как есть. Иначе разметка семантики незаметно
-    переписала бы состав пакета: важность и роль — отдельные авторские решения со своими
-    дайджестами (`catalog_digest` входит в `run_id`), и прибор, который их «заодно»
-    пересчитал, дал бы новый `run_id` без нового решения.
+    Меняются ровно семь полей — `rule`, `absence_rule`, `concept_terms`, `semantics`,
+    `evidence`, `param_class` и (если задан) `title`;
+    `module`/`group`/`importance`/`param_type`/`role_binding`/`search_langs` берутся из
+    текущего каталога как есть. Иначе разметка семантики незаметно переписала бы состав
+    пакета: важность и роль — отдельные авторские решения со своими дайджестами
+    (`catalog_digest` входит в `run_id`), и прибор, который их «заодно» пересчитал, дал бы
+    новый `run_id` без нового решения.
+
+    Почему семантика теперь пишется, хотя раньше — нет. До 21.11.2026 у `CatalogRow` не
+    было поля под неё, поэтому `apply` физически не мог её записать: значение жило только
+    в `sources/parameter_semantics.jsonl` и до оценщика не доходило (план 28 §1). Теперь
+    `semantics`/`evidence`/`param_class` — необязательные колонки каталога, и этот прибор
+    остаётся **единственным** их писателем: `catalog.csv` собирается из размеченного
+    JSONL, а не правится руками. Набор записываемых полей выбран так: только то, что
+    человек разметил на листе (правило зачёта, класс отсутствия, термины ретривала,
+    семантика, подсказка «где искать», класс параметра) — и ничего из того, что он не
+    размечал.
+
+    Колонки добавляются **в конец**: первые 11 — объявленный порядок `catalog.csv` (§4.2),
+    и его перестановка сделала бы файл нечитаемым старыми потребителями.
 
     Отказывает на записи без `review`: `compile` — единственный вход, и он ставит её
     только по решению человека.
@@ -481,6 +497,9 @@ def apply_catalog(records: list[dict[str, Any]], package: Path, out: Path) -> No
     columns = [
         "param_id", "title", "module", "group", "importance", "param_type",
         "rule", "absence_rule", "role_binding", "concept_terms", "search_langs",
+        # План 28: авторские поля семантика — в конец, чтобы первые 11 колонок остались
+        # в объявленном порядке.
+        "semantics", "evidence", "param_class",
     ]
     rows: list[dict[str, str]] = []
     problems: list[str] = []
@@ -496,6 +515,11 @@ def apply_catalog(records: list[dict[str, Any]], package: Path, out: Path) -> No
             {"ru": list(record.get("terms_ru") or []), "en": list(record.get("terms_en") or [])},
             ensure_ascii=False,
         )
+        # Семантика и подсказка «где искать» пишутся дословно, класс — как объявлен;
+        # пустое значение остаётся пустым (не заполнено), а не подменяется дефолтом.
+        row["semantics"] = str(record.get("semantics") or "")
+        row["evidence"] = str(record.get("evidence") or "")
+        row["param_class"] = str(record.get("param_class") or "")
         rows.append(row)
     if problems:
         _fail("apply", problems)

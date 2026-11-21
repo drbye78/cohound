@@ -26,14 +26,24 @@
 **Условия ячейки повторяются, а не назначаются.** Профиль ретривала и ``cutoff_K``
 берутся из самой ячейки (``retrieval_profile``/``retrieval_params_json``, R7/I16/I20).
 
+**Профиль локальных инструментов — из провенанса прогона, а не из флагов хоста.** Это
+объявленное условие измерения (37-е поле контракта ``tool_profile`` ⇒ ``run_id``), и
+повторённая ячейка, исполненная без инструментов под ``run_id``, который их объявил, была
+бы измерена другим промптом. Поэтому по умолчанию профиль читается из
+``runs.tool_profile`` (та же строка, что вошла в контракт), а ``--tool-profile`` —
+**явное переопределение оператора** (recovery-кнут), и расхождение с провенансом
+публикуется заметкой, а не маскируется. ``deploy.yaml`` в дефолте не участвует: там
+описано, что объявлено на этом хосте, а не чем мерили прогон.
+
 Нейтрален к предметной категории (§1.3).
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +57,15 @@ from core.cli.context import (
     passport_satellites,
 )
 from core.cli.errors import EXIT_ERROR, EXIT_OK
+from core.cli.execution_axes import (
+    TOOL_PROFILE_TOKENS,
+    add_tool_axis_flags,
+    resolve_tool_profile,
+)
 from core.cli.wiring import build_adapters, build_evaluator_llm, build_store
 from core.config.deploy import load_deploy_config
 from core.domain import LLMScenario, RunMode
+from core.domain.tools import NO_TOOL_PROFILE, ToolProfile
 from core.pipeline import Ports
 from core.pipeline.evaluate import (
     RETRY_NOTHING_TO_DO,
@@ -60,8 +76,15 @@ from core.pipeline.evaluate import (
     select_failed_cells,
 )
 from core.pipeline.evaluation_policy import EVALUATION_MAX_RETRIES
+from core.ports.llm import LocalToolCallerPort
 
-__all__ = ["configure", "run"]
+__all__ = [
+    "add_repair_tool_flags",
+    "configure",
+    "declared_tool_profile",
+    "resolve_provenance_tool_profile",
+    "run",
+]
 
 #: Статус отчёта ``--dry-run``: только селектор, оценщик не вызывался (локальный статус
 #: команды: конвейер о режиме только-чтения не знает).
@@ -90,6 +113,167 @@ def _declared_evaluator_model(manifest: Any) -> str | None:
             if model_id:
                 return str(model_id)
     return None
+
+
+def _profile_name(tools: Sequence[str]) -> str:
+    """Имя профиля из набора инструментов — метки, а не имена (как в контракте).
+
+    ``ToolProfile.name`` объявлен оператором метками (``t1+t4``), а ``canonical()`` несёт
+    **имена** инструментов. Восстановленное из провенанса имя обязано читаться тем же
+    словарём, что и объявленное, иначе печать повтора назвала бы набор иначе, чем прогон.
+    Инструмент без метки (``section_role`` сегодня) сохраняет своё имя: метки для него нет
+    намеренно, и выдумывать её здесь нельзя.
+    """
+    if not tools:
+        return NO_TOOL_PROFILE.name
+    labels = sorted(
+        token for token, tool in TOOL_PROFILE_TOKENS.items() if tool in tools
+    )
+    unlabelled = sorted(tool for tool in tools if tool not in TOOL_PROFILE_TOKENS.values())
+    return "+".join([*labels, *unlabelled])
+
+
+def declared_tool_profile(declared: str | None) -> ToolProfile | None:
+    """Профиль инструментов из **провенанса** прогона (``runs.tool_profile``).
+
+    Читается ровно то, что вошло в ``run_id``: каноническая строка
+    :meth:`~core.domain.tools.ToolProfile.canonical` (``expand_to_section,table_row;max_calls=2``
+    либо ``-;max_calls=0`` для пути без инструментов). Обратный разбор — не второй формулы
+    резолва: он ничего не подставляет и не берёт из ``deploy``; неизвестная метка/битый
+    бюджет — отказ (:class:`ValueError` → ``EXIT_USAGE``), а не «профиль по умолчанию».
+
+    ``None``/пустая строка — **не записано** (манифест прошлой схемы или модульный вызов), а
+    не «инструментов нет»: различие объявлено в :class:`~core.domain.models.RunManifest`, и
+    вызывающий обязан назвать его заметкой, а не выдать за измеренное условие.
+
+    :returns: профиль прогона либо ``None`` — провенанс его не несёт.
+    """
+    if declared is None:
+        return None
+    text = str(declared).strip()
+    if not text:
+        return None
+    names_part, _, calls_part = text.partition(";")
+    raw_names = names_part.strip()
+    tools: tuple[str, ...] = ()
+    if raw_names and raw_names != "-":
+        # ``+`` терпится наравне с ``,``: строка пришла из артефакта, а не из флага, и
+        # отказ на форме разделителя читался бы как «профиль не записан». Метка (``t1``)
+        # разворачивается в имя инструмента: контракт пишет имена, но рукописный/старый
+        # артефакт мог сохранить метку, и отказ на этом был бы отказом на форме записи.
+        tools = tuple(
+            dict.fromkeys(
+                TOOL_PROFILE_TOKENS.get(part.strip(), part.strip())
+                for part in re.split(r"[+,]", raw_names)
+                if part.strip()
+            )
+        )
+    calls_text = calls_part.strip()
+    prefix = "max_calls="
+    if calls_text.startswith(prefix):
+        calls_text = calls_text[len(prefix) :].strip()
+    try:
+        max_calls = int(calls_text) if calls_text else 0
+    except ValueError as exc:
+        raise ValueError(
+            f"runs.tool_profile: бюджет не разобран в {text!r} — провенанс прогона испорчен"
+        ) from exc
+    return ToolProfile(name=_profile_name(tools), tools=tools, max_calls=max_calls)
+
+
+def resolve_provenance_tool_profile(
+    args: argparse.Namespace, manifest: Any
+) -> tuple[ToolProfile, list[str]]:
+    """Профиль инструментов повтора: **провенанс прогона**, флаг — явное переопределение.
+
+    Почему не ``deploy``. ``deploy.yaml`` описывает, что объявлено на этом хосте **сейчас**;
+    ``run_id`` описывает, чем прогон мерили. Повтор обязан исполнить второе: иначе
+    «починенная» ячейка тихо измеряется другим промптом под тем же идентификатором.
+
+    Почему флаг всё-таки есть. Это recovery-кнут того же класса, что ``--max-retries``:
+    оператор может явно попросить другое условие, но расхождение с провенансом
+    **публикуется** заметкой — иначе изменение условия выглядело бы продолжением прежних.
+
+    :returns: ``(профиль, заметки)``. Заметки непусты, когда провенанс не записал профиль
+        (тогда повтор идёт без инструментов и это названо) либо когда оператор
+        переопределил условие.
+    """
+    notes: list[str] = []
+    declared = declared_tool_profile(getattr(manifest, "tool_profile", None))
+    overridden = (
+        getattr(args, "tool_profile", None) is not None
+        or getattr(args, "tool_max_calls", None) is not None
+    )
+    if declared is None:
+        if not getattr(manifest, "tool_profile", None):
+            notes.append(
+                "прогон не записал профиль инструментов (runs.tool_profile пуст): повтор "
+                "исполняется без инструментов — условие прогона из провенанса не "
+                "восстановимо"
+            )
+        if not overridden:
+            return NO_TOOL_PROFILE, notes
+    elif not overridden:
+        # Провенанс несёт профиль, флаг не задан — исполняется **он**. Резолвер здесь не
+        # нужен и вреден: он упал бы в ``deploy.tools.profile``, то есть в условие хоста,
+        # а не прогона.
+        return declared, notes
+    resolved = resolve_tool_profile(
+        getattr(args, "tool_profile", None),
+        getattr(args, "tool_max_calls", None),
+        load_deploy_config(None),
+    )
+    if declared is None:
+        notes.append(
+            f"профиль инструментов задан оператором: {resolved.canonical()} "
+            "(провенанс прогона его не несёт)"
+        )
+        return resolved, notes
+    if resolved.canonical() != declared.canonical():
+        notes.append(
+            "профиль инструментов переопределён оператором: провенанс "
+            f"{declared.canonical()}, исполнено {resolved.canonical()} — вердикт описывает "
+            "условие, отличное от run_id"
+        )
+    return resolved, notes
+
+
+def add_repair_tool_flags(parser: argparse.ArgumentParser) -> None:
+    """Регистрирует ось профиля инструментов **команды ремонта** (форма — общая).
+
+    Форма флагов берётся у общего регистратора (:func:`add_tool_axis_flags`): разъехавшись,
+    ``retry`` принимал бы другое значение, чем ``plan``/``run``, и «профиль из провенанса»
+    означал бы «профиль из строки, которую ось пишет иначе».
+
+    **Help общего регистратора здесь неверен, и это не косметика.** Он объявляет дефолт
+    ``deploy.tools.profile`` — это правда для ``plan``/``run`` (там профиль назначается), но
+    не для ремонта: по умолчанию он исполняет **провенанс прогона** (``runs.tool_profile``),
+    а ``deploy`` читается только когда оператор переопределяет условие флагом. Оставить
+    чужой текст значило бы печатать в ``--help`` утверждение о том, чем команда мерит, —
+    ровно тот класс дефекта, который эта полоса и закрывает. Поэтому текст заменяется здесь,
+    у того же парсера: ``execution_axes`` — чужая полоса, а второй регистратор с теми же
+    флагами дал бы две формы одного входа.
+    """
+    add_tool_axis_flags(parser)
+    helps = {
+        "tool_profile": (
+            "профиль локальных инструментов оценщика: none|t1|t4|t7 или список через + "
+            "(t1+t4+t7). По умолчанию — из провенанса прогона (runs.tool_profile), то есть "
+            "то условие, под которым прогон измерен; флаг — явное переопределение, и его "
+            "расхождение с провенансом публикуется заметкой"
+        ),
+        "tool_max_calls": (
+            "объявленный бюджет вызовов инструментов на ячейку (0 — только при профиле "
+            "none); действует вместе с --tool-profile и по умолчанию берётся из провенанса "
+            "прогона"
+        ),
+    }
+    # ``argparse`` не даёт публичного доступа к уже добавленным действиям; парсер собран
+    # строкой выше и живёт только в этом вызове, поэтому перебор его действий безопасен.
+    for action in getattr(parser, "_actions", ()):
+        replacement = helps.get(getattr(action, "dest", ""))
+        if replacement is not None:
+            action.help = replacement
 
 
 def _package_id(
@@ -185,6 +369,10 @@ def _print_retry(payload: dict[str, Any]) -> None:
         f"skipped: {payload['skipped']}",
         f"message: {payload['message']}",
     ]
+    # Условие измерения — в сводке, а не только в ``run_id``: оператор обязан видеть, каким
+    # профилем инструментов повторённая ячейка измерена.
+    if payload.get("tool_profile"):
+        lines.insert(2, f"tools: {payload['tool_profile']}")
     for row in payload.get("cells", ()):
         lines.append(
             f"  {row['outcome']} {row['product_id']}/{row['param_id']}: "
@@ -231,6 +419,11 @@ def run(args: argparse.Namespace) -> int:
         catalog, _weights, _cohort, notes = _restore_plan_inputs(
             args, run_id, purpose="retry", store=store
         )
+        # Профиль инструментов — из провенанса прогона, а не из ``deploy``: повтор
+        # исполняет объявленное условие (``tool_profile`` → ``run_id``), а не назначает
+        # новое. Флаг ``--tool-profile`` — явное переопределение, и оно публикуется.
+        tool_profile, tool_notes = resolve_provenance_tool_profile(args, manifest)
+        notes.extend(tool_notes)
         product_ids = list(args.product or [])
         param_ids = list(args.param or [])
 
@@ -335,6 +528,16 @@ def run(args: argparse.Namespace) -> int:
                 llm_journal=Path(db_path).parent / "logs" / "llm_calls.jsonl",
                 retry_journal=Path(db_path).parent / "logs" / "retry.jsonl",
                 llm_concurrency=args.llm_concurrency or 1,
+                # Инструменты — то же условие, что у фазы: профиль из провенанса прогона,
+                # транспорт — оценщик, если он объявляет ``turn`` (I18: инструменты живут
+                # отдельным методом, ``complete`` их не получает). Включённый профиль без
+                # транспорта — ``ToolWiringError`` (``EXIT_USAGE``), а не тихий откат.
+                tool_profile=tool_profile,
+                tool_caller=(
+                    ports.evaluator
+                    if isinstance(ports.evaluator, LocalToolCallerPort)
+                    else None
+                ),
             )
             payload = {
                 "ok": report.ok,
@@ -344,6 +547,10 @@ def run(args: argparse.Namespace) -> int:
 
     if payload is None:  # недостижимо: обе ветви выше заполняют payload
         return EXIT_ERROR
+    # Исполненное условие публикуется **всегда**, а не только при расхождении с
+    # провенансом: иначе «каким профилем мерили» читалось бы из ``run_id`` и догадки о том,
+    # что провенанс его записал. Строка каноническая — та же форма, что в контракте.
+    payload["tool_profile"] = tool_profile.canonical()
     if args.json:
         _print_json(payload)
     else:
@@ -419,5 +626,9 @@ def configure(sub: Any) -> None:
         "поэтому прочитать её нельзя (названный пробел, plan 25 §7.3). Верхнего предела нет",
     )
     _add_llm_concurrency_flag(p_retry)
+    # Профиль локальных инструментов: по умолчанию — из провенанса прогона
+    # (``runs.tool_profile``), флаг — явное переопределение оператора. Форма флагов — та же,
+    # что у ``plan``/``run``; help называет **настоящий** дефолт команды.
+    add_repair_tool_flags(p_retry)
     _add_common(p_retry)
     p_retry.set_defaults(handler=run)

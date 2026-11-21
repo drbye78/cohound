@@ -834,7 +834,10 @@ def _db_smoke() -> None:
               "corpus_members", "archive_observations",
               # 16 §3.2: статус продукта **в прогоне** — первоклассная строка, а не снимок
               # в ``state.db`` и не текст в ``results[].notes``.
-              "run_product"):
+              "run_product",
+              # План 28 §9: трасса вызовов локальных инструментов оценщика (провенанс;
+              # условие измерения — профиль ``tool_profile`` в контракте).
+              "cell_tool_calls"):
         _assert(t in tables)
 
     # P2 (schema 2.2.0): build-id witness — extractor_version у чанка; extractor_version/

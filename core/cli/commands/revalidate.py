@@ -28,6 +28,13 @@ Endpoint/ключ/таймаут остаются операционными (en
 **Условия ячейки повторяются, а не назначаются.** Профиль ретривала и ``cutoff_K`` берутся
 из самой ячейки (``retrieval_profile``/``retrieval_params_json``, R7/I16/I20).
 
+**Профиль локальных инструментов — из провенанса прогона, а не из флагов хоста.** Это
+объявленное условие измерения (37-е поле контракта ``tool_profile`` ⇒ ``run_id``):
+пере-оценка, исполненная без инструментов под ``run_id``, который их объявил, измерила бы
+другое условие. По умолчанию профиль читается из ``runs.tool_profile`` (та же строка, что
+вошла в контракт), ``--tool-profile`` — явное переопределение оператора, и расхождение с
+провенансом публикуется заметкой. ``deploy.yaml`` в дефолте не участвует.
+
 Нейтрален к предметной категории (§1.3).
 """
 
@@ -39,6 +46,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from core.cli.commands.retry import (
+    add_repair_tool_flags,
+    resolve_provenance_tool_profile,
+)
 from core.cli.context import (
     _add_common,
     _infer_run_id,
@@ -59,6 +70,7 @@ from core.pipeline.evaluate import (
     reevaluate_stale,
     select_stale_cells,
 )
+from core.ports.llm import LocalToolCallerPort
 
 __all__ = ["configure", "run"]
 
@@ -151,6 +163,9 @@ def _print_revalidate(payload: dict[str, Any]) -> None:
         f"skipped: {payload['skipped']}",
         f"message: {payload['message']}",
     ]
+    # Условие измерения — в сводке: каким профилем инструментов пере-оценена ячейка.
+    if payload.get("tool_profile"):
+        lines.insert(2, f"tools: {payload['tool_profile']}")
     for row in payload.get("reevaluated_cells", ()):
         lines.append(
             f"  пере-оценено {row['product_id']}/{row['param_id']}: "
@@ -199,6 +214,10 @@ def run(args: argparse.Namespace) -> int:
         catalog, _weights, _cohort, notes = _restore_plan_inputs(
             args, run_id, purpose="revalidate", store=store
         )
+        # Профиль инструментов — из провенанса прогона: пере-оценка исполняет объявленное
+        # условие (``tool_profile`` → ``run_id``), а не назначает новое.
+        tool_profile, tool_notes = resolve_provenance_tool_profile(args, manifest)
+        notes.extend(tool_notes)
         product_ids = list(args.product or [])
         param_ids = list(args.param or [])
 
@@ -272,6 +291,15 @@ def run(args: argparse.Namespace) -> int:
                 # Журнал вызовов — тот же файл прогона, что у Ш6: путь отказа повторной
                 # оценки обязан быть разбираем тем же ``jq``-запросом.
                 llm_journal=Path(db_path).parent / "logs" / "llm_calls.jsonl",
+                # Инструменты — то же условие, что у фазы: профиль из провенанса прогона,
+                # транспорт — оценщик, если он объявляет ``turn`` (I18). Включённый профиль
+                # без транспорта — ``ToolWiringError`` (``EXIT_USAGE``), не тихий откат.
+                tool_profile=tool_profile,
+                tool_caller=(
+                    ports.evaluator
+                    if isinstance(ports.evaluator, LocalToolCallerPort)
+                    else None
+                ),
             )
             payload = {
                 "ok": report.ok,
@@ -279,6 +307,9 @@ def run(args: argparse.Namespace) -> int:
                 "notes": notes,
             }
 
+    # Исполненное условие публикуется **всегда**: «каким профилем мерили» не должно
+    # читаться из ``run_id`` и догадки о том, что провенанс его записал.
+    payload["tool_profile"] = tool_profile.canonical()
     if args.json:
         _print_json(payload)
     else:
@@ -348,5 +379,9 @@ def configure(sub: Any) -> None:
         action="store_true",
         help="только селектор: показать stale-ячейки и счётчики, оценщик не вызывать",
     )
+    # Профиль локальных инструментов: по умолчанию — из провенанса прогона
+    # (``runs.tool_profile``), флаг — явное переопределение оператора. Форма флагов — та же,
+    # что у ``plan``/``run``; help называет **настоящий** дефолт команды.
+    add_repair_tool_flags(p_reval)
     _add_common(p_reval)
     p_reval.set_defaults(handler=run)

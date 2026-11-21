@@ -76,6 +76,7 @@ from core.domain.models import (
     canonical_rate_limit,
 )
 from core.domain.scoring import Comparability, Coverage, Score, SensitivityReport
+from core.domain.tools import ToolTraceEntry
 from core.pipeline.compute import ScoreBundle, compute, publish_warnings
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS
 from core.pipeline.normalize import load_inputs
@@ -109,6 +110,7 @@ from core.pipeline.report import (
     write_reports,
     write_run_manifest,
 )
+from core.ports.tools import ToolCallRecord
 from core.store.sqlite_store import SqliteStore
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "report_catalog.json"
@@ -791,6 +793,36 @@ def test_battle_card_dimmed_when_coverage_insufficient(store: SqliteStore, tmp_p
     assert path.exists()
     text = _artifact_text(path)
     assert INSUFFICIENT_COVERAGE_NOTE in text
+
+
+def test_battle_card_header_publishes_corpus_as_of(store: SqliteStore, tmp_path: Path) -> None:
+    """Дата доказательств — в шапке, отдельно от даты отчёта.
+
+    При переиспользовании корпуса (``reuse``/``offline``/``frozen``) отчёт собирается
+    сегодня, а артефакты наблюдались раньше. Без этой строки читатель выводит дату
+    доказательств из даты отчёта — и получает неверную. ``None`` печатается как «—…—»:
+    отсутствие дат — факт, а не «свежо».
+    """
+    _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+
+    dated = render_battle_card(
+        bundle,
+        cells,
+        _catalog(),
+        tmp_path / "dated.xlsx",
+        corpus_as_of={"from": "2026-11-10T00:00:00Z", "to": "2026-11-12T00:00:00Z"},
+    )
+    text = _artifact_text(dated)
+    assert "corpus_as_of" in text
+    assert "2026-11-10T00:00:00Z" in text
+    assert "2026-11-12T00:00:00Z" in text
+
+    undated = render_battle_card(bundle, cells, _catalog(), tmp_path / "undated.xlsx")
+    text = _artifact_text(undated)
+    assert "corpus_as_of" in text
+    assert "—…—" in text
 
 
 def test_battle_card_header_surfaces_heterogeneous_crawl_engines(
@@ -1602,6 +1634,45 @@ def test_diff_boundary_contract_mismatch_names_deploy_profile(tmp_path: Path) ->
     assert not (tmp_path / "diff.md").exists()
 
 
+def test_diff_boundary_contract_mismatch_names_tool_profile(tmp_path: Path) -> None:
+    """План 28 §9: ``tool_profile`` — слагаемое контракта, и ``hound diff`` его **называет**.
+
+    Набор локальных инструментов меняет то, что модель может адресовать, и значит набор
+    доказательств: это условие измерения, а не настройка исполнения. Без записи на манифесте
+    смена профиля давала бы новый ``run_id`` без названной причины — «предел диагностики»
+    вместо оси. ``None`` при этом остаётся «не записано» (строка прошлой схемы), а не
+    «инструментов нет»: объявленный путь без инструментов даёт строку ``-;max_calls=0``.
+    """
+    prev = _manifest(execution_contract_digest="ec_1", tool_profile="-;max_calls=0")
+    curr = _manifest(
+        execution_contract_digest="ec_2",
+        tool_profile="expand_to_section+table_row;max_calls=2",
+    )
+    reasons = diff_boundary_violations(prev, curr)
+    assert reasons[0] == "execution_change: execution_contract_digest: ec_1 → ec_2"
+    assert reasons[1:] == [
+        "execution_change: execution_contract_digest: tool_profile: "
+        "'-;max_calls=0' → 'expand_to_section+table_row;max_calls=2'"
+    ], reasons
+    assert resolve_diff_change_class(prev, curr) is ChangeClass.EXECUTION_CHANGE
+
+    # Строка доходит до отказа ``hound diff``, а не остаётся в helper'е.
+    with pytest.raises(CrossCycleDiffError) as excinfo:
+        render_diff(prev, curr, [], [], tmp_path / "diff.md")
+    message = str(excinfo.value)
+    assert "tool_profile" in message
+    assert "'-;max_calls=0' → 'expand_to_section+table_row;max_calls=2'" in message
+    assert not (tmp_path / "diff.md").exists()
+
+    # ``None`` с одной стороны — «не записано»: поле называется недоступным, а не
+    # «изменившимся» (A3: отсутствие факта не факт отсутствия).
+    _, missing = _contract_field_diagnostics(
+        _manifest(execution_contract_digest="ec_1"),
+        _manifest(execution_contract_digest="ec_2", tool_profile="-;max_calls=0"),
+    )
+    assert "tool_profile" in missing
+
+
 def test_diff_boundary_contract_mismatch_names_fields_in_contract_order() -> None:
     """Несколько различающихся полей — все названы в порядке ``EXECUTION_CONTRACT_FIELDS``.
 
@@ -1899,6 +1970,53 @@ def test_write_reports_returns_populated_artifacts(store: SqliteStore, tmp_path:
     assert artifacts.nda_questions is not None and artifacts.nda_questions.exists()
     assert artifacts.diff is not None and artifacts.diff.exists()
     assert "не передан" in artifacts.diff.read_text(encoding="utf-8")
+
+
+def test_write_reports_publishes_tool_trace_as_artifact(
+    store: SqliteStore, tmp_path: Path
+) -> None:
+    """Трасса вызовов доезжает до ``outputs/tool_calls.csv`` и до сводки в ``Artifacts``.
+
+    Проверка сквозная, а не «писатель сам по себе»: до неё трассу писали в БД, а отчёт о
+    ней молчал — и «инструмент не звали» было неотличимо от «звали и провалился».
+    """
+    _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])
+    store.save_tool_calls(
+        RUN_ID,
+        [
+            ToolCallRecord(
+                product_id=PRODUCT_A,
+                param_id="param.ok",
+                entry=ToolTraceEntry(
+                    seq=0,
+                    name="expand_to_section",
+                    arguments={"chunk_id": f"{PRODUCT_A}:dv:0"},
+                    ok=True,
+                    chars=90,
+                ),
+            )
+        ],
+    )
+    cells = list(store.iter_cells(RUN_ID))
+    bundle = compute(store=store, run_id=RUN_ID, catalog=_catalog(), module_weights={})
+
+    artifacts = write_reports(
+        bundle=bundle,
+        cells=cells,
+        catalog=_catalog(),
+        manifest=_manifest(tool_profile="expand_to_section;max_calls=3"),
+        out_dir=tmp_path,
+        run_id=RUN_ID,
+        store=store,
+    )
+
+    assert artifacts.tool_calls is not None and artifacts.tool_calls.exists()
+    assert artifacts.tool_calls_summary is not None
+    assert artifacts.tool_calls_summary["calls"] == 1
+    assert artifacts.tool_calls_summary["by_tool"] == {"expand_to_section": 1}
+    text = artifacts.tool_calls.read_text(encoding="utf-8")
+    assert "expand_to_section" in text
+    assert "chunk_id" in text
 
 
 def test_write_reports_omits_battle_card_without_coverage(store: SqliteStore, tmp_path: Path) -> None:

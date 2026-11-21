@@ -3812,3 +3812,144 @@ def build_runner(
     """
     resolved_ports = ports if ports is not None else build_adapters(profile=profile)
     return Runner(store, ports=resolved_ports, clock=clock, phases=phases)
+
+
+#: Таймаут проверки связности, секунды. Это проверка **факта соединения**, а не измерение
+#: скорости хоста: короткий таймаут отсекает «сети нет» за секунды и не заставляет
+#: оператора ждать полного клиентского таймаута на каждом объявленном хосте. Число не
+#: ограничивает работу — при живой сети никакого лимита не вводится.
+NETWORK_PREFLIGHT_TIMEOUT_S = 5.0
+
+
+class NetworkPreflightError(RuntimeError):
+    """Все объявленные хосты недоступны, а политика требует сети.
+
+    Несёт **числа**, а не «сети нет»: сколько хостов объявлено, сколько недоступно и с
+    каким таймаутом проверяли, иначе оператор не может ни понять отказ, ни выбрать
+    выход. Исключение — про вход (сеть/политика прогона), поэтому CLI отображает его в
+    ``EXIT_USAGE``, а не в ошибку исполнения. Это **не** потолок на работу: как только
+    сеть есть, никакого ограничения не вводится.
+    """
+
+    def __init__(
+        self,
+        *,
+        hosts: Sequence[str],
+        unreachable: Sequence[str],
+        timeout_s: float,
+    ) -> None:
+        self.hosts = tuple(hosts)
+        self.unreachable = tuple(unreachable)
+        self.timeout_s = timeout_s
+        super().__init__(self.describe())
+
+    def describe(self) -> str:
+        """Человекочитаемое сообщение с числами и названным выходом."""
+        return (
+            "network preflight failed: "
+            f"объявлено хостов={len(self.hosts)}, "
+            f"недоступно={len(self.unreachable)}, "
+            f"timeout={self.timeout_s:g} s; "
+            f"не отвечают: {', '.join(self.unreachable) or '—'}. "
+            "Политика краула требует сети хотя бы для одного корня, поэтому прогон "
+            "упал бы на каждом документе. Проверьте связность/прокси либо запустите без "
+            "сети: --refresh offline (чанки durable-субстрата) или --refresh frozen "
+            "(сохранённые сырые байты с текущим извлечением)."
+        )
+
+
+def _probe_scheme(scheme: str, authority: str, timeout_s: float) -> bool:
+    """Один пробный GET: ``True`` — получен **любой** HTTP-ответ.
+
+    Отдельная функция, а не ветка в цикле: исключение соединения — законный исход
+    проверки («сети нет»), и перехватывать его нужно ровно здесь, не смешивая с логикой
+    выбора схемы.
+    """
+    import httpx  # локальный импорт: composition root не тянет сетевой стек на импорте
+
+    try:
+        httpx.get(
+            f"{scheme}://{authority}/",
+            timeout=timeout_s,
+            follow_redirects=False,
+        )
+    except Exception:  # noqa: BLE001 — любая ошибка соединения/таймаут = «сети нет»
+        return False
+    return True
+
+
+def _probe_host_http(host: str, timeout_s: float) -> bool:
+    """Реальная проверка связности хоста: **любой** HTTP-ответ означает «сеть есть».
+
+    Код ответа не важен (403/404/500 одинаково доказывают соединение) — проверяется
+    факт сетевого пути, а не доступность материала: 403 объявлен самим сайтом, и
+    трактовать его как «сети нет» значило бы отказать прогону, которому сеть доступна.
+    ``HEAD`` не используется: часть серверов отвечает на него иначе, чем на ``GET``.
+
+    Схема проверяется **обеими**: сначала ``https``, при сбое — ``http``. Объявленный
+    хост — это имя, а не пара (схема, порт), и требовать от него TLS значило бы отказать
+    прогону, у которого материал открыт по ``http``. Соединение по любой из схем
+    доказывает то, что нужно проверить: сеть есть.
+
+    Литерал IPv6 берётся в скобки: без них ``https://::1/`` не разбирается как authority.
+    """
+    authority = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return any(_probe_scheme(scheme, authority, timeout_s) for scheme in ("https", "http"))
+
+
+def preflight_network(
+    *,
+    hosts: Iterable[str],
+    timeout_s: float = NETWORK_PREFLIGHT_TIMEOUT_S,
+    probe: Callable[[str, float], bool] | None = None,
+) -> tuple[NetworkPreflightError | None, tuple[str, ...]]:
+    """Preflight сети: дешёвый отказ вместо сотен провалов на фазе корпуса.
+
+    Проверка идёт по **объявленным хостам** (дедуп по хосту, не по URL): по URL из
+    корпуса не ходим — их сотни тысяч, и обход был бы работой, а не проверкой. Вызывается
+    один раз до фаз и только если политика краула требует сети хотя бы для одного корня:
+    прогону без сети (``--refresh offline``/``frozen``, ``network_mode=deny``) отказывать
+    нечем, поэтому вызывающий его вовсе не запускает.
+
+    Исходы:
+
+    * **все** хосты недоступны → ``error`` (:class:`NetworkPreflightError`) с числами и
+      названным выходом (``--refresh offline``/``frozen``);
+    * **часть** недоступна → предупреждение с перечнем недоступных хостов, прогон идёт:
+      сеть может моргнуть, а корпус частично доступен;
+    * все доступны → ни ошибки, ни предупреждений.
+
+    Проверка — **не измерение**: в ``run_id`` не входит, в корпус не пишет, вердиктов не
+    меняет. ``probe`` инъектируется для тестов (дефолт — реальный GET).
+
+    :returns: ``(error | None, warnings)`` — ``warnings`` для того же канала
+        ``config_notices``, что и у соседнего preflight'а.
+    """
+    checked: list[str] = []
+    for host in hosts:
+        text = str(host).strip()
+        if text and text not in checked:
+            checked.append(text)
+    if not checked:
+        return None, ()
+    probe_fn = probe if probe is not None else _probe_host_http
+    unreachable = [host for host in checked if not probe_fn(host, timeout_s)]
+    if not unreachable:
+        return None, ()
+    if len(unreachable) == len(checked):
+        return (
+            NetworkPreflightError(
+                hosts=checked, unreachable=unreachable, timeout_s=timeout_s
+            ),
+            (),
+        )
+    return (
+        None,
+        (
+            "network preflight: недоступно хостов "
+            f"{len(unreachable)} из {len(checked)} (timeout={timeout_s:g} s): "
+            f"{', '.join(unreachable)} — прогон продолжается, корпус этих хостов "
+            "может быть неполным",
+        ),
+    )
+

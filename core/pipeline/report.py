@@ -153,6 +153,10 @@ from core.pipeline.table_provenance import (
     tables_summary,
     write_tables_artifact,
 )
+from core.pipeline.tool_provenance import (
+    tool_calls_summary,
+    write_tool_calls_artifact,
+)
 from core.util.hashing import short_hash
 
 #: Строковые значения блокирующих классов — для разбора legacy-аудита в ячейке,
@@ -404,6 +408,15 @@ class Artifacts:
     #: Блок ``tables`` манифеста — те же числа свёрнутыми, чтобы CLI назвал факт строкой,
     #: даже когда CSV не создан. ``None`` — документов корпуса нет вовсе (не ноль).
     tables_summary: dict[str, Any] | None = None
+    #: ``outputs/tool_calls.csv`` — трасса локальных вызовов оценщика (план 28 §10):
+    #: строка на вызов (ячейка, ``seq``, инструмент, ``ok``, символы, причина, адрес
+    #: запроса). Провенанс исполнения, не доказательство (I22) и не условие измерения.
+    #: ``None`` — вызовов не записано; «профиль не включён» и «трасса не велась» различает
+    #: поле контракта ``tool_profile``, а не пустой файл.
+    tool_calls: Path | None = None
+    #: Блок сводки трассы — чтобы CLI назвал цену вердикта строкой, даже когда файла нет
+    #: по другой причине. ``None`` — вызовов не записано (не ноль).
+    tool_calls_summary: dict[str, Any] | None = None
     #: Блок ``blocks`` манифеста (O36 фаза 2, план 26) — те же числа свёрнутыми, чтобы CLI
     #: назвал оба факта строкой: сколько структуры прочитано и на какой части корпуса
     #: вопрос не задавался. Своего CSV нет намеренно: сами блоки живут у документа
@@ -1029,7 +1042,11 @@ def crawl_policy_provenance(
         corpus_source = getattr(
             getattr(decision, "corpus_source", None), "value", None
         )
-        if network_mode == "fetch" and corpus_source == "network":
+        space_matches = getattr(decision, "space_matches", None)
+        # Корень попадает в блок не только при необычном исполнении, но и когда обход
+        # заказан **расхождением пространства**: это причина, по которой сеть трогали
+        # вне срока, и без неё провенанс объяснял бы обход часами, которых не было.
+        if network_mode == "fetch" and corpus_source == "network" and space_matches is not False:
             continue
         roots.append(
             {
@@ -1043,6 +1060,9 @@ def crawl_policy_provenance(
                 "corpus_source": corpus_source,
                 "requested": bool(getattr(decision, "requested", False)),
                 "reason": getattr(decision, "reason", None),
+                # ``False`` — обход заказан сменой пространства, а не сроком; ``None``
+                # (неизвестно) не публикуется отдельным полем, чтобы не шуметь.
+                **({"space_matches": space_matches} if space_matches is not None else {}),
             }
         )
     roots.sort(key=lambda item: (str(item["scope"]), str(item["decision"])))
@@ -1103,6 +1123,7 @@ def build_manifest(
     crawl_app: Any = None,
     operator_document_level: str | None = None,
     registry_spec_digest: str | None = None,
+    tool_profile: str | None = None,
     execution_contract_digest: str | None = None,
     manual_artifacts: Mapping[str, Any] | None = None,
     manual_artifacts_digest: str | None = None,
@@ -1163,6 +1184,10 @@ def build_manifest(
     * §13/E2 — ``registry_spec_digest`` (дайджест загруженных package-scoped спецификаций
       реестров) передаётся вызывающим; при отсутствии реестров — ``None``. Это **граница**
       ``execution_change`` (смена спеки меняет выходные R-ячейки).
+    * План 28 §9 — ``tool_profile`` (каноническая строка профиля локальных инструментов
+      оценщика) — тоже **граница** ``execution_change``: набор инструментов меняет то, что
+      модель может адресовать, и значит набор доказательств. Приходит от того же резолвера
+      осей, что дал ``run_id``; ``None`` — не записано (legacy), а не «инструментов нет».
     * §13 / 09 §12.5 — ``execution_contract_digest`` передаётся вызывающим **готовым**
       (значение, уже вычисленное composition root для ``run_id``/lineage); здесь оно не
       пересчитывается из другого набора значений и не подменяется пустой строкой.
@@ -1701,6 +1726,15 @@ def build_manifest(
             if axes is not None
             else registry_spec_digest
         ),
+        # План 28 §9: профиль локальных инструментов — **поле контракта** (37-е),
+        # поэтому значение берётся у того же резолвера осей, что дал ``run_id``
+        # (``DeclaredExecutionAxes.tool_profile`` — каноническая строка). Второй формулы
+        # нет: манифест не пересчитывает профиль из конфига, иначе он описывал бы другое
+        # объявление. ``None`` — не записано (legacy/модульный вызов), а не «инструментов
+        # нет»: пустой профиль даёт стабильную строку ``-;max_calls=0``.
+        tool_profile=(
+            getattr(axes, "tool_profile", None) if axes is not None else tool_profile
+        ),
         # 09 §12.5: готовый отпечаток условий измерения (не пересчитывается здесь).
         execution_contract_digest=execution_contract_digest,
         # 13-manual-artifacts §3.2/§3.4: отпечаток **объявленных** артефактов (поле
@@ -1864,8 +1898,17 @@ def _battle_card_header(
     cells: Iterable[Any] = (),
     catalog: Mapping[str, CatalogRow] | Iterable[CatalogRow] | None = None,
     crawl_provenance: CrawlProvenance | None = None,
+    corpus_as_of: Mapping[str, str] | None = None,
 ) -> list[tuple[str, Any]]:
-    """Шапка battle card: метрики + аннотации (приглушение/fallback) + провенанс краула."""
+    """Шапка battle card: метрики + аннотации (приглушение/fallback) + провенанс краула.
+
+    ``corpus_as_of`` — даты наблюдения артефактов (``{from, to}`` из
+    ``runs.corpus_snapshot_json``). Печатаются **в шапке**, потому что отчёт без них
+    читается как «доказательства собраны сегодня»: при переиспользовании корпуса
+    (``reuse``/``offline``/``frozen``) дата отчёта и дата доказательств — разные даты, и
+    читатель обязан видеть вторую, а не выводить её из первой. ``None`` — дат не
+    записано: это факт, а не «свежо».
+    """
     reasons = "; ".join(bundle.comparability.reasons)
     rows: list[tuple[str, Any]] = [
         ("capability", round(bundle.capability.value, 6)),
@@ -1924,6 +1967,13 @@ def _battle_card_header(
     # демотирование: Comparability/§6 не затрагиваются (I11-only).
     engines = sorted({str(e) for e in (getattr(crawl_provenance, "engines", None) or [])})
     rows.append(("crawl_engines", ", ".join(engines)))
+    as_of = dict(corpus_as_of or {})
+    rows.append(
+        (
+            "corpus_as_of",
+            f"{as_of.get('from') or '—'}…{as_of.get('to') or '—'}",
+        )
+    )
     if getattr(crawl_provenance, "heterogeneous", False):
         rows.append(("crawl_engines_heterogeneous", True))
     if insufficient:
@@ -1944,6 +1994,7 @@ def _battle_card_sheets(
     insufficient: bool,
     crawl_provenance: CrawlProvenance | None = None,
     pages: Mapping[str, tuple[int, int]] | None = None,
+    corpus_as_of: Mapping[str, str] | None = None,
 ) -> list[tuple[str, list[list[Any]]]]:
     """Собирает листы battle card (шапка/матрица/сателлиты/модули/sensitivity).
 
@@ -1962,6 +2013,7 @@ def _battle_card_sheets(
             cells=cells,
             catalog=catalog,
             crawl_provenance=crawl_provenance,
+            corpus_as_of=corpus_as_of,
         )
     )
 
@@ -2065,6 +2117,7 @@ def render_battle_card(
     *,
     crawl_provenance: CrawlProvenance | None = None,
     pages: Mapping[str, tuple[int, int]] | None = None,
+    corpus_as_of: Mapping[str, str] | None = None,
 ) -> Path:
     """Пишет ``battle_card`` (XLSX; CSV-fallback) с G4/I11-гейтом (§9, 02 §E.2).
 
@@ -2108,6 +2161,7 @@ def render_battle_card(
         insufficient=insufficient,
         crawl_provenance=crawl_provenance,
         pages=pages,
+        corpus_as_of=corpus_as_of,
     )
 
     out = Path(out_path)
@@ -2891,7 +2945,18 @@ _CONTRACT_FIELD_GETTERS: dict[str, Callable[[RunManifest], Any]] = {
 #: У остальных полей ``None`` — законное состояние (реестров нет, секции ``crawl`` нет), и
 #: переход ``None → значение`` там действительно означает смену условий измерения.
 _CONTRACT_FIELDS_ALWAYS_RECORDED: frozenset[str] = frozenset(
-    {"cohort_digest", "seeds_digest", "crawl_policy_digest", "frozen_source"}
+    {
+        "cohort_digest",
+        "seeds_digest",
+        "crawl_policy_digest",
+        "frozen_source",
+        # План 28 §9: современный прогон пишет профиль инструментов всегда — объявленный
+        # путь без инструментов даёт стабильную строку ``-;max_calls=0``, а не ``NULL``.
+        # Поэтому ``None`` здесь — «не записано» (строка прошлой схемы), а не пустое
+        # значение: назвать его «изменилось» значило бы утверждать смену набора
+        # инструментов без данных (A3).
+        "tool_profile",
+    }
 )
 
 
@@ -3913,6 +3978,13 @@ def write_reports(
             outputs_dir / "battle_card.xlsx",
             crawl_provenance=manifest.crawl_provenance,
             pages=pages_by_chunk(evidence_page_rows),
+            # План 20 §F1: дата доказательств, а не дата отчёта. ``None`` — дат не
+            # записано (факт, а не «свежо»); шапка печатает это явно.
+            corpus_as_of=(
+                None
+                if manifest.corpus_snapshot is None
+                else manifest.corpus_snapshot.corpus_as_of
+            ),
         )
     except PublishBlockedError:
         battle_card = None
@@ -4080,6 +4152,16 @@ def write_reports(
     except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
         tables_path = None
     tables_block = tables_summary(store, run_id, products=planned_products)
+    # План 28 §10: трасса вызовов — видимым артефактом. Пока её не публикуют, оператор
+    # видит вердикт, но не цену: «инструмент не звали» и «звали и провалился» неотличимы.
+    # Сбой выгрузки отчёт не роняет (как у ``tables``): факт остаётся в БД.
+    try:
+        tool_calls_path = write_tool_calls_artifact(
+            store, run_id, outputs_dir / "tool_calls.csv"
+        )
+    except Exception:  # noqa: BLE001 — артефакт вторичен к измерению
+        tool_calls_path = None
+    tool_calls_block = tool_calls_summary(store, run_id)
     # O36 фаза 2 (план 26): структурные блоки — числом в манифест и строкой оператору.
     # Отдельного CSV нет: сами блоки — у документа, адрес блока у цитаты — в
     # ``evidence_pages.csv``. Сводка отвечает на другой вопрос: на какой части корпуса
@@ -4215,6 +4297,8 @@ def write_reports(
         ocr_provenance=ocr_provenance_path,
         tables=tables_path,
         tables_summary=tables_block,
+        tool_calls=tool_calls_path,
+        tool_calls_summary=tool_calls_block,
         blocks_summary=blocks_block,
         support_quality=support_path,
         support_quality_summary=support_payload,

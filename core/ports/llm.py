@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from core.domain import LLMCellOutput
 from core.domain.enums import ReasoningEffort
+from core.domain.tools import ToolInvocation, ToolSpec
 
 
 @dataclass(frozen=True)
@@ -92,3 +93,55 @@ class EvaluatorPort(Protocol):
     """Self-host оценщик с constrained decoding. **Без** инструментов/веб-поиска (I18)."""
 
     def complete(self, req: LLMRequest) -> LLMResponse: ...
+
+
+@dataclass(frozen=True)
+class ToolTurnRequest:
+    """Один ход диалога с **локальными** инструментами (§7, I18).
+
+    Отдельный тип, а не расширение :class:`LLMRequest`, и отдельный порт, а не метод
+    ``EvaluatorPort``: I18 держится тем, что у оценщика **нет** параметра ``tools``.
+    Добавление поля в ``LLMRequest`` открыло бы веб-инструменты всем, кто уже вызывает
+    ``complete``, — то есть сняло бы структурную гарантию ради удобства.
+
+    ``allowed_tools`` — **объявленный** набор, а не «что модель попросит»: адаптер обязан
+    отправить провайдеру ровно эти схемы и отвергнуть вызов имени вне набора. Инструменты
+    исполняет ядро; адаптер остаётся транспортом и в сеть (кроме endpoint'а LLM) не ходит.
+    """
+
+    prompt: str
+    response_schema: type[BaseModel]
+    allowed_tools: tuple[ToolSpec, ...]
+    model_id: str
+    model_version: str = ""
+    seed: int | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    reasoning_effort: ReasoningEffort | None = None
+
+
+@dataclass(frozen=True)
+class ToolTurn:
+    """Ответ на ход: либо финальный вердикт, либо запросы на вызов (ровно одно из двух).
+
+    ``tool_calls`` непусто ⇒ ``final`` пуст, и наоборот. Оба пусты — модель не дала ни
+    вердикта, ни вызова: это отказ формы, а не «нет данных» (ячейка не должна молча
+    превращаться в ``❓`` из-за пустого ответа).
+    """
+
+    final: LLMResponse | None = None
+    tool_calls: tuple[ToolInvocation, ...] = ()
+    raw: str = ""
+    finish_reason: str | None = None
+
+
+@runtime_checkable
+class LocalToolCallerPort(Protocol):
+    """Транспорт «промпт + объявленные локальные инструменты → ход» (без веб-поиска).
+
+    Реализуется тем же OI-совместимым адаптером, что и :class:`EvaluatorPort`, но
+    **отдельным методом**: наличие этого протокола у объекта не делает ``complete``
+    способным вызывать инструменты, и наоборот.
+    """
+
+    def turn(self, req: ToolTurnRequest) -> ToolTurn: ...

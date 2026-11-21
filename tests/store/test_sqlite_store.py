@@ -50,12 +50,13 @@ from core.domain import (
     StaleReason,
     Status,
     TerminationReason,
+    ToolTraceEntry,
 )
 from core.pipeline.evaluate import evaluate_cell
 from core.ports.store import RunIndexRef
 from core.ports.types import Chunk
 from core.store.sqlite import SCHEMA_VERSION
-from core.store.sqlite_store import PlanInputsConflict, SqliteStore
+from core.store.sqlite_store import PlanInputsConflict, SqliteStore, ToolCallRecord
 
 RUN_ID = "run-1"
 
@@ -190,6 +191,9 @@ def test_schema_opens(store: SqliteStore) -> None:
             "ranking_epsilon"} <= runs_cols
     # E2 (schema 3.5.0): дайджест package-scoped спецификаций реестров — граница §13.
     assert "registry_spec_digest" in runs_cols
+    # План 28 §9 (3.28.0): профиль локальных инструментов оценщика — поле контракта
+    # (``tool_profile`` → ``run_id``), значит без колонки ``hound diff`` не назвал бы ось.
+    assert "tool_profile" in runs_cols
     # P1: снимок плановых входов прогона — реальная таблица.
     inputs_cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(run_inputs)")}
     assert {"run_id", "snapshot_version", "payload_json", "payload_sha256",
@@ -1319,6 +1323,39 @@ def test_registry_spec_digest_roundtrip(store: SqliteStore) -> None:
     assert store.read_manifest(RUN_ID).registry_spec_digest == "digest-e2"
 
 
+def test_tool_profile_roundtrip(store: SqliteStore) -> None:
+    """План 28 §9: ``persist_manifest``/``read_manifest`` несут профиль инструментов.
+
+    Профиль — **поле контракта** (37-е в ``EXECUTION_CONTRACT_FIELDS``), то есть условие
+    измерения. Без персистенции ``hound diff`` читал бы всегда ``None`` и печатал «предел
+    диагностики» вместо оси, а смена набора инструментов выглядела бы как неизменное
+    условие. ``NULL`` читается как ``None`` — «не записано», а не «профиль пуст»: пустой
+    профиль даёт стабильную строку ``-;max_calls=0``.
+    """
+    store.create_run(RUN_ID, _cfg())
+    # До записи манифеста — NULL → ``None`` (не фабрикуется).
+    assert store.read_manifest(RUN_ID).tool_profile is None
+
+    manifest = RunManifest(
+        run_id=RUN_ID,
+        case_id="case-1",
+        created_at="2026-01-01T00:00:00Z",
+        mode=RunMode.STRICT,
+        methodology_version="2.0.0",
+        package_version="pkg-1",
+        catalog_version="cat-1",
+        status_dict_version="sd-1",
+        scoring_policy_version="sp-1",
+        anchor_product_id="p1",
+        tool_profile="expand_to_section+table_row;max_calls=2",
+    )
+    store.persist_manifest(RUN_ID, manifest)
+    assert (
+        store.read_manifest(RUN_ID).tool_profile
+        == "expand_to_section+table_row;max_calls=2"
+    )
+
+
 def test_execution_contract_digest_roundtrip(store: SqliteStore) -> None:
     """09 §12.5: контракт условий измерения персистится и читается обратно.
 
@@ -2190,3 +2227,132 @@ def test_upsert_corpus_doc_without_provenance_keeps_columns_null(
     ).fetchone()
     assert row["http_status"] is None
     assert row["reuse_kind"] is None
+
+
+# --------------------------------------------------------------------------- #
+# локальные инструменты оценщика (план 28 §9): адрес документа и трасса вызовов
+# --------------------------------------------------------------------------- #
+
+
+def test_iter_chunks_by_doc_orders_by_chunk_no_and_ignores_unknown_doc(
+    store: SqliteStore,
+) -> None:
+    """Чанки одного документа — по ``chunk_no, chunk_id``; чужой ``doc_id`` — пусто.
+
+    Адрес инструмента — **документ**: выборка по сборке читала бы весь корпус на каждый
+    вызов. Порядок обязан быть детерминированным (раздел документа читается как текст),
+    а отсутствующий адрес — штатный пустой ответ, а не исключение: «документа нет в
+    корпусе прогона» инструмент обязан уметь отличить от сбоя.
+    """
+    store.upsert_corpus_doc(_doc("doc-1", "p1"))
+    store.upsert_corpus_doc(_doc("doc-2", "p1"))
+    store.add_chunks_batch(
+        [
+            # Порядок вставки перемешан: итерация не имеет права его повторять.
+            _chunk("c-2", chunk_no=2),
+            _chunk("c-0b", chunk_no=0),
+            _chunk("c-0a", chunk_no=0),
+            _chunk("c-1", chunk_no=1),
+            _chunk("other", doc_id="doc-2", chunk_no=0),
+        ]
+    )
+
+    got = [chunk.chunk_id for chunk in store.iter_chunks_by_doc("doc-1")]
+    assert got == ["c-0a", "c-0b", "c-1", "c-2"]
+    # Чужой документ не попадает в выборку (I17: адрес не расширяется сам).
+    assert "other" not in got
+    assert list(store.iter_chunks_by_doc("doc-missing")) == []
+    # Порт-тип, а не строка БД: инструмент получает тот же ``Chunk``, что и ретривал.
+    assert all(isinstance(chunk, Chunk) for chunk in store.iter_chunks_by_doc("doc-1"))
+
+
+def _trace(
+    seq: int,
+    *,
+    name: str = "expand_to_section",
+    ok: bool = True,
+    chars: int = 10,
+    reason: str | None = None,
+) -> ToolTraceEntry:
+    """Запись вызова: адрес ячейки добавляет :class:`ToolCallRecord`."""
+    return ToolTraceEntry(
+        seq=seq,
+        name=name,
+        arguments={"chunk_id": f"chunk-{seq}"},
+        ok=ok,
+        chars=chars,
+        reason=reason,
+    )
+
+
+def test_save_tool_calls_is_idempotent_per_cell(store: SqliteStore) -> None:
+    """Повторная запись ячейки **заменяет** её трассу, а не дописывает хвост.
+
+    Идемпотентность проверяется на усечении: второй прогон ячейки с меньшим числом
+    вызовов не имеет права оставить ``seq`` прошлого прогона — иначе «сколько вызовов
+    стоил вердикт» читалось бы по смеси двух прогонов.
+    """
+    store.create_run(RUN_ID, _cfg())
+    first = [
+        ToolCallRecord("p1", "param.a", _trace(0)),
+        ToolCallRecord("p1", "param.a", _trace(1, name="table_row", chars=42)),
+        ToolCallRecord("p1", "param.b", _trace(0, ok=False, chars=0, reason="bad_args")),
+    ]
+    assert store.save_tool_calls(RUN_ID, first) == 3
+
+    rows = list(store.iter_tool_calls(RUN_ID))
+    assert [(row.product_id, row.param_id, row.entry.seq) for row in rows] == [
+        ("p1", "param.a", 0),
+        ("p1", "param.a", 1),
+        ("p1", "param.b", 0),
+    ]
+    # Провенанс вызова пережил запись буквально: аргументы, цена, причина отказа.
+    assert rows[1].entry.name == "table_row"
+    assert rows[1].entry.chars == 42
+    assert rows[1].entry.arguments == {"chunk_id": "chunk-1"}
+    assert rows[2].entry.ok is False
+    assert rows[2].entry.reason == "bad_args"
+
+    # Повтор: у ячейки ``param.a`` остался один вызов ⇒ хвост ``seq=1`` обязан исчезнуть.
+    assert store.save_tool_calls(
+        RUN_ID, [ToolCallRecord("p1", "param.a", _trace(0, chars=7))]
+    ) == 1
+    rows = list(store.iter_tool_calls(RUN_ID))
+    assert [(row.product_id, row.param_id, row.entry.seq, row.entry.chars) for row in rows] == [
+        ("p1", "param.a", 0, 7),
+        ("p1", "param.b", 0, 0),
+    ]
+
+    # Тот же вход дважды — тот же результат (идемпотентность, а не «дописал ещё раз»).
+    store.save_tool_calls(RUN_ID, [ToolCallRecord("p1", "param.a", _trace(0, chars=7))])
+    assert len(list(store.iter_tool_calls(RUN_ID))) == 2
+
+
+def test_save_tool_calls_empty_input_writes_nothing(store: SqliteStore) -> None:
+    """Пустой вход не стирает уже записанную трассу: «нет строк» и «пустой список» — разное."""
+    store.create_run(RUN_ID, _cfg())
+    store.save_tool_calls(RUN_ID, [ToolCallRecord("p1", "param.a", _trace(0))])
+    assert store.save_tool_calls(RUN_ID, []) == 0
+    assert len(list(store.iter_tool_calls(RUN_ID))) == 1
+
+
+def test_count_tool_calls_is_none_without_trace(store: SqliteStore) -> None:
+    """``None`` — трассы нет; число — сколько записано. Ноль не возвращается никогда.
+
+    «Вызовов не было» и «трассы не было» таблица различить не может (при профиле без
+    инструментов в неё не пишет никто), поэтому ``0`` в отчёте был бы утверждением о
+    прогоне, которого никто не делал. Различить факты может поле контракта
+    ``tool_profile``; здесь публикуется только «строк нет» либо их число.
+    """
+    store.create_run(RUN_ID, _cfg())
+    assert store.count_tool_calls(RUN_ID) is None
+    store.save_tool_calls(
+        RUN_ID,
+        [
+            ToolCallRecord("p1", "param.a", _trace(0)),
+            ToolCallRecord("p1", "param.a", _trace(1)),
+        ],
+    )
+    assert store.count_tool_calls(RUN_ID) == 2
+    # Трасса другого прогона не считается.
+    assert store.count_tool_calls("run-other") is None

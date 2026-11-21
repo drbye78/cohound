@@ -20,6 +20,17 @@ empty:       chunks=() → evaluated ❓, validation_notes=[no_fragments] — в
 :func:`retrieve_for_cell` собирает конкретный путь I16/I17/I20 (queries → retrieve per query
 → union/dedup → обрезка до K), когда оркестратору удобно делегировать именно это.
 
+**Локальные инструменты — объявленный профиль, а не веб-поиск (I18).** При пустом профиле
+(``NO_TOOL_PROFILE``) конвейер выше исполняется **как есть**: один ``evaluator.complete``.
+Если профиль включён, вместо одного вызова идёт диалог ходов через **другой** порт
+(``LocalToolCallerPort``): модель просит вызов, ядро исполняет его по корпусу прогона
+(``LocalToolPort``), результат дописывается в промпт следующего хода, и так до вердикта или
+до исчерпания объявленного бюджета. Ни веб-поиска, ни сетевого выхода у инструментов нет:
+это **адресация** уже собранного материала. Результат инструмента не становится фрагментом
+(``source_id`` у него нет), поэтому цитата по-прежнему сверяется с текстом переданных
+чанков (I22). Трасса вызовов — провенанс (:attr:`EvaluationOutcome.tool_trace`), в
+``run_id`` входит профиль, а не фактическая трасса.
+
 **Retry ≤ ``max_retries`` (по умолчанию 2).** Повтор переиздаёт **тот же** запрос: промпт
 механический и детерминированный, поэтому для детерминированного оценщика повтор —
 **ограниченный no-op** и полезен ровно для транзиентных ошибок адаптера (сеть/сервер).
@@ -56,6 +67,7 @@ preliminary → ``preliminary``-кандидат c ``status=None`` (**I13**).
 from __future__ import annotations
 
 import datetime as _dt
+import inspect
 import json
 import re
 import time
@@ -81,16 +93,25 @@ from core.domain import (
     LLMCellOutput,
     LLMScenario,
     MeasurementOrigin,
+    ParamClass,
     Satellite,
     SourceKind,
     Status,
 )
 from core.domain.anchors import SourceResolver
+from core.domain.doc_tables import ExtractedTable, TableKey
 from core.domain.invariants import (
     _parse_iso_utc as _parse_iso_utc,  # noqa: PLC2701 — тот же разбор момента, что у I2d
 )
 from core.domain.invariants import check_absence_coverage, check_absence_dated
 from core.domain.models import absence_evidence_id
+from core.domain.tools import (
+    NO_TOOL_PROFILE,
+    ToolInvocation,
+    ToolOutcome,
+    ToolProfile,
+    ToolTraceEntry,
+)
 from core.pipeline.carry_forward import (
     CarriedCell,
     CellReuseConditions,
@@ -113,6 +134,7 @@ from core.pipeline.evaluation_policy import (
     declared_max_retries,
 )
 from core.pipeline.exhaustion import ExhaustionFacts, build_protocols
+from core.pipeline.local_tools import TOOL_NAMES, build_local_tools
 from core.pipeline.precedence import (
     PRECEDENCE_REVIEW_REASON,
     collect_protected_cells,
@@ -139,12 +161,20 @@ from core.pipeline.retrieve import (
     retrieve,
 )
 from core.pipeline.runner import PhaseResult, Ports
+from core.pipeline.tool_corpus import StoreToolCorpus
 from core.pipeline.validate import ChunkLike, ValidationResult, validate_output
 from core.ports.embedder import EmbedderPort
 from core.ports.lexical_index import LexicalIndexPort
-from core.ports.llm import EvaluatorPort, LLMRequest, LLMResponse
+from core.ports.llm import (
+    EvaluatorPort,
+    LLMRequest,
+    LLMResponse,
+    LocalToolCallerPort,
+    ToolTurnRequest,
+)
 from core.ports.state import CellMeasurementRow, ProductStatePort
 from core.ports.store import StorePort
+from core.ports.tools import LocalToolPort, ToolCallRecord, ToolCorpusPort
 from core.ports.vector_index import (
     RetrievedChunk,
     VectorIndexPort,
@@ -750,6 +780,12 @@ class EvaluationOutcome:
     #: **прогона**, а не ячейки, поэтому первое же вхождение завершает фазу ``failed``,
     #: а не оставляет 905 одинаковых ``failed``-ячеек под видом ``status="ok"``.
     auth_failure: str | None = field(default=None)
+    #: Трасса **локальных** инструментов ячейки (:class:`~core.domain.tools.ToolTraceEntry`):
+    #: порядок вызовов, аргументы, ``ok``/``chars``/``reason``. Провенанс исполнения — в
+    #: ``run_id`` не входит (условие измерения — профиль, а не фактическая трасса), но
+    #: отвечает на вопрос «почему вердикт такой». Пустой кортеж — инструменты не вызывались
+    #: (в том числе пустой профиль).
+    tool_trace: tuple[ToolTraceEntry, ...] = ()
 
 
 #: Исходы вызова оценщика в журнале (``logs/llm_calls.jsonl``). Машинные токены, чтобы
@@ -3051,6 +3087,283 @@ def _with_doc_versions(
     )
 
 
+# ---------------------------------------------------------------------------
+# Локальные инструменты: диалог ходов (§7, I18; план 28 §9)
+# ---------------------------------------------------------------------------
+
+#: Машинный токен: объявленный бюджет вызовов исчерпан. Видимый факт, а не тишина:
+#: «модель упёрлась в бюджет» и «модель не захотела инструментов» — разные ходы при
+#: одном входе, и по артефактам они обязаны различаться.
+TOOL_BUDGET_EXHAUSTED_REASON = "tool_budget_exhausted"
+
+#: Машинный токен провенанса: в режиме инструментов ``response_format`` не запрашивался.
+#: Грамматика constrained decoding и tool-calling конфликтуют в одном запросе у
+#: OI-совместимых серверов, поэтому форма ответа держится парсом схемы, и это
+#: публикуется, а не остаётся молчаливым понижением.
+TOOL_MODE_DECODER_NOTE = "tool_mode_decoder_none"
+
+
+class ToolWiringError(ValueError):
+    """Профиль инструментов объявлен, а исполнение/промпт к нему не собраны.
+
+    Отказ **сборки**, а не сбой ячейки: тихий откат к пути без инструментов означал бы,
+    что ``run_id`` называет профиль, которого прогон не исполнял (профиль входит в
+    контракт). Наследует ``ValueError``, поэтому composition root отображает его в
+    ``EXIT_USAGE`` (ошибка входа), а не в ``EXIT_ERROR``. Класс объявлен здесь, а не взят
+    из ``core/cli/wiring.py``: ``pipeline`` не имеет права импортировать composition root
+    (§4.1), а ``WiringError`` живёт именно там.
+    """
+
+
+class ToolDialogueError(RuntimeError):
+    """Транспорт инструментов нарушил контракт хода: ни вердикта, ни вызовов.
+
+    Адаптер такой ход отвергает сам (пустой ответ — отказ формы); эта ошибка — защита от
+    чужой реализации ``LocalToolCallerPort``, вернувшей пустой ``ToolTurn``. Ячейка не
+    должна молча стать ``❓`` из пустого ответа: это отказ прибора, а не наблюдение.
+    """
+
+
+def _tool_instructions(profile: ToolProfile) -> str:
+    """Инструкция профиля инструментов для промпта (детерминированная).
+
+    Имена сортируются: профиль — множество, и перестановка в объявлении не должна менять
+    текст промпта. Слово «локальные» стоит в самом тексте: модель не должна предполагать
+    веб-поиск (I18), а результат вызова — не доказательство (I22).
+    """
+    names = ", ".join(sorted(profile.tools))
+    return (
+        f"Доступны локальные инструменты: {names} (не более {profile.max_calls} вызовов "
+        "на ячейку). Инструменты читают только корпус этого продукта и возвращают "
+        "структурный контекст: раздел документа, соседние фрагменты, таблицу. Их "
+        "результат — не доказательство: цитата обязана быть подстрокой текста "
+        "фрагмента, а source_id берётся только из переданных фрагментов."
+    )
+
+
+def _compile_cell_prompt(
+    *,
+    param: CatalogRow,
+    product_id: str,
+    chunks: Sequence[ChunkLike],
+    satellites: Sequence[Satellite],
+    role_vocabulary: Collection[str] | None,
+    tables: Mapping[TableKey, ExtractedTable] | None,
+    tool_profile: ToolProfile,
+) -> CompiledPrompt:
+    """Компилирует промпт ячейки, добавляя таблицы и инструкцию инструментов.
+
+    Путь без инструментов и без таблиц — **тот же** вызов ``compile_prompt``, что был до
+    их появления: пустой профиль обязан оставаться выразимым, иначе сравнение «с
+    инструментами» и «без» перестало бы быть сравнением двух объявленных профилей.
+
+    ``tables``/``tool_instructions`` передаются, только когда они есть. Если
+    ``prompt.compile_prompt`` их ещё не принимает, это **видимая** ошибка сборки
+    (:class:`ToolWiringError`), а не молчаливая потеря: промпт без объявленных таблиц или
+    инструкций — другой вход при том же ``run_id``.
+    """
+    extra: dict[str, Any] = {}
+    if tables is not None:
+        extra["tables"] = tables
+    if tool_profile.enabled:
+        extra["tool_instructions"] = _tool_instructions(tool_profile)
+    if not extra:
+        return compile_prompt(
+            param=param,
+            product_id=product_id,
+            chunks=chunks,
+            satellites=satellites,
+            role_vocabulary=role_vocabulary,
+        )
+    missing = sorted(set(extra) - set(inspect.signature(compile_prompt).parameters))
+    if missing:
+        raise ToolWiringError(
+            "compile_prompt не принимает: "
+            + ", ".join(missing)
+            + " — объявленные таблицы/инструменты не попадут в промпт; это дефект "
+            "сборки, а не пустой профиль"
+        )
+    return compile_prompt(
+        param=param,
+        product_id=product_id,
+        chunks=chunks,
+        satellites=satellites,
+        role_vocabulary=role_vocabulary,
+        **extra,
+    )
+
+
+def _render_tool_result(
+    seq: int, invocation: ToolInvocation, outcome: ToolOutcome
+) -> str:
+    """Результат вызова в транскрипте — детерминированный по форме.
+
+    Без временных меток, с отсортированными ключами аргументов: транскрипт становится
+    частью промпта следующего хода, и его форма обязана быть функцией входа, а не часов.
+    ``seq`` — номер вызова в диалоге, то есть фиксированный порядок исполнения.
+
+    Результат **не** становится фрагментом: ``source_id`` у него нет, и цитата по-прежнему
+    проверяется против текста переданных чанков (I22). Инструмент адресует материал,
+    а не создаёт доказательство.
+    """
+    arguments = json.dumps(dict(invocation.arguments), ensure_ascii=False, sort_keys=True)
+    if outcome.ok:
+        return (
+            f"\n=== ЛОКАЛЬНЫЙ ИНСТРУМЕНТ {seq}: {invocation.name} ===\n"
+            f"аргументы: {arguments}\n"
+            f"результат:\n{outcome.content}\n"
+        )
+    detail = f"причина: {outcome.reason or 'не названа'}"
+    if outcome.content:
+        detail = f"{detail}\n{outcome.content}"
+    return (
+        f"\n=== ЛОКАЛЬНЫЙ ИНСТРУМЕНТ {seq}: {invocation.name} (не исполнен) ===\n"
+        f"аргументы: {arguments}\n{detail}\n"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolDialogue:
+    """Итог диалога: вердикт и **фактический** промпт последнего хода.
+
+    ``prompt`` нужен провенансу (журнал вызовов): с инструментами вход — это промпт
+    плюс транскрипт, и ``prompt_hash`` базового промпта его не описывает. ``decoder``
+    называет механизм, которым получен вердикт: ход с инструментами идёт без грамматики
+    (``none``), финальный ход после бюджета — обычным путём оценщика.
+
+    Расхода бюджета здесь нет намеренно: он считается по **трассе** (единственный
+    источник истины), и попытка, прерванная отказом адаптера, не возвращает уже
+    сделанные вызовы.
+    """
+
+    response: LLMResponse
+    prompt: str
+    decoder: str
+
+
+def _run_tool_dialogue(
+    *,
+    evaluator: EvaluatorPort,
+    tool_caller: LocalToolCallerPort,
+    local_tools: LocalToolPort,
+    profile: ToolProfile,
+    request: LLMRequest,
+    trace: list[ToolTraceEntry],
+    notes: list[str],
+    already_used: int = 0,
+) -> _ToolDialogue:
+    """Диалог «промпт + объявленные инструменты → ход» до вердикта или бюджета.
+
+    Цикл: ``turn`` → вызовы через ``local_tools.invoke`` → результат в транскрипт → снова
+    ``turn``. Бюджет — ``profile.max_calls`` (объявленное число, а не предохранитель):
+    исчерпание публикуется заметкой и трассой, а финальный ход идёт **обычным путём**
+    оценщика (:meth:`EvaluatorPort.complete`), то есть с объявленным constrained decoding
+    и полной валидацией схемы.
+
+    ``already_used`` — расход прошлых попыток этой же ячейки: бюджет объявлен на ячейку,
+    поэтому повтор не открывает его заново.
+
+    Отказ инструмента (``ok=False``) ячейку не роняет: модель получает причину и
+    продолжает. Исключением является только нарушение контракта транспортом
+    (:class:`ToolDialogueError`) и отказ адаптера (имя вне набора, невалидные аргументы):
+    это отказ **формы ответа**, и он обрабатывается как любой другой отказ §7.1.
+    """
+    specs = tuple(local_tools.specs())
+    prompt = request.prompt
+    used = already_used
+    while True:
+        if used >= profile.max_calls:
+            # Бюджет исчерпан — видимый факт и финальный ход без инструментов.
+            notes.append(
+                f"{TOOL_BUDGET_EXHAUSTED_REASON}: {used} из {profile.max_calls} "
+                "вызовов — финальный ход без инструментов"
+            )
+            final_prompt = (
+                f"{prompt}\n\n=== ЛОКАЛЬНЫЕ ИНСТРУМЕНТЫ ===\n"
+                f"Бюджет вызовов исчерпан ({used} из {profile.max_calls}). "
+                "Инструменты больше не вызывай: верни вердикт по уже полученному "
+                "материалу.\n"
+            )
+            return _ToolDialogue(
+                response=evaluator.complete(replace(request, prompt=final_prompt)),
+                prompt=final_prompt,
+                decoder=str(getattr(evaluator, "decoder", "none") or "none"),
+            )
+        turn = tool_caller.turn(
+            ToolTurnRequest(
+                prompt=prompt,
+                response_schema=request.response_schema,
+                allowed_tools=specs,
+                model_id=request.model_id,
+                model_version=request.model_version,
+                seed=request.seed,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                reasoning_effort=request.reasoning_effort,
+            )
+        )
+        if turn.final is not None:
+            return _ToolDialogue(
+                response=turn.final,
+                prompt=prompt,
+                decoder=turn.final.decoder,
+            )
+        if not turn.tool_calls:
+            raise ToolDialogueError(
+                "ход не содержит ни вердикта, ни вызова инструмента: транспорт вернул "
+                f"пустой ToolTurn (finish_reason={turn.finish_reason!r})"
+            )
+        for invocation in turn.tool_calls:
+            seq = len(trace) + 1
+            if used >= profile.max_calls:
+                # Остаток пачки не исполняется: бюджет — объявленное число. Отказ виден
+                # в трассе, а не только в счётчике.
+                trace.append(
+                    ToolTraceEntry(
+                        seq=seq,
+                        name=invocation.name,
+                        arguments=dict(invocation.arguments),
+                        ok=False,
+                        chars=0,
+                        reason=TOOL_BUDGET_EXHAUSTED_REASON,
+                    )
+                )
+                continue
+            outcome = local_tools.invoke(invocation)
+            used += 1
+            trace.append(
+                ToolTraceEntry(
+                    seq=seq,
+                    name=invocation.name,
+                    arguments=dict(invocation.arguments),
+                    ok=outcome.ok,
+                    chars=outcome.chars,
+                    reason=outcome.reason,
+                )
+            )
+            prompt = f"{prompt}{_render_tool_result(seq, invocation, outcome)}"
+
+
+def _value_notes(param: CatalogRow, out: LLMCellOutput) -> list[str]:
+    """Величина ``value``-параметра как публикуемая строка заметки (план 28).
+
+    Поле ``value`` есть у ответа модели (:class:`LLMCellOutput`), но **не** у доменной
+    ``Cell``: величина — часть вердикта, а ``Cell`` несёт статус и evidence. Заводить
+    колонку здесь было бы правкой чужой полосы (``core/domain/models.py``), поэтому
+    величина публикуется строкой ``value=<...>`` в ``cells.validation_notes``: она видна
+    в артефактах и не теряется, а формат ячейки не меняется.
+
+    ``value_missing`` — видимый факт: параметр объявлен как ``value``, а модель величину
+    не назвала. Это не смена вердикта, а сигнал читателю, что вопрос закрыт не тем
+    ответом, который объявлен.
+    """
+    if param.param_class is not ParamClass.VALUE:
+        return []
+    if not out.value:
+        return ["value_missing: param_class=value, величина в ответе не названа"]
+    return [f"value={out.value}"]
+
+
 def evaluate_cell(
     *,
     param: CatalogRow,
@@ -3074,6 +3387,10 @@ def evaluate_cell(
     prompt_archive: PromptArchive | None = None,
     artifact_dates: CorpusArtifactDates | None = None,
     llm_journal: LLMCallJournal | None = None,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
+    tool_caller: LocalToolCallerPort | None = None,
+    local_tools: LocalToolPort | None = None,
+    tables: Mapping[TableKey, ExtractedTable] | None = None,
     sleep: Callable[[float], Any] = time.sleep,
 ) -> EvaluationOutcome:
     """Оценивает одну ячейку Ш6 и возвращает :class:`EvaluationOutcome` (§5/§7.1).
@@ -3138,6 +3455,22 @@ def evaluate_cell(
     :param sleep: ожидание между попытками (внедряемое: тесты не спят). По умолчанию
         ``time.sleep``; пауза считается :func:`_retry_pause` (``Retry-After`` провайдера
         либо экспоненциальный backoff с джиттером) и публикуется в журнале вызовов.
+    :param tool_profile: объявленный профиль **локальных** инструментов ячейки
+        (:class:`~core.domain.tools.ToolProfile`). Пустой профиль (``NO_TOOL_PROFILE``) —
+        путь без инструментов: **ровно** прежнее поведение (один вызов ``complete``).
+        Профиль входит в ``run_id``, поэтому «с инструментами» и «без» — два объявленных
+        условия, а не старый и новый код.
+    :param tool_caller: транспорт хода с инструментами
+        (``LocalToolCallerPort``). Обязателен при включённом профиле: отсутствие —
+        :class:`ToolWiringError` (ошибка входа), а не тихий откат к пути без инструментов.
+    :param local_tools: объявленный набор и исполнение вызовов (``LocalToolPort``).
+        Обязателен при включённом профиле; имена профиля обязаны быть в наборе, иначе
+        :class:`ToolWiringError` — модель не смогла бы вызвать объявленный инструмент.
+    :param tables: таблицы документов ячейки, карта ``(документ, table_id) → ExtractedTable``
+        (:data:`~core.domain.doc_tables.TableKey`), если фаза их собрала. Документ в ключе —
+        **адрес из ``chunk_id``** (``prompt._document_id``), тот же, что печатает строка
+        ``document:`` шапки. Передаются в промпт; ``None`` — не переданы, и это видимая
+        деградация (промпт печатает «адрес известен, объект не передан»), а не падение.
 
     **Пустой срез не тратит вызов модели.** При ``chunks == ()`` промпт компилируется
     (провенанс: ``prompt_hash`` ячейки остаётся честной функцией входа), но оценщик не
@@ -3153,13 +3486,53 @@ def evaluate_cell(
     if max_retries < 0:
         raise ValueError("max_retries не может быть отрицательным")
 
+    # Профиль инструментов включён ⇒ транспорт и исполнение обязаны быть переданы.
+    # Тихий откат к пути без инструментов сделал бы `run_id` ложью: профиль входит в
+    # контракт исполнения, и прогон, объявивший его, обязан его исполнить.
+    if tool_profile.enabled:
+        if tool_caller is None or local_tools is None:
+            raise ToolWiringError(
+                f"профиль инструментов «{tool_profile.name}» объявлен, но "
+                + ("tool_caller не передан" if tool_caller is None else "")
+                + (" и " if tool_caller is None and local_tools is None else "")
+                + ("local_tools не передан" if local_tools is None else "")
+                + ": исполнение инструментов не собрано (ошибка входа, не откат к пути "
+                "без инструментов)"
+            )
+        declared_tools = set(tool_profile.tools)
+        provided_tools = {spec.name for spec in local_tools.specs()}
+        missing_tools = sorted(declared_tools - provided_tools)
+        if missing_tools:
+            raise ToolWiringError(
+                "профиль инструментов объявляет "
+                + ", ".join(missing_tools)
+                + ", но LocalToolPort их не предоставляет: модель не смогла бы вызвать "
+                "объявленный инструмент, и прогон измерил бы другое условие"
+            )
+
+    # Заметки и трасса диалога с инструментами — провенанс исполнения: в `run_id` они не
+    # входят (условие измерения — профиль), но обязаны пережить прогон.
+    tool_notes: list[str] = []
+    tool_trace: list[ToolTraceEntry] = []
+    #: Израсходованный бюджет вызовов **на ячейку** (не на попытку): повтор не открывает
+    #: объявленный бюджет заново.
+    tool_used = 0
+    if tool_profile.enabled:
+        tool_notes.append(
+            f"{TOOL_MODE_DECODER_NOTE}: в режиме инструментов response_format не "
+            "отправляется (грамматика и tool-calling несовместимы в одном запросе); "
+            "форма ответа проверена парсом схемы"
+        )
+
     chunks_by_id: dict[str, ChunkLike] = {c.chunk_id: c for c in chunks}
-    compiled: CompiledPrompt = compile_prompt(
+    compiled: CompiledPrompt = _compile_cell_prompt(
         param=param,
         product_id=product_id,
         chunks=chunks,
         satellites=satellites,
         role_vocabulary=role_vocabulary,
+        tables=tables,
+        tool_profile=tool_profile,
     )
 
     # Пустой срез — факт о ретривале, а не вопрос к модели: вызова нет, ячейка ``❓`` с
@@ -3319,13 +3692,21 @@ def evaluate_cell(
             attempt: int,
             outcome: str,
             started: float,
+            prompt_text_sha256: str,
+            decoder: str,
             response: LLMResponse | None = None,
             error: BaseException | None = None,
             retry_wait_s: float | None = None,
             retry_reason: str | None = None,
             retry_after_s: float | None = None,
         ) -> None:
-            """Одна строка ``logs/llm_calls.jsonl``; сбой записи вердикт не отнимает."""
+            """Одна строка ``logs/llm_calls.jsonl``; сбой записи вердикт не отнимает.
+
+            ``prompt_text_sha256``/``decoder`` — **фактические** вход и механизм этой
+            попытки: с инструментами вход — промпт плюс транскрипт, а вердикт может быть
+            получен ходом без грамматики (``none``). Базовые значения (промпт ячейки,
+            объявленный декодер) остаются на пути без инструментов.
+            """
             if llm_journal is None:
                 return
             raw = response.raw if response is not None else getattr(error, "raw", None)
@@ -3363,9 +3744,9 @@ def evaluate_cell(
                 cell_key=journal_cell_key,
                 attempt=attempt,
                 prompt_hash=compiled.prompt_hash,
-                prompt_text_sha256=journal_prompt_sha256,
+                prompt_text_sha256=prompt_text_sha256,
                 model_id=request.model_id,
-                decoder=journal_decoder,
+                decoder=decoder,
                 max_tokens=journal_max_tokens,
                 finish_reason=finish_reason,
                 usage=usage,
@@ -3393,8 +3774,30 @@ def evaluate_cell(
 
         for attempt in range(1, max_retries + 2):
             started = time.monotonic()
+            # Фактические вход и механизм этой попытки: с инструментами они отличаются от
+            # базовых (промпт + транскрипт, ход без грамматики).
+            attempt_prompt_sha256 = journal_prompt_sha256
+            attempt_decoder = journal_decoder
             try:
-                response = evaluator.complete(request)
+                if tool_profile.enabled:
+                    # Наличие транспорта и набора проверено выше (ToolWiringError), поэтому
+                    # здесь они не ``None``; ``cast`` не меняет поведение, а фиксирует это
+                    # для типизации без тихого отката к пути без инструментов.
+                    dialogue = _run_tool_dialogue(
+                        evaluator=evaluator,
+                        tool_caller=cast(LocalToolCallerPort, tool_caller),
+                        local_tools=cast(LocalToolPort, local_tools),
+                        profile=tool_profile,
+                        request=request,
+                        trace=tool_trace,
+                        notes=tool_notes,
+                        already_used=tool_used,
+                    )
+                    response = dialogue.response
+                    attempt_prompt_sha256 = content_hash(dialogue.prompt)
+                    attempt_decoder = dialogue.decoder
+                else:
+                    response = evaluator.complete(request)
             except Exception as exc:  # noqa: BLE001 — изоляция адаптера, маппинг в failure_kind
                 outcome = _error_outcome(exc)
                 # Пауза считается **до** записи: строка отказа обязана назвать срок,
@@ -3407,6 +3810,8 @@ def evaluate_cell(
                     attempt=attempt,
                     outcome=outcome,
                     started=started,
+                    prompt_text_sha256=attempt_prompt_sha256,
+                    decoder=attempt_decoder,
                     error=exc,
                     retry_wait_s=pause,
                     retry_reason=pause_reason,
@@ -3431,6 +3836,17 @@ def evaluate_cell(
                 if pause is not None:
                     sleep(pause)
                 continue
+            finally:
+                if tool_profile.enabled:
+                    # Бюджет считается по фактической трассе (единственный источник
+                    # истины): попытка, прерванная отказом адаптера, не возвращает уже
+                    # сделанные вызовы, а вызовы, не исполненные из-за бюджета, не
+                    # считаются израсходованными.
+                    tool_used = sum(
+                        1
+                        for entry in tool_trace
+                        if entry.reason != TOOL_BUDGET_EXHAUSTED_REASON
+                    )
 
             last_validation = _validate(response)
             outcome = _validation_outcome(last_validation)
@@ -3447,6 +3863,8 @@ def evaluate_cell(
                 attempt=attempt,
                 outcome=outcome,
                 started=started,
+                prompt_text_sha256=attempt_prompt_sha256,
+                decoder=attempt_decoder,
                 response=response,
                 retry_wait_s=pause,
                 retry_reason=pause_reason,
@@ -3574,6 +3992,8 @@ def evaluate_cell(
                     *last_validation.notes,
                     *denial_notes,
                     *([support_note] if support_note else []),
+                    *tool_notes,
+                    *_value_notes(param, out),
                 ]
             ),
             # ``review_reason`` — единственный человеческий сигнал на ячейке; причины
@@ -3610,6 +4030,7 @@ def evaluate_cell(
             support_overlap=support_overlap,
             justification=out.justification,
             llm_scenario=LLMScenario.EVALUATOR.value,
+            tool_trace=tuple(tool_trace),
         )
 
     # Валидация/вызов не прошли после всех попыток: failed (strict) или кандидат.
@@ -3617,7 +4038,7 @@ def evaluate_cell(
         strict=strict,
         kind=last_kind or FailureKind.VALIDATION_FAILED.value,
         validation=last_validation,
-        notes=[],
+        notes=[*tool_notes],
         param=param,
         product_id=product_id,
         run_id=run_id,
@@ -3657,6 +4078,7 @@ def _unresolved_outcome(
     justification: str | None = None,
     llm_scenario: str | None = None,
     auth_failure: str | None = None,
+    tool_trace: tuple[ToolTraceEntry, ...] = (),
 ) -> EvaluationOutcome:
     """Собирает исход несостоявшейся валидации: ``failed`` (I4) либо preliminary (I13).
 
@@ -3664,7 +4086,8 @@ def _unresolved_outcome(
     остаётся кандидатом (``state=preliminary``), ``status=None``, ``failure_kind=None``;
     причина — в ``validation.notes``. Дополнительные ``notes`` (например, I2b) вливаются
     в ``validation.notes`` без потери исходных. ``prompt_hash``/``model_id`` пишутся в
-    ``cells`` узким UPDATE (провенанс виден и у несостоявшейся ячейки).
+    ``cells`` узким UPDATE (провенанс виден и у несостоявшейся ячейки). ``tool_trace`` —
+    трасса локальных инструментов: провенанс исполнения, он переживает и отказ.
     """
     merged = list(validation.notes)
     for note in notes:
@@ -3722,6 +4145,9 @@ def _unresolved_outcome(
         # Отказ удостоверения переживает исход: фаза по нему завершается ``failed``,
         # а не публикует карту, в которой каждая ячейка «просто не удалась».
         auth_failure=auth_failure,
+        # Трасса инструментов переживает и отказ: «сколько вызовов сделано до отказа» —
+        # провенанс исполнения, и он не должен исчезать вместе с вердиктом.
+        tool_trace=tool_trace,
     )
 
 
@@ -3735,7 +4161,10 @@ class _CellWriteBuffer:
     в потоке, который соединение открыл: воркер наполняет **этот** буфер, вызывающий
     проигрывает его на настоящем store (:meth:`replay`).
 
-    Набор методов — ровно те записи, что делает :func:`_persist` (и :func:`_persist_carried`).
+    Набор методов — ровно те записи, что делает :func:`_persist` (и :func:`_persist_carried`),
+    плюс :meth:`save_tool_calls` — трасса локальных инструментов: её пишет батч (у ячейки
+    она появляется только в исходе оценки, а не в ``_persist``), и она обязана пройти тем
+    же единственным писателем, иначе запись из воркера упала бы на ``check_same_thread``.
     Чтения сюда не маршрутизируются вовсе: их пришлось бы исполнять в чужом потоке,
     поэтому покрытие и перенос ячеек вызывающий разрешает **до** пула.
 
@@ -3782,6 +4211,23 @@ class _CellWriteBuffer:
         """Откладывает запись протокола отсутствия."""
         self.ops.append(("add_absence_evidence", (list(records),), {}))
 
+    def save_tool_calls(
+        self, run_id: str, records: Sequence[ToolCallRecord]
+    ) -> int | None:
+        """Откладывает запись трассы локальных инструментов ячейки.
+
+        Имя и порядок аргументов совпадают с ``StorePort.save_tool_calls`` намеренно:
+        :meth:`replay` проигрывает op по имени, поэтому буфер и настоящий store
+        принимают одну и ту же запись — второй формы у трассы нет. ``run_id`` передаётся
+        вызывающим (буфер не знает прогона), ровно как у остальных op'ов его нет.
+
+        Возвращает ``None``, а не число строк: строки ещё не записаны, и «сколько
+        записалось» станет известно только на флаше. Число здесь было бы обещанием,
+        которое буфер не может выполнить.
+        """
+        self.ops.append(("save_tool_calls", (run_id, list(records)), {}))
+        return None
+
     def replay(self, store: StorePort | None) -> None:
         """Проигрывает накопленные записи на настоящем store — **в вызывающем потоке**.
 
@@ -3826,6 +4272,9 @@ def evaluate_batch(
     carry: CarryForwardContext | None = None,
     reuse_conditions: CellReuseConditions | None = None,
     llm_concurrency: int = 1,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
+    tool_caller: LocalToolCallerPort | None = None,
+    tool_corpus: ToolCorpusPort | None = None,
     sleep: Callable[[float], Any] = time.sleep,
 ) -> tuple[list[EvaluationOutcome], list[str]]:
     """Прогоняет :func:`evaluate_cell` по параметрам с изоляцией сбоев (§A.1).
@@ -3893,7 +4342,29 @@ def evaluate_batch(
     словарь ролей каталога (один резолв на прогон): без него вне-словарная роль
     отбрасывалась бы как «чужая», и сателлит не доходил бы до промпта вовсе.
 
+    **Профиль локальных инструментов и табличная шапка.** ``tool_profile`` (объявленное
+    условие измерения, 37-е поле контракта) исполняется здесь: на каждую ячейку собирается
+    ``build_local_tools(profile=…, corpus=…, param=…)`` — набор **параметро-зависим**
+    (``subject_mention`` читает термины каталога), поэтому один объект на батч был бы
+    неверен. ``tool_profile.enabled`` без ``tool_corpus``/``tool_caller`` — отказ сборки
+    (:class:`ToolWiringError`), а не тихий откат: ``run_id`` назвал бы профиль, которого
+    прогон не исполнял.
+
+    ``tool_corpus`` нужен **и без инструментов**: шапка таблицы фрагмента (план ``28`` §4.0)
+    — отдельная мера, она печатается при любом профиле. Обогащение идёт здесь, в
+    вызывающем потоке (чтение ``store`` из воркера запрещено ``check_same_thread``): один
+    вызов ``table_context`` на ячейку, ``dataclasses.replace`` только для чанков с
+    известным адресом. ``tool_corpus=None`` — адреса не появляются вовсе, и это видимая
+    деградация (промпт печатает пометку лишь при известном адресе), а не падение.
+
+    **Трасса вызовов** (:attr:`EvaluationOutcome.tool_trace`) пишется тем же единственным
+    писателем, что и ячейки: в параллельном пути — op'ом в :class:`_CellWriteBuffer`
+    (``save_tool_calls``), в последовательном — прямо в ``store``. Ячейка без вызовов
+    строк не пишет: «трассы нет» и «трасса пустая» — разные факты.
+
     :raises ValueError: ``llm_concurrency < 1`` — «ноль вызовов в полёте» не исполнение.
+    :raises ToolWiringError: профиль включён, а исполнение не собрано (нет ``tool_corpus``
+        или ``tool_caller``) либо профиль называет инструмент, которого нет в наборе.
     """
     if isinstance(llm_concurrency, bool) or not isinstance(llm_concurrency, int):
         raise TypeError(
@@ -3909,6 +4380,99 @@ def evaluate_batch(
         # исполнить одну попытку вместо объявленных нуля повторов).
         raise ValueError(f"max_retries не может быть отрицательным, получено {max_retries!r}")
 
+    # Сборка инструментов проверяется **до** цикла: включённый профиль без транспорта или
+    # окна в корпус — отказ входа (``ToolWiringError`` → ``EXIT_USAGE``), а не 181
+    # одинаковая ошибка ячеек. Это не «тихий откат»: профиль входит в ``run_id``, и
+    # прогон, объявивший его, обязан его исполнить.
+    if tool_profile.enabled:
+        if tool_corpus is None:
+            raise ToolWiringError(
+                f"профиль инструментов «{tool_profile.name}» объявлен, но tool_corpus не "
+                "передан: инструментам нечего читать (ошибка сборки, не откат к пути "
+                "без инструментов)"
+            )
+        if tool_caller is None:
+            raise ToolWiringError(
+                f"профиль инструментов «{tool_profile.name}» объявлен, но tool_caller не "
+                "передан: ход с инструментами нечем исполнить (ошибка сборки)"
+            )
+        # Имена профиля сверяются с объявленным набором **один раз и без сборки**: набор
+        # инструментов параметро-зависим (``subject_mention`` читает термины каталога),
+        # поэтому «пробный» ``build_local_tools`` на чужой строке каталога создавал бы
+        # объект с неверной привязкой и выбрасывал его. Сверка имён от параметра не
+        # зависит, а неизвестное имя — отказ входа, а не 181 одинаковая ошибка ячеек.
+        unknown = [name for name in tool_profile.tools if name not in TOOL_NAMES]
+        if unknown:
+            raise ToolWiringError(
+                f"профиль инструментов «{tool_profile.name}» называет неизвестные "
+                f"инструменты {unknown}; объявлены {', '.join(TOOL_NAMES)}"
+            )
+
+    def _enrich_tables(
+        param: CatalogRow, chunks: Sequence[ChunkLike]
+    ) -> tuple[Sequence[ChunkLike], Mapping[TableKey, ExtractedTable] | None]:
+        """Дочитывает адреса таблиц среза и карту объектов — **в вызывающем потоке**.
+
+        Один ``table_context`` на ячейку (два SQL-запроса пачкой) вместо чтения на каждый
+        фрагмент. Замена — ``dataclasses.replace`` только там, где адрес **известен**:
+        чанк, у которого адрес уже есть (``Chunk`` из хранилища), сохраняет своё значение,
+        а ``None`` из БД не стирает его — «неизвестно» не перебивает известное.
+
+        Возвращает исходный срез, если адресов нет вовсе: ``tables=None`` тогда означает
+        «объектов не передано», и промпт печатает пометку только у чанка с адресом (у
+        остальных строки нет).
+        """
+        if tool_corpus is None or not chunks:
+            return chunks, None
+        try:
+            addresses, tables = tool_corpus.table_context(
+                [chunk.chunk_id for chunk in chunks]
+            )
+        except Exception as exc:  # noqa: BLE001 — деградация шапки не рушит ячейку
+            # Шапка таблицы — метаданные, а не доказательство: сбой её чтения обязан быть
+            # видимым, но не отнимать вердикт (I4 не про это). Причина называется с
+            # адресом ячейки, чтобы её можно было найти.
+            errors.append(
+                f"{product_id}/{param.param_id}: table_context: "
+                f"{type(exc).__name__}: {exc} — табличная шапка не собрана"
+            )
+            return chunks, None
+        if not addresses:
+            return chunks, None
+        enriched = [
+            replace(chunk, table_ref=addresses[chunk.chunk_id])
+            if addresses.get(chunk.chunk_id) is not None
+            else chunk
+            for chunk in chunks
+        ]
+        return enriched, (tables or None)
+
+    def _record_tool_calls(
+        target: StorePort | None, param: CatalogRow, trace: Sequence[ToolTraceEntry]
+    ) -> None:
+        """Пишет трассу вызовов ячейки через ``target`` (store или буфер) — один раз.
+
+        ``target`` в параллельном пути — :class:`_CellWriteBuffer`, и вызов становится
+        op'ом, который проиграет вызывающий поток: запись из воркера в SQLite запрещена
+        (``check_same_thread``). Пустая трасса строк не пишет — иначе «вызовов не было» и
+        «трасса пустая» стали бы неразличимы.
+        """
+        if target is None or not trace:
+            return
+        writer = getattr(target, "save_tool_calls", None)
+        if not callable(writer):
+            # Двойник без метода (как в ``_persist``): трасса аддитивна, вердикт не страдает.
+            return
+        writer(
+            run_id,
+            [
+                ToolCallRecord(
+                    product_id=product_id, param_id=param.param_id, entry=entry
+                )
+                for entry in trace
+            ],
+        )
+
     outcomes: list[EvaluationOutcome | None] = [None] * len(params)
     errors: list[str] = []
     # Параллельный путь: покрытие разрешается **до** пула. В ячейке ``_coverage_for``
@@ -3923,6 +4487,7 @@ def evaluate_batch(
         param: CatalogRow,
     ) -> tuple[
         Sequence[ChunkLike],
+        Mapping[TableKey, ExtractedTable] | None,
         RetrievalResult | Sequence[RetrievalResult] | None,
         Cell | None,
         EvaluationOutcome | None,
@@ -3959,17 +4524,31 @@ def evaluate_batch(
                 store=store,
             )
             if carried_outcome is not None:
-                return chunks, retrieval, protected, carried_outcome
-        return chunks, retrieval, protected, None
+                # Перенесённая ячейка промпт не компилирует: адреса таблиц ей не нужны,
+                # и два запроса на неё были бы ценой за неисполненный вход.
+                return chunks, None, retrieval, protected, carried_outcome
+        # Адреса таблиц дочитываются **здесь** (вызывающий поток): чтение store из
+        # воркера запрещено ``check_same_thread``, а шапка таблицы — часть входа оценщика.
+        chunks, tables = _enrich_tables(param, chunks)
+        return chunks, tables, retrieval, protected, None
 
     def _measure(
         param: CatalogRow,
         chunks: Sequence[ChunkLike],
+        tables: Mapping[TableKey, ExtractedTable] | None,
         retrieval: RetrievalResult | Sequence[RetrievalResult] | None,
         protected: Cell | None,
         write_target: StorePort | None,
     ) -> EvaluationOutcome:
         """Оценивает одну ячейку (без записи, если ``write_target`` — буфер)."""
+        # Инструменты — **по параметру** (``subject_mention`` читает термины каталога),
+        # поэтому объект собирается на ячейку, а не на батч. Пустой профиль его не
+        # собирает вовсе: путь без инструментов остаётся выразимым.
+        local_tools: LocalToolPort | None = None
+        if tool_profile.enabled and tool_corpus is not None:
+            local_tools = build_local_tools(
+                profile=tool_profile, corpus=tool_corpus, param=param
+            )
         outcome = evaluate_cell(
             param=param,
             product_id=product_id,
@@ -3991,8 +4570,16 @@ def evaluate_batch(
             prompt_archive=prompt_archive,
             artifact_dates=artifact_dates,
             llm_journal=llm_journal,
+            tool_profile=tool_profile,
+            tool_caller=tool_caller,
+            local_tools=local_tools,
+            tables=tables,
             sleep=sleep,
         )
+        # Трасса — провенанс исполнения: пишется тем же единственным писателем, что и
+        # ячейка (буфер в параллельном пути), и не зависит от того, получила ли ячейка
+        # индекс переноса ниже.
+        _record_tool_calls(write_target, param, outcome.tool_trace)
         if reuse_conditions is None or protected is not None:
             # Строку индекса не пишем, если механизм выключен **или** ячейку в карте этого
             # прогона представляет высокий источник (реестр/наследование): прецедент мог
@@ -4024,12 +4611,12 @@ def evaluate_batch(
         # появления оси (``llm_concurrency=1`` не меняет ничего наблюдаемого).
         for index, param in enumerate(params):
             try:
-                chunks, retrieval, protected, carried_outcome = _prepare_one(param)
+                chunks, tables, retrieval, protected, carried_outcome = _prepare_one(param)
                 if carried_outcome is not None:
                     outcomes[index] = carried_outcome
                     continue
                 outcomes[index] = _measure(
-                    param, chunks, retrieval, protected, store
+                    param, chunks, tables, retrieval, protected, store
                 )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
@@ -4042,33 +4629,37 @@ def evaluate_batch(
                 break
         return [outcome for outcome in outcomes if outcome is not None], errors
 
-    #: Готовая к вызову работа: (индекс в ``params``, параметр, чанки, провенанс
-    #: ретривала, защищённая ячейка). Перенос и проверка контракта карты выполняются
-    #: **здесь**, в вызывающем потоке: они читают БД, а у неё один поток-владелец.
+    #: Готовая к вызову работа: (индекс в ``params``, параметр, чанки, карта таблиц,
+    #: провенанс ретривала, защищённая ячейка). Перенос, чтение адресов таблиц и проверка
+    #: контракта карты выполняются **здесь**, в вызывающем потоке: они читают БД, а у неё
+    #: один поток-владелец.
     work: list[
         tuple[
             int,
             CatalogRow,
             Sequence[ChunkLike],
+            Mapping[TableKey, ExtractedTable] | None,
             RetrievalResult | Sequence[RetrievalResult] | None,
             Cell | None,
         ]
     ] = []
     for index, param in enumerate(params):
         try:
-            chunks, retrieval, protected, carried_outcome = _prepare_one(param)
+            chunks, tables, retrieval, protected, carried_outcome = _prepare_one(param)
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
             continue
         if carried_outcome is not None:
             outcomes[index] = carried_outcome
             continue
-        work.append((index, param, chunks, retrieval, protected))
+        work.append((index, param, chunks, tables, retrieval, protected))
 
     if len(work) <= 1:
-        for index, param, chunks, retrieval, protected in work:
+        for index, param, chunks, tables, retrieval, protected in work:
             try:
-                outcomes[index] = _measure(param, chunks, retrieval, protected, store)
+                outcomes[index] = _measure(
+                    param, chunks, tables, retrieval, protected, store
+                )
             except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
                 errors.append(f"{param!r}: {type(exc).__name__}: {exc}")
         return [outcome for outcome in outcomes if outcome is not None], errors
@@ -4078,7 +4669,7 @@ def evaluate_batch(
     ) as pool:
         futures = {}
         buffers: dict[int, _CellWriteBuffer] = {}
-        for index, param, chunks, retrieval, protected in work:
+        for index, param, chunks, tables, retrieval, protected in work:
             buffer = _CellWriteBuffer()
             buffers[index] = buffer
             futures[
@@ -4086,6 +4677,7 @@ def evaluate_batch(
                     _measure,
                     param,
                     chunks,
+                    tables,
                     retrieval,
                     protected,
                     cast("StorePort | None", buffer),
@@ -4144,6 +4736,9 @@ def evaluate_phase(
     previous_store: StorePort | None = None,
     llm_concurrency: int = 1,
     evaluation_policy: Mapping[str, Any] | None = None,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
+    tool_caller: LocalToolCallerPort | None = None,
+    tool_corpus: ToolCorpusPort | None = None,
 ) -> PhaseResult:
     """Фаза оценки Ш6 на уровне конвейера: продукты × параметры → ретривал → оценщик.
 
@@ -4242,6 +4837,19 @@ def evaluate_phase(
         ось не передана (модульный вызов): действует :data:`EVALUATION_MAX_RETRIES`.
         Значение не ограничивается сверху и не подменяется объявленным числом у
         recovery-команды ``hound retry`` — у неё свой провенанс (``retry.jsonl``).
+    :param tool_profile: объявленный профиль **локальных** инструментов оценщика
+        (:class:`~core.domain.tools.ToolProfile`, 37-е поле контракта). Пустой профиль —
+        путь без инструментов. Профиль включён, а исполнения нет — :class:`ToolWiringError`
+        на первой ячейке (отказ входа), а не тихий откат.
+    :param tool_caller: транспорт хода с инструментами (``LocalToolCallerPort``). Обычно
+        это ``ports.evaluator``, если он реализует протокол; ``None`` при включённом
+        профиле — отказ сборки.
+    :param tool_corpus: окно в корпус для инструментов. ``None`` — фаза строит
+        ``StoreToolCorpus(store, product_id)`` **на каждый продукт** сама: окно продуктовое
+        (I17), а один объект на когорту читал бы соседа. Окно строится **всегда** (это
+        дешёвое окно чтения без состояния), потому что от него зависит ещё и табличная
+        шапка фрагмента (план ``28`` §4.0), печатаемая и при пустом профиле; сам
+        ``table_context`` вызывается только на ячейках с непустым срезом.
 
     При ``ports.evaluator is None`` фаза сразу ``failed``: без оценщика Ш6 не имеет смысла,
     а молчаливый ``ok`` скрыл бы неполноту карты.
@@ -4629,6 +5237,16 @@ def evaluate_phase(
             carry=carry_ctx,
             reuse_conditions=reuse_conditions,
             llm_concurrency=llm_concurrency,
+            # План ``28`` §9: объявленный профиль инструментов и окно в корпус **этого**
+            # продукта (I17). Окно строится всегда: от него зависит и табличная шапка,
+            # которая печатается при любом профиле (это отдельная мера, §4.0).
+            tool_profile=tool_profile,
+            tool_caller=tool_caller,
+            tool_corpus=(
+                tool_corpus
+                if tool_corpus is not None
+                else StoreToolCorpus(store, product_id)
+            ),
             # V3: объявленная политика — тот же ``max_retries``, что в ``run_id``.
             max_retries=resolved_max_retries,
         )
@@ -5258,6 +5876,51 @@ class _CellAttempt:
     embed_note: str | None = None
 
 
+def _save_tool_trace(
+    store: StorePort,
+    run_id: str,
+    cell: Cell,
+    trace: Sequence[ToolTraceEntry],
+    errors: list[str],
+) -> None:
+    """Пишет трассу вызовов ячейки — **в вызывающем потоке** (единственный писатель store).
+
+    Трасса — провенанс исполнения, а не условие измерения: она не входит ни в ``run_id``,
+    ни в ``prompt_hash``, но обязана пережить прогон. Без неё аудит «сколько вызовов стоил
+    вердикт» читает ``cell_tool_calls`` и видит ноль у каждой повторённой ячейки — то есть
+    ровно у тех, чей вердикт получен самым дорогим путём.
+
+    Пустая трасса строк не пишет: «вызовов не было» и «трасса пустая» — разные факты, и
+    ``save_tool_calls`` на пустом входе ничего не стирает (идемпотентность — по ячейке).
+
+    Сбой записи не отнимает вердикт (I4 не про это): причина уходит в ``errors`` с адресом
+    ячейки, а не глотается.
+    """
+    if not trace:
+        return
+    writer = getattr(store, "save_tool_calls", None)
+    if not callable(writer):
+        # Двойник без метода (как у прочих аддитивных писателей): трасса аддитивна.
+        return
+    try:
+        writer(
+            str(run_id),
+            [
+                ToolCallRecord(
+                    product_id=str(cell.product_id),
+                    param_id=str(cell.param_id),
+                    entry=entry,
+                )
+                for entry in trace
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 — трасса не доказательство, вердикт важнее
+        errors.append(
+            f"{cell.product_id}/{cell.param_id}: tool_trace: "
+            f"{type(exc).__name__}: {exc} — трасса вызовов не записана"
+        )
+
+
 def _evaluate_cells_by_condition(
     *,
     store: StorePort,
@@ -5276,6 +5939,9 @@ def _evaluate_cells_by_condition(
     call_journal: LLMCallJournal | None = None,
     errors: list[str] | None = None,
     llm_concurrency: int = 1,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
+    tool_caller: LocalToolCallerPort | None = None,
+    tool_corpus: ToolCorpusPort | None = None,
 ) -> Iterator[_CellAttempt]:
     """Общий шаг ``revalidate`` и ``retry``: условия ячейки → ретривал → оценка.
 
@@ -5294,6 +5960,33 @@ def _evaluate_cells_by_condition(
     вызывающий после ``yield``. ``errors`` — накопитель вызывающего: сбои групп
     (векторы/dense), ретривала и оценки видны поимённо, а не глотаются.
 
+    **Профиль локальных инструментов и табличная шапка** (план ``28`` §9, §4.0). Повтор и
+    пере-оценка обязаны исполнять **то же условие**, которое описывает ``run_id``: профиль
+    инструментов — 37-е поле контракта, и ячейка, повторённая без инструментов, была бы
+    измерена другим промптом под тем же идентификатором. До этой правки путь
+    ``retry``/``revalidate`` шёл мимо :func:`evaluate_batch` и терял три вещи сразу:
+    профиль, табличную шапку и трассу вызовов.
+
+    Окно в корпус — **по продукту** (I17): группы уже сгруппированы по ``product_id``,
+    поэтому ``StoreToolCorpus(store, product_id)`` строится один раз на продукт и
+    кэшируется, а не на ячейку. Переданное вызывающим окно имеет приоритет (composition
+    root мог сузить его сам). ``tool_corpus=None`` — окно строится из ``store`` при **любом**
+    профиле: инструменту нечего читать, кроме уже собранного корпуса прогона (I18/I19), так
+    что отказ здесь не защищал бы ни от чего, а команда с несколькими продуктами не смогла
+    бы объявить их окна одним объектом. Отказ оставлен тому, что синтезировать нельзя, —
+    транспорту хода (:class:`ToolWiringError`). Шапка таблицы фрагмента при этом печатается
+    ровно так же, как в фазе (это отдельная мера, §4.0).
+
+    Адреса таблиц дочитываются в **вызывающем потоке** (там же, где ``retrieve_for_cell``):
+    чтение ``store`` из воркера запрещено ``check_same_thread``. Сбой чтения — строка в
+    ``errors`` и ячейка **без** шапки: видимая деградация, а не падение и не молчание.
+    ``build_local_tools`` собирается **на ячейку** с её ``param``: набор параметро-зависим
+    (``subject_mention`` читает термины каталога).
+
+    ``tool_profile.enabled`` без транспорта — :class:`ToolWiringError` (отказ входа, один
+    раз до цикла групп): профиль входит в ``run_id``, и команда, объявившая его, обязана
+    его исполнить.
+
     :param llm_concurrency: вызовов оценщика в полёте (≥1); порядок ``yield`` —
     порядок ``(продукт, параметр)``, а не порядок ответов модели.
     :param satellites: сателлиты **по продукту** (``{product_id: (…)}``) — та же форма, что
@@ -5304,6 +5997,13 @@ def _evaluate_cells_by_condition(
     :param role_vocabulary: словарь ролей каталога (:func:`~core.pipeline.prompt.
         role_vocabulary_of`), считается вызывающим по его каталогу; ``None`` — прежнее
         строгое поведение (только точное совпадение роли).
+    :param tool_profile: объявленный профиль локальных инструментов — тот же объект, чья
+        каноническая строка вошла в контракт прогона. Пустой профиль — путь без
+        инструментов (ровно прежнее поведение).
+    :param tool_caller: транспорт хода с инструментами; обязателен при включённом профиле
+        (:class:`ToolWiringError`, а не тихий откат).
+    :param tool_corpus: окно в корпус прогона. ``None`` — окно строится по продукту из
+        ``store`` (кэшируется); переданное значение приоритетно.
     """
     if errors is None:
         errors = []
@@ -5312,6 +6012,80 @@ def _evaluate_cells_by_condition(
         # Вызывающие проверяют это до входа (``refused``), но шаг не имеет права
         # молча оценивать «без прибора»: отсутствие оценщика — отказ, а не пустой исход.
         raise ValueError("оценщик не сконфигурирован: ретривал без оценки невозможен")
+
+    # Сборка инструментов проверяется **до** цикла групп и один раз: включённый профиль без
+    # транспорта — отказ входа (``ToolWiringError`` → ``EXIT_USAGE``), а не N одинаковых
+    # ошибок ячеек. Это не «тихий откат»: профиль входит в ``run_id``, и команда,
+    # объявившая его, обязана его исполнить — иначе две команды под одним ``run_id``
+    # измерили бы разные условия. Имена сверяются с объявленным набором без сборки:
+    # ``build_local_tools`` параметро-зависим, а сверка имён от параметра не зависит.
+    if tool_profile.enabled:
+        if tool_caller is None:
+            raise ToolWiringError(
+                f"профиль инструментов «{tool_profile.name}» объявлен, но tool_caller не "
+                "передан: ход с инструментами нечем исполнить (ошибка сборки, не откат к "
+                "пути без инструментов)"
+            )
+        unknown = [name for name in tool_profile.tools if name not in TOOL_NAMES]
+        if unknown:
+            raise ToolWiringError(
+                f"профиль инструментов «{tool_profile.name}» называет неизвестные "
+                f"инструменты {unknown}; объявлены {', '.join(TOOL_NAMES)}"
+            )
+
+    # Окно в корпус — **по продукту** (I17). Группа уже сгруппирована по ``product_id``,
+    # поэтому окно строится один раз на продукт и кэшируется: на ячейку это была бы цена
+    # за то же чтение. Переданное вызывающим окно приоритетно — composition root мог
+    # сузить его сам.
+    corpora: dict[str, ToolCorpusPort] = {}
+
+    def _corpus_for(product_id: str) -> ToolCorpusPort:
+        """Окно в корпус продукта: переданное либо построенное и закэшированное."""
+        if tool_corpus is not None:
+            return tool_corpus
+        window = corpora.get(product_id)
+        if window is None:
+            window = StoreToolCorpus(store, product_id)
+            corpora[product_id] = window
+        return window
+
+    def _enrich_tables(
+        product_id: str, param: CatalogRow, chunks: Sequence[RetrievedChunk]
+    ) -> tuple[Sequence[RetrievedChunk], Mapping[TableKey, ExtractedTable] | None]:
+        """Дочитывает адреса таблиц среза и карту объектов — **в вызывающем потоке**.
+
+        Один ``table_context`` на ячейку (два SQL-запроса пачкой) вместо чтения на каждый
+        фрагмент. Замена — ``dataclasses.replace`` только там, где адрес **известен**:
+        ``None`` из БД не стирает уже известный адрес («неизвестно» не перебивает
+        известное). Возвращается исходный срез, если адресов нет вовсе: ``tables=None``
+        тогда означает «объектов не передано», и промпт печатает пометку только у чанка с
+        адресом.
+        """
+        if not chunks:
+            return chunks, None
+        try:
+            addresses, tables = _corpus_for(product_id).table_context(
+                [chunk.chunk_id for chunk in chunks]
+            )
+        except Exception as exc:  # noqa: BLE001 — деградация шапки не рушит ячейку
+            # Шапка таблицы — метаданные, а не доказательство: сбой её чтения обязан быть
+            # видимым, но не отнимать вердикт (I4 не про это). Причина называется с
+            # адресом ячейки, чтобы её можно было найти.
+            errors.append(
+                f"{product_id}/{param.param_id}: table_context: "
+                f"{type(exc).__name__}: {exc} — табличная шапка не собрана"
+            )
+            return chunks, None
+        if not addresses:
+            return chunks, None
+        enriched = [
+            replace(chunk, table_ref=addresses[chunk.chunk_id])
+            if addresses.get(chunk.chunk_id) is not None
+            else chunk
+            for chunk in chunks
+        ]
+        return enriched, (tables or None)
+
     groups: dict[tuple[str, str, int, int, str], list[Cell]] = {}
     for cell in targets:
         groups.setdefault(_cell_condition(cell), []).append(cell)
@@ -5331,6 +6105,8 @@ def _evaluate_cells_by_condition(
         retrieval: RetrievalResult,
         coverage: CorpusCoverage | None,
         retrieval_s: float,
+        tables: Mapping[TableKey, ExtractedTable] | None,
+        local_tools: LocalToolPort | None,
     ) -> _CellAttempt:
         started = time.monotonic()
         try:
@@ -5361,6 +6137,14 @@ def _evaluate_cells_by_condition(
                 prompt_archive=prompt_archive,
                 artifact_dates=dates_by_product.get(str(cell.product_id)),
                 llm_journal=call_journal,
+                # План ``28`` §9: то же условие измерения, что у фазы. Профиль и транспорт —
+                # объявленные входы (одинаковые для всех ячеек, поэтому замыкаются), набор
+                # инструментов и таблицы — ячейки (``param``-зависимы), поэтому приходят
+                # аргументами. ``store`` в воркер по-прежнему не попадает.
+                tool_profile=tool_profile,
+                tool_caller=tool_caller,
+                local_tools=local_tools,
+                tables=tables,
             )
         except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
             return _CellAttempt(
@@ -5434,7 +6218,16 @@ def _evaluate_cells_by_condition(
             )
             dense_by_query = None
 
-        prepared: list[tuple[Cell, CatalogRow, RetrievalResult, float]] = []
+        prepared: list[
+            tuple[
+                Cell,
+                CatalogRow,
+                RetrievalResult,
+                Mapping[TableKey, ExtractedTable] | None,
+                LocalToolPort | None,
+                float,
+            ]
+        ] = []
         for cell in group:
             param = catalog[str(cell.param_id)]
             started = time.monotonic()
@@ -5464,7 +6257,31 @@ def _evaluate_cells_by_condition(
                     embed_note=embed_note,
                 )
                 continue
-            prepared.append((cell, param, retrieval, time.monotonic() - started))
+            # Адреса таблиц и набор инструментов готовятся **здесь**, в вызывающем потоке:
+            # чтение store из воркера запрещено ``check_same_thread``, а шапка таблицы —
+            # часть входа оценщика (план ``28`` §4.0).
+            chunks, tables = _enrich_tables(product_id, param, retrieval.chunks)
+            # Набор инструментов параметро-зависим (``subject_mention`` читает термины
+            # каталога), поэтому объект собирается на ячейку, а не на группу.
+            local_tools = (
+                build_local_tools(
+                    profile=tool_profile,
+                    corpus=_corpus_for(product_id),
+                    param=param,
+                )
+                if tool_profile.enabled
+                else None
+            )
+            prepared.append(
+                (
+                    cell,
+                    param,
+                    replace(retrieval, chunks=list(chunks)),
+                    tables,
+                    local_tools,
+                    time.monotonic() - started,
+                )
+            )
 
         if llm_concurrency > 1 and len(prepared) > 1:
             with ThreadPoolExecutor(
@@ -5473,12 +6290,19 @@ def _evaluate_cells_by_condition(
                 futures = [
                     (
                         pool.submit(
-                            _evaluate_one, cell, param, retrieval, coverage, retrieval_s
+                            _evaluate_one,
+                            cell,
+                            param,
+                            retrieval,
+                            coverage,
+                            retrieval_s,
+                            tables,
+                            local_tools,
                         ),
                         cell,
                         retrieval_s,
                     )
-                    for cell, param, retrieval, retrieval_s in prepared
+                    for cell, param, retrieval, tables, local_tools, retrieval_s in prepared
                 ]
                 attempts = []
                 for future, cell, retrieval_s in futures:
@@ -5495,8 +6319,10 @@ def _evaluate_cells_by_condition(
                         )
         else:
             attempts = [
-                _evaluate_one(cell, param, retrieval, coverage, retrieval_s)
-                for cell, param, retrieval, retrieval_s in prepared
+                _evaluate_one(
+                    cell, param, retrieval, coverage, retrieval_s, tables, local_tools
+                )
+                for cell, param, retrieval, tables, local_tools, retrieval_s in prepared
             ]
         for attempt in attempts:
             if attempt.error_kind == "evaluation_error":
@@ -5524,6 +6350,9 @@ def reevaluate_stale(
     current_build_id: str | None = None,
     prompt_dir: str | Path | None = None,
     llm_journal: str | Path | None = None,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
+    tool_caller: LocalToolCallerPort | None = None,
+    tool_corpus: ToolCorpusPort | None = None,
 ) -> RevalidationReport:
     """Пере-оценивает **только** устаревшие ячейки и снимает пометку при вердикте.
 
@@ -5563,6 +6392,12 @@ def reevaluate_stale(
         пишет в **тот же** файл прогона: иначе путь отказа повторной оценки был бы неразбираем.
     :param satellites: сателлиты **по продукту** (``{product_id: (…)}``) — тот же источник,
         что у фазы Ш6 (паспорта), чтобы пере-оценённая ячейка получила тот же промпт.
+    :param tool_profile: объявленный профиль локальных инструментов **прогона** (37-е поле
+        контракта). Пере-оценка исполняет условие, а не назначает его: профиль приходит из
+        провенанса прогона (``runs.tool_profile``), а не из флагов хоста.
+    :param tool_caller: транспорт хода с инструментами; при включённом профиле обязателен
+        (:class:`ToolWiringError` — отказ сборки, а не тихий откат к пути без инструментов).
+    :param tool_corpus: окно в корпус прогона; ``None`` — строится по продукту из ``store``.
     """
     selection = select_stale_cells(
         store, run_id, product_ids=product_ids, param_ids=param_ids
@@ -5651,6 +6486,9 @@ def reevaluate_stale(
         # Сбои групп/ретривала/оценки — в тот же список, что и раньше: наблюдаемость
         # не зависит от того, кто исполнил шаг.
         errors=report.errors,
+        tool_profile=tool_profile,
+        tool_caller=tool_caller,
+        tool_corpus=tool_corpus,
     ):
         cell = attempt.cell
         if attempt.outcome is None:
@@ -5680,6 +6518,10 @@ def reevaluate_stale(
                 justification=outcome.justification,
                 llm_scenario=outcome.llm_scenario,
             )
+            # Трасса — в вызывающем потоке и один раз на ячейку (у пула её нет):
+            # пере-оценка с инструментами обязана оставить след «сколько вызовов стоил
+            # вердикт», иначе аудит видит ноль у самых дорогих ячеек.
+            _save_tool_trace(store, str(run_id), cell, outcome.tool_trace, report.errors)
             report.reevaluated.append(
                 {
                     **_cell_key(cell),
@@ -5699,6 +6541,9 @@ def reevaluate_stale(
             attempt.embed_note,
         )
         store.save_cell(kept)
+        # Вердикта нет, но попытка была: её трасса — тоже наблюдённый факт (и она
+        # перезаписывает прежнюю по ячейке, а не дописывается к ней).
+        _save_tool_trace(store, str(run_id), cell, outcome.tool_trace, report.errors)
         report.remaining.append(
             {
                 **_cell_key(cell),
@@ -6167,6 +7012,9 @@ def retry_failed_cells(
     llm_journal: str | Path | None = None,
     retry_journal: str | Path | None = None,
     llm_concurrency: int = 1,
+    tool_profile: ToolProfile = NO_TOOL_PROFILE,
+    tool_caller: LocalToolCallerPort | None = None,
+    tool_corpus: ToolCorpusPort | None = None,
 ) -> RetryReport:
     """Повторяет оценку **только** ячеек без вердикта и **на существующем** ``run_id``.
 
@@ -6203,6 +7051,14 @@ def retry_failed_cells(
         ``hound retry --max-retries``). Это **не** объявленная политика: ``run_id`` им не
         переписывается, поэтому число публикуется в ``retry.jsonl`` и сводке отчёта;
         верхнего потолка нет, отрицательное — отказ ``ValueError`` (не clamp).
+    :param tool_profile: объявленный профиль локальных инструментов **прогона** (37-е поле
+        контракта). Повтор исполняет условие, а не назначает его: профиль приходит из
+        провенанса прогона (``runs.tool_profile``). Ячейка, повторённая без инструментов под
+        ``run_id``, объявившим их, была бы измерена другим промптом — то есть два прогона с
+        одним идентификатором измерили бы разные условия.
+    :param tool_caller: транспорт хода с инструментами; при включённом профиле обязателен
+        (:class:`ToolWiringError` — отказ сборки, а не тихий откат).
+    :param tool_corpus: окно в корпус прогона; ``None`` — строится по продукту из ``store``.
     """
     if max_retries < 0:
         raise ValueError(
@@ -6300,6 +7156,9 @@ def retry_failed_cells(
         call_journal=call_journal,
         errors=report.errors,
         llm_concurrency=llm_concurrency,
+        tool_profile=tool_profile,
+        tool_caller=tool_caller,
+        tool_corpus=tool_corpus,
     ):
         cell = attempt.cell
         attempt_no = _next_retry_attempt(cell)
@@ -6381,6 +7240,10 @@ def retry_failed_cells(
             )
             # Класс снимается **после** upsert: ячейка измерена, сбоя у неё нет.
             _record_cell_failure(store, fresh, None)
+            # Трасса — в вызывающем потоке, один раз на ячейку: повторённая ячейка
+            # исполняла то же условие, что и фаза (профиль в ``run_id``), значит и её
+            # вызовы обязаны быть видны аудиту.
+            _save_tool_trace(store, str(run_id), cell, outcome.tool_trace, report.errors)
             report.recovered += 1
             report.cells.append(
                 {
@@ -6427,6 +7290,9 @@ def retry_failed_cells(
             llm_scenario=outcome.llm_scenario,
             failure_kind=outcome.failure_kind,
         )
+        # Попытка была и стоила вызовов даже без вердикта: трасса — наблюдённый факт,
+        # и она перезаписывает прежнюю по ячейке (идемпотентность store'а).
+        _save_tool_trace(store, str(run_id), cell, outcome.tool_trace, report.errors)
         report.still_failed += 1
         report.cells.append(
             {

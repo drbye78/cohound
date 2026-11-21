@@ -90,6 +90,7 @@ __all__ = [
     "SearchDeployConfig",
     "SerpDeployConfig",
     "TLSConfig",
+    "ToolsDeployConfig",
     "is_split",
     "load_deploy_config",
     "parse_serp_switch",
@@ -1034,6 +1035,46 @@ class LexicalDeployConfig(BaseModel):
         return "identifier" if profile == "raw" else profile
 
 
+class ToolsDeployConfig(BaseModel):
+    """Секция ``tools`` deploy-конфига: **объявленный дефолт** профиля инструментов.
+
+    Профиль локальных инструментов оценщика (план ``28`` §9) — условие измерения: он
+    входит в ``EXECUTION_CONTRACT_FIELDS`` (``tool_profile``), значит в ``run_id``. Набор
+    доступных вызовов меняет то, что модель может адресовать (раздел документа, строку
+    таблицы), то есть набор доказательств и вердикт, — поэтому он объявлен, а не
+    подставляется кодом исполнения.
+
+    Приоритет (объявленный, а не выведенный): ``--tool-profile`` >
+    ``deploy.tools.profile`` > ``none``. Резолв один
+    (:func:`core.cli.execution_axes.resolve_tool_profile`), поэтому контракт и исполнение
+    не могут разойтись — тот же довод, что у ``retrieval.profile`` (D2 плана 26).
+
+    ``max_calls`` — **объявленный** бюджет вызовов на ячейку, а не предохранитель:
+    «не ограничивать, а измерять» (A3) означает, что число объявляется и публикуется.
+    Дефолт ``0`` согласован с ``profile: none``: инструментов нет — вызовов нет. Профиль
+    с инструментами при нулевом бюджете отвергается (``ToolProfile``), а не исполняется
+    как «профиль, который ничего не делает»: оператор обязан назвать число.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: ``none`` | ``t1`` | ``t4`` | ``t7`` | список через ``+`` (``t1+t4+t7``).
+    profile: str = "none"
+
+    #: Бюджет вызовов инструментов на ячейку (``0`` — только при ``profile: none``).
+    max_calls: int = 0
+
+    @field_validator("max_calls")
+    @classmethod
+    def _check_max_calls(cls, value: int) -> int:
+        """Отрицательный бюджет — отказ: бюджет объявляется числом, а не «сколько выйдет»."""
+        if value < 0:
+            raise ValueError(
+                f"tools.max_calls: бюджет обязан быть ≥ 0, получено {value!r}"
+            )
+        return value
+
+
 class ExtractDeployConfig(BaseModel):
     """Секция ``extract`` deploy-конфига: операционный бюджет кэша экстракции (D8).
 
@@ -1105,6 +1146,12 @@ class DeployConfig(BaseModel):
     #: Операционный бюджет кэша экстракции (D8). В контракт **не** входит: свойство хоста,
     #: а не условие измерения (см. :class:`ExtractDeployConfig`).
     extract: ExtractDeployConfig = Field(default_factory=ExtractDeployConfig)
+    #: Объявленный дефолт профиля локальных инструментов оценщика (план ``28`` §9).
+    #: Отсутствие секции = ``none`` (путь без инструментов — прежнее поведение).
+    #: Значение уходит **и** в контракт (``tool_profile``), **и** в исполнение — один
+    #: резолв (:func:`core.cli.execution_axes.resolve_tool_profile`), поэтому «дефолт в
+    #: коде» не может разойтись с ``run_id``.
+    tools: ToolsDeployConfig = Field(default_factory=ToolsDeployConfig)
 
     @field_validator("profile")
     @classmethod

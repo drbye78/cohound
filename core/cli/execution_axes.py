@@ -8,7 +8,7 @@
   измерения (``execution_contract_digest`` → ``run_id``/lineage/``hound diff``);
 * :func:`core.pipeline.report.build_manifest` — поля ``run_manifest.yaml``.
 
-**Почему эти девять осей объявлены, а наблюдаемые — нет.** Предикат — «функция входа»
+**Почему эти оси объявлены, а наблюдаемые — нет.** Предикат — «функция входа»
 против «функции собранных портов»:
 
 * объявленная ось вычислима на старте из ``args``/``run.yaml``/файлов пакета/
@@ -135,6 +135,7 @@ from core.config.run_config import load_baseline_facts, load_baselines
 from core.domain.dictionary import load_dictionary
 from core.domain.enums import FrozenSource, PdfDevice, RefreshPolicy, SearchMode
 from core.domain.models import CrawlRunConfig, canonical_rate_limit
+from core.domain.tools import NO_TOOL_PROFILE, ToolProfile
 from core.pipeline.crawl_frontier import (
     resolve_embed_device,
     resolve_embed_precision,
@@ -164,6 +165,7 @@ __all__ = [
     "MATERIAL_REFRESH",
     "MATERIAL_SCOPE",
     "MATERIAL_SEEDS",
+    "TOOL_PROFILE_TOKENS",
     "ContractFlag",
     "DeclaredExecutionAxes",
     "IdentityFlags",
@@ -172,6 +174,7 @@ __all__ = [
     "add_frozen_source_flag",
     "add_refresh_scope_flag",
     "add_serp_rounds_flag",
+    "add_tool_axis_flags",
     "contract_flag_values",
     "declared_status_dict_version",
     "extractor_stack_version",
@@ -179,6 +182,7 @@ __all__ = [
     "resolve_declared_axes",
     "resolve_query_lang",
     "resolve_retrieval_profile",
+    "resolve_tool_profile",
 ]
 
 #: Путь словаря статусов относительно корня репозитория (источник ``status_dict_version``).
@@ -259,6 +263,62 @@ def add_frozen_source_flag(parser: argparse.ArgumentParser) -> None:
             "текущая экстракция и нарезка) | chunks (поведение offline); при иной "
             "политике канонизируется в n/a и run_id не меняет"
         ),
+    )
+
+
+#: Метки профиля инструментов → имена объявленных инструментов (план ``28`` §9).
+#:
+#: Оператор называет профиль **меткой** (``t1``/``t4``/``t7`` — номер гипотезы в плане
+#: ``28`` §4), а контракт и исполнение — **именем** инструмента: имя объявлено в
+#: :class:`core.domain.tools.ToolSpec` и не может быть переименовано без смены профиля.
+#: Метка без объявленного инструмента — отказ (:func:`resolve_tool_profile`), а не
+#: «пропустим»: набор доступных вызовов — вход измерения.
+#:
+#: ``t2`` (``section_role``) объявлен в домене как инструмент, но метки у него пока нет
+#: намеренно: план ``28`` §9 опробует T1/T4/T7, и включение T2 — отдельное решение с
+#: отдельным замером, а не побочный эффект разбора строки.
+TOOL_PROFILE_TOKENS: dict[str, str] = {
+    "t1": "expand_to_section",
+    "t4": "table_row",
+    "t7": "subject_mention",
+}
+
+
+def add_tool_axis_flags(parser: argparse.ArgumentParser) -> None:
+    """Регистрирует ось профиля инструментов оценщика (план ``28`` §9).
+
+    Один регистратор на ``plan`` и ``run``: профиль входит в
+    ``EXECUTION_CONTRACT_FIELDS`` (``tool_profile``) ⇒ в ``run_id``, поэтому разъехавшиеся
+    формы флагов дали бы две идентичности при одном объявленном входе. Паритет проверяется
+    тестом (``tests/cli/test_tool_profile_axis.py``), а не глазами.
+
+    ``--tool-profile`` — метки (``none``|``t1``|``t4``|``t7``|``t1+t4+t7``), а не имена
+    инструментов: оператор выбирает **набор гипотез**, имена объявлены доменом. Дефолт
+    ``None`` — «флаг не задан»: значение резолвится
+    (:func:`resolve_tool_profile`: флаг > ``deploy.tools.profile`` > ``none``), и в
+    контракт уходит **резолвнутое** значение, а не ``null`` при исполненном дефолте (тот
+    же дефект, что закрыт у ``--retrieval-profile``/``--query-lang``).
+
+    ``--tool-max-calls`` — объявленный бюджет на ячейку (A3: число публикуется, а не
+    подрезается молча). ``None`` — «не задан»: берётся ``deploy.tools.max_calls``.
+    """
+    parser.add_argument(
+        "--tool-profile",
+        dest="tool_profile",
+        default=None,
+        metavar="PROFILE",
+        help="профиль локальных инструментов оценщика: none|t1|t4|t7 или список через + "
+        "(t1+t4+t7); входит в execution contract (tool_profile) ⇒ новый run_id. "
+        "Дефолт — deploy.tools.profile (none)",
+    )
+    parser.add_argument(
+        "--tool-max-calls",
+        dest="tool_max_calls",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="объявленный бюджет вызовов инструментов на ячейку (0 — только при "
+        "профиле none); дефолт — deploy.tools.max_calls",
     )
 
 
@@ -705,6 +765,91 @@ def resolve_query_lang(
     return str(config.retrieval.query_lang).strip().lower()
 
 
+def _tool_names(value: str) -> tuple[str, ...]:
+    """Метки профиля → имена объявленных инструментов (``none`` → пустой набор).
+
+    Разбор строки — здесь, а не в парсере: ``argparse`` не знает домена, а набор
+    допустимых меток обязан быть один (:data:`TOOL_PROFILE_TOKENS`). Пустое значение,
+    неизвестная метка и ``none`` вместе с другими метками — отказ: профиль, половина
+    которого не опознана, измерял бы не то, что объявлено.
+    """
+    raw = str(value).strip().lower()
+    if not raw:
+        raise ValueError(
+            "профиль инструментов: пустое значение; допустимо none|t1|t4|t7 или список "
+            f"через + (метки: {sorted(TOOL_PROFILE_TOKENS)})"
+        )
+    if raw == NO_TOOL_PROFILE.name:
+        return ()
+    tokens = [token.strip() for token in raw.split("+")]
+    if NO_TOOL_PROFILE.name in tokens:
+        raise ValueError(
+            "профиль инструментов: «none» нельзя сочетать с метками — это либо путь без "
+            "инструментов, либо объявленный набор"
+        )
+    unknown = [token for token in tokens if token not in TOOL_PROFILE_TOKENS]
+    if unknown:
+        raise ValueError(
+            f"профиль инструментов: неизвестные метки {unknown}; допустимо none|"
+            f"{'|'.join(sorted(TOOL_PROFILE_TOKENS))} или их список через +"
+        )
+    # Профиль — множество, а не последовательность: порядок меток не должен менять ни
+    # ``canonical()``, ни ``run_id``.
+    return tuple(dict.fromkeys(TOOL_PROFILE_TOKENS[token] for token in tokens))
+
+
+def resolve_tool_profile(
+    cli_value: str | None,
+    cli_max_calls: int | None = None,
+    deploy: DeployConfig | None = None,
+) -> ToolProfile:
+    """Резолвит профиль инструментов: ``--tool-profile`` > ``deploy.tools.profile`` > ``none``.
+
+    Один резолв на **контракт и исполнение** — по той же причине, что у
+    :func:`resolve_retrieval_profile` (D2 плана 26): незаданный флаг не означает «профиль
+    не назван». Контракт получает ``canonical()`` резолвнутого профиля, поэтому ``null``
+    в ``run_id`` при исполненном дефолте невозможен, а путь без инструментов выразим
+    явной строкой ``-;max_calls=0``.
+
+    Бюджет: ``--tool-max-calls`` > ``deploy.tools.max_calls`` (дефолт поля ``0``).
+    ``0`` при объявленных инструментах — **отказ**, а не «профиль без вызовов»: это
+    профиль, который ничего не делает, и :class:`~core.domain.tools.ToolProfile`
+    отвергает его сам. Число не подставляется кодом (A3: объявленный дефолт живёт в
+    ``deploy``, а не в коде).
+
+    :param cli_value: значение ``--tool-profile`` (``None`` — флаг не задан).
+    :param cli_max_calls: значение ``--tool-max-calls`` (``None`` — флаг не задан).
+    :param deploy: resolved ``DeployConfig``; ``None`` — секционные дефолты
+        (``none``/``0``), то есть «развёртывание не объявляло» не превращается в
+        «профиль не назван».
+    :returns: :class:`core.domain.tools.ToolProfile` (никогда ``None``).
+    :raises ValueError: неизвестная метка; бюджет без инструментов; инструменты без
+        бюджета. Вызывающий (composition root) переводит это в ``EXIT_USAGE``.
+    """
+    config = deploy if deploy is not None else DeployConfig(profile="local")
+    declared = getattr(config, "tools", None)
+    declared_profile = str(getattr(declared, "profile", NO_TOOL_PROFILE.name))
+    declared_calls = int(getattr(declared, "max_calls", 0))
+    raw_profile = cli_value if cli_value is not None else declared_profile
+    max_calls = cli_max_calls if cli_max_calls is not None else declared_calls
+    tools = _tool_names(raw_profile)
+    if not tools:
+        name = NO_TOOL_PROFILE.name
+    else:
+        # Имя профиля — метки, а не имена инструментов: оператор назвал набор метками, и
+        # в провенансе/печати он обязан видеть своё объявление.
+        name = "+".join(
+            sorted(token for token, tool in TOOL_PROFILE_TOKENS.items() if tool in tools)
+        )
+    try:
+        return ToolProfile(name=name, tools=tools, max_calls=max_calls)
+    except ValueError as exc:
+        raise ValueError(
+            f"tools: {exc}. Бюджет объявляется числом: --tool-max-calls N или "
+            "deploy.tools.max_calls"
+        ) from exc
+
+
 @dataclass(frozen=True)
 class IdentityFlags:
     """Флаги идентичности, питающие ``run_id`` **вне** execution contract (09 §6.2).
@@ -831,6 +976,13 @@ class DeclaredExecutionAxes:
     #: разъехаться с фактической схемой она не может (тот же приём, что у
     #: ``chunking_spec``).
     lexical_spec: dict[str, Any] | None = None
+    #: План ``28`` §9: **профиль локальных инструментов оценщика** — каноническая строка
+    #: :meth:`core.domain.tools.ToolProfile.canonical` (``expand_to_section;max_calls=2``).
+    #: Входит в контракт (поле ``tool_profile``): набор доступных вызовов меняет то, что
+    #: модель может адресовать, то есть набор доказательств. Объявленный путь без
+    #: инструментов даёт ``-;max_calls=0``, а ``None`` здесь — «ось не передана»
+    #: (legacy-конструкторы в тестах), и это отличимо от объявленного ``none``.
+    tool_profile: str | None = None
 
 
 def extractor_stack_version(
@@ -1290,4 +1442,16 @@ def resolve_declared_axes(
         # объявленные входы пакета, читаемые тем же загрузчиком, что увидит Ш4.
         baselines_digest=baselines_digest_value,
         baseline_facts_digest=baseline_facts_digest_value,
+        # План ``28`` §9: профиль локальных инструментов оценщика — объявленная ось
+        # (``--tool-profile`` > ``deploy.tools.profile`` > ``none``), вычислимая до сборки
+        # портов. В контракт уходит каноническая строка, поэтому путь без инструментов
+        # выразим (``-;max_calls=0``), а смена набора меняет ``run_id``. Резолв — один на
+        # контракт и исполнение (:func:`resolve_tool_profile`): второй формулы нет.
+        # Неизвестная метка/несогласованный бюджет — ``ValueError`` ⇒ ``EXIT_USAGE`` у
+        # вызывающего, а не молчаливый ``none``.
+        tool_profile=resolve_tool_profile(
+            getattr(args, "tool_profile", None),
+            getattr(args, "tool_max_calls", None),
+            config,
+        ).canonical(),
     )
