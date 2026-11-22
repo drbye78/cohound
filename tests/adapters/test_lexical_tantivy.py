@@ -860,7 +860,7 @@ def test_ngram_missing_dependency_guard(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 # ---------------------------------------------------------------------------
-# CJK-сегментация (schema ``single-body-stem-ru-en-zh-3``)
+# CJK-сегментация (шаг ``pre:segment:cjk-bigrams``; версия схемы — ``zh-4``)
 # ---------------------------------------------------------------------------
 
 #: Документы точного кейса из плана 18: CJK-фраза без пробелов + английский контроль.
@@ -922,10 +922,74 @@ def test_index_body_view_is_identity_without_cjk() -> None:
     Анализатор получает ровно ту же строку, что и до правки, поэтому список токенов
     латиницы/кириллицы не может измениться (список термов дополнительно запинен в
     ``tests/util/test_text_utils.py``).
+
+    Для **запроса** пин держится на тексте без дефисного составного слова: с ``-4``
+    такое слово разворачивается в ``("a b" OR a OR b)`` намеренно, и это запинено
+    отдельно (:func:`test_hyphen_compound_expands_to_phrase_or_terms`). Смешивать два
+    утверждения в одном нельзя — тогда «побайтовая неизменность» перестала бы быть
+    правдой и пин пришлось бы ослабить вместо уточнения.
     """
-    text = "Экспорт данных во внешний файл; endpoint API-2024_X."
+    text = "Экспорт данных во внешний файл; endpoint API2024_X."
     assert lexical_tantivy._index_body_text(text) is text
     assert lexical_tantivy._query_text(text) is text
+    # Поле ``body`` для дефисного текста по-прежнему не меняется: правка только в запросе.
+    hyphenated = "Экспорт данных; endpoint API-2024_X."
+    assert lexical_tantivy._index_body_text(hyphenated) is hyphenated
+
+
+# ---------------------------------------------------------------------------
+# Дефисное составное слово в запросе (schema ``single-body-stem-ru-en-zh-4``)
+# ---------------------------------------------------------------------------
+
+
+def test_hyphen_compound_expands_to_phrase_or_terms() -> None:
+    """Дефисное слово — фраза **или** половины: парсер сам делает из него фразу slop=0.
+
+    Это и был измеренный дефект: ``SQL-операторов`` разбирается в
+    ``PhraseQuery(["sql","оператор"], slop=0)`` и требует соседства двух слов, которого в
+    документе другого языка нет никогда. Фраза остаётся первым слагаемым, поэтому целое
+    составное слово ранжируется выше половины.
+    """
+    assert (
+        lexical_tantivy._expand_hyphen_compounds("SQL-операторов")
+        == '("SQL операторов" OR SQL OR операторов)'
+    )
+    assert (
+        lexical_tantivy._expand_hyphen_compounds("ситуации split-brain")
+        == 'ситуации ("split brain" OR split OR brain)'
+    )
+
+
+def test_hyphen_expansion_is_identity_without_compound() -> None:
+    """Текст без дефисного составного слова возвращается тем же объектом строки.
+
+    Иначе EN/RU-запросы, где такого слова нет, поехали бы через лишнюю пересборку строки,
+    и «побайтовая неизменность» стала бы утверждением без пина.
+    """
+    for text in ("Наличие обучения по продукту", "pg_cron", "a - b", "多-列"):
+        assert lexical_tantivy._expand_hyphen_compounds(text) is text
+
+
+@requires_tantivy
+def test_hyphenated_query_finds_cross_language_material() -> None:
+    """Запрос с дефисным словом находит документ, где стоит только латинская половина.
+
+    Точный кейс замера 22.11.2026: в китайском чанке есть ``SQL``, а слова
+    ``операторов`` нет вовсе. До правки — 0 хитов, после — документ найден; запрос без
+    дефиса ведёт себя как раньше.
+    """
+    records = [
+        LexicalChunk("zh", PRODUCT_A, "GaussDB 支持 SQL 语句和存储过程"),
+        LexicalChunk("ru", PRODUCT_A, "SQL-оператор возвращает строку"),
+    ]
+    with _index(records) as index:
+        expanded = index.search("SQL-операторов", [PRODUCT_A], top_k=5)
+        plain = index.search("обучение", [PRODUCT_A], top_k=5)
+    found = [c.chunk_id for c in expanded]
+    assert "zh" in found
+    # Русский документ с целым составным словом тоже найден — правило не сужает поиск.
+    assert "ru" in found
+    assert plain == []
 
 
 def test_lexical_schema_declares_the_cjk_version_boundary() -> None:
@@ -935,8 +999,21 @@ def test_lexical_schema_declares_the_cjk_version_boundary() -> None:
     ``lexical_engine_version``, поэтому пин держит обе адресные строки.
     """
     spec = lexical_tantivy.lexical_schema_spec()
-    assert spec["version"] == "single-body-stem-ru-en-zh-3"
+    assert spec["version"] == "single-body-stem-ru-en-zh-4"
     assert spec["stemmed_analyzer"][0] == "pre:segment:cjk-bigrams(han,kana,hangul)"
+
+
+def test_lexical_schema_declares_query_normalization() -> None:
+    """Разбор запроса назван в схеме отдельным ключом: он меняет выдачу, но не терм-сет.
+
+    Шаг ``hyphen-compound:phrase-or-terms`` живёт на стороне запроса, поэтому его нельзя
+    положить в ``stemmed_analyzer`` (там цепочка поля). Без ключа смена разбора запроса
+    меняла бы вердикты, не меняя ``run_id`` — тот же класс, что профиль анализатора до
+    ``-3``.
+    """
+    assert lexical_tantivy.lexical_schema_spec()["query_normalization"] == [
+        "hyphen-compound:phrase-or-terms"
+    ]
 
 
 def test_lexical_schema_names_the_declared_profile() -> None:
