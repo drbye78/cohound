@@ -17,6 +17,14 @@ products:
     product_id: postgresql
     canonical_name: PostgreSQL
     versions:
+      # 9.2 объявлена 22.11.2026 ради **линии** продукта `gaussdb`: вендор говорит
+      # дословно, что его ядро выросло из PostgreSQL 9.2 («最早GaussDB内核引擎基于
+      # PostgreSQL9.2开源版本不断演进», FAQ `gaussdb_01_366`). Редакция объявлена, но
+      # **не собрана**: `baseline build --version 9` никто не запускал, поэтому фактов о
+      # ней нет и наследование от неё ничего не даёт (`current_version` остаётся 18).
+      # Объявлять 18 вместо 9.2 значило бы утверждать о линии то, чего вендор не говорил.
+      - version: "9.2"
+        docs_roots: ["https://www.postgresql.org/docs/9.2/"]
       - version: "11"
         docs_roots: ["https://www.postgresql.org/docs/11/"]
       - version: "12"

@@ -1,6 +1,7 @@
 anchor: pangolin
 case_id: ru-pg-dbms
 cohort: cohort-ru-pg-dbms-2026-10-28-golden00
+cohort_ref: cohort-ru-pg-dbms-2026-11-22-r2
 # §13: версия методологии объявлена **входом прогона**, а не только дефолтом кода
 # (`RunConfig.methodology_version` → манифест → `execution_contract_digest` → `run_id`).
 # Значение — **ярлык исполняемой семантики**, а не отдельная настройка пакета: правила
@@ -66,6 +67,7 @@ products:
 - tantor
 - jatoba
 - digital_q_database
+- gaussdb
 ranking_policy: capability_ranked
 snapshot_date: '2026-10-28'
 crawl:

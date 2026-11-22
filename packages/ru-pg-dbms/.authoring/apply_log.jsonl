@@ -9,3 +9,5 @@
 {"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-add", "ts": "2026-11-19T11:42:00.992648+00:00"}
 {"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-update", "ts": "2026-11-19T11:42:08.502832+00:00"}
 {"actor": "roger", "changed": ["baselines"], "deleted": [], "op": "baseline-update", "ts": "2026-11-19T11:42:09.461551+00:00"}
+{"actor": "roger", "changed": ["cohort", "run"], "deleted": [], "op": "cohort-update", "ts": "2026-11-22T01:55:49.368883+00:00"}
+{"actor": "roger", "changed": ["package"], "deleted": [], "op": "bump-version", "ts": "2026-11-22T01:56:17.989897+00:00"}

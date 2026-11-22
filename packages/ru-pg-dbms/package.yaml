@@ -16,7 +16,7 @@ modules:
   weight: 19.0
 - module_id: management
   weight: 23.0
-package_version: 2.1.1
+package_version: 2.2.0
 registries: []
 roles:
 - core_coverage_allowed: true

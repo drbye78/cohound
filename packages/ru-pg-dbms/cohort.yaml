@@ -1,10 +1,12 @@
 case_id: ru-pg-dbms
 entries:
 - anchor_relation: anchor
+  comparison_base: false
   product_id: pangolin
   role_overlap: 1.0
   selection_reason: 'Якорь/объект сравнения: Platform V Pangolin DB.'
 - anchor_relation: analog
+  comparison_base: false
   product_id: postgrespro
   role_overlap: 1.0
   selection_reason: Российский лидер PG-СУБД; максимальное перекрытие ролей с якорем.
@@ -12,25 +14,41 @@ entries:
   comparison_base: true
   product_id: postgresql
   role_overlap: 0.8
-  selection_reason: >-
-    Предок линии, нуль отсчёта: Δ к нему показывает, что продукт добавляет к PostgreSQL.
-    `analog`, а не новый член `AnchorRelation`: якорь у когорты уже один, а объявленная
-    роль предка — не якорь, а база сравнения (`comparison_base`). Перекрытие ролей — из
-    четырёх ролей профиля (`backup_recovery`, `core_engine`, `management_platform`,
-    `migration`) предок закрывает `core_engine` полностью, `migration` и
-    `backup_recovery` частично (`pg_dump`/`pg_basebackup`/`pg_upgrade`), а
-    `management_platform` — не закрывает вовсе; по объявленным весам модулей пакета
-    (core 0.58, backup 0.19, management 0.23) это ≈0.8.
+  selection_reason: 'Предок линии, нуль отсчёта: Δ к нему показывает, что продукт
+    добавляет к PostgreSQL. `analog`, а не новый член `AnchorRelation`: якорь у когорты
+    уже один, а объявленная роль предка — не якорь, а база сравнения (`comparison_base`).
+    Перекрытие ролей — из четырёх ролей профиля (`backup_recovery`, `core_engine`,
+    `management_platform`, `migration`) предок закрывает `core_engine` полностью,
+    `migration` и `backup_recovery` частично (`pg_dump`/`pg_basebackup`/`pg_upgrade`),
+    а `management_platform` — не закрывает вовсе; по объявленным весам модулей пакета
+    (core 0.58, backup 0.19, management 0.23) это ≈0.8.'
 - anchor_relation: analog
+  comparison_base: false
   product_id: tantor
   role_overlap: 0.9
   selection_reason: Российская СУБД на PostgreSQL; высокое перекрытие ролей.
 - anchor_relation: analog
+  comparison_base: false
   product_id: jatoba
   role_overlap: 0.7
   selection_reason: Российская СУБД на PostgreSQL; частичное перекрытие ролей.
 - anchor_relation: analog
+  comparison_base: false
   product_id: digital_q_database
   role_overlap: 1.0
-  selection_reason: Присутствует в исходной comparative table; PostgreSQL-derived DBMS.
-frozen_at: '2026-10-28'
+  selection_reason: Присутствует в исходной comparative table; PostgreSQL-derived
+    DBMS.
+- anchor_relation: analog
+  comparison_base: false
+  product_id: gaussdb
+  role_overlap: 0.8
+  selection_reason: 'Первый продукт профиля с **родным китайским** корпусом: цель
+    §1.1 — EN/RU/ZH, и до него ZH не был проверен ни на одном живом корпусе. Линия
+    PostgreSQL объявлена вендором дословно (FAQ: «最早GaussDB内核引擎基于PostgreSQL9.2开源版本不断演进»),
+    поэтому Δ к точке отсчёта осмыслен. Перекрытие ролей ≈0.8: core_engine закрыт
+    полностью (свой движок, Ustore, распределённый слой), backup_recovery — встроенными
+    средствами (отдельного продукта резервного копирования нет), management_platform
+    — консолью облака, а не поставляемым компонентом, migration — отдельным сервисом
+    облака (DRS); по весам модулей пакета (core 0.58, backup 0.19, management 0.23)
+    это ≈0.8.'
+frozen_at: '2026-11-22'
