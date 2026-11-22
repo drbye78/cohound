@@ -187,7 +187,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Экономия:** ноль (извлечение уже оплачено) — но это и есть цена: **дедуп стоит после
   конвертации**. S2 снимает повторные байты до неё.
 * **Корпус:** схлопывает адреса (семантика уже объявлена `crawl-3`).
-* **Публикует:** `IndexBuild.duplicates` (`core/pipeline/index_build.py:103`) → note фазы (`core/pipeline/phases.py:372`) →
+* **Публикует:** `IndexBuild.duplicates` (`core/pipeline/index_build.py:103`) → note фазы (`core/pipeline/phases.py:412`) →
   `results[].notes`. Перенести в ledger как отдельную строку (сейчас это нота в логе, а не
   счётчик в артефакте).
 * **Хук:** `core/pipeline/corpus_ingest.py:1729` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:481`,

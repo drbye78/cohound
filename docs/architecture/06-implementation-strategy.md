@@ -168,7 +168,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 артефакт пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
 `core/edge/server.py:622-625`), оси `level`/`device` едут в `submit`. ⚠️ Остаток: паритет `pb`
 между профилями **измерением не подтверждён** (прогона двумя профилями не было), per-site слой
-`document_level` под `split` не действует (`core/cli/wiring.py:3374-3377` — порты собираются
+`document_level` под `split` не действует (`core/cli/wiring.py:3665-3668` — порты собираются
 до per-root резолва), `pdf_pipeline` выбирает edge. Детали — `24-fleet-work-units.md` F1.5
 (паритет `pb` — гейт флота) и §7 (размещение), `07` §6 (расхождения `split`).
 
@@ -257,7 +257,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
   `core/edge/server.py:622-625`), оси `level`/`device` едут в `submit`
   (`core/cli/wiring.py:3377`). **Не измерен** паритет `pb` между профилями; per-site слой
-  `document_level` под `split` не резолвится (`core/cli/wiring.py:3374-3377` — порты собираются
+  `document_level` под `split` не резолвится (`core/cli/wiring.py:3665-3668` — порты собираются
   до per-root резолва); `pdf_pipeline` выбирает edge (§2).
 - ✅ **Прогон до `report` состоялся:** `3edf2b06097c` (26.10), `c2e7b860ac17` (06.11, 12
   артефактов `outputs/`); живой оценщик — 07–08.11 (`2a5b51af5778`: 905 ячеек, **1923** вызова,
@@ -754,7 +754,7 @@ P5), но строка помечена здесь как неактуальна
   churn `index_build_id`/дайджеста при дефолте — принят (R1). Пул — свойство корня
   (`pool_factory(W, level)`); память = `W × footprint(level)`. Под `split` ось едет в
   `extract/submit` (`core/cli/wiring.py:3377`), но per-site слой не резолвится — порты
-  собираются до per-root резолва (`core/cli/wiring.py:3374-3377`). Новых зависимостей нет.
+  собираются до per-root резолва (`core/cli/wiring.py:3665-3668`). Новых зависимостей нет.
 - **Текстовые форматы и EPUB (as-built).** `core/adapters/extract_text.py` (plain text/markdown,
   все расширенные варианты) и `extract_epub.py` (stdlib OCF) — **первый класс** наравне с HTML,
   не docling: свой читатель и свой чанкер. Диспетчер семейств — `core/adapters/chunker_family.py`

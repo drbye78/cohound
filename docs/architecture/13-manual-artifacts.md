@@ -494,7 +494,7 @@ gaps:
    per-run (`PRIMARY KEY (run_id, product_id, url)`, `core/store/sqlite.py:378-393`), поэтому
    у артефакта свои `run_id` и `provided_at`, а не чужая история. Между прогонами переносится
    **ячейка** — и она типизирована: `measurement_origin=carried` + обязательный
-   `carried_from_run_id` (`core/domain/models.py:1487`, схема `cell-reuse-3`); документ —
+   `carried_from_run_id` (`core/domain/models.py:1487`, схема `cell-reuse-4`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
    `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2903-2957`).

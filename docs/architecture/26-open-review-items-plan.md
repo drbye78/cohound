@@ -134,7 +134,7 @@ CLI эксперимента. Отказ — `EmbedderBuildMismatch` (`EXIT_USAG
 Цена: ~1.5 ч AI.
 
 **Две ловушки размещения (проверено 09.11.2026, `661bfdd`).** (1) `VectorIndexPort`
-(`core/ports/vector_index.py:106-118`) отдаёт только `build_id`/`dim` — `embed_model_id` в
+(`core/ports/vector_index.py:112-124`) отдаёт только `build_id`/`dim` — `embed_model_id` в
 памяти индекса нет, а `evaluate_phase` не получает `index_root`/`package`; build-side
 идентичность берётся из `store.iter_index_manifest(build_id)` (`core/store/sqlite_store.py:3311`)
 или `read_manifest` (`core/util/index_partition.py:97-103`), и это надо назвать в сигнатуре

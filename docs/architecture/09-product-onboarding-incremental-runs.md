@@ -4429,7 +4429,7 @@ state/state.db                                 # durable-состояние па
    для **каждого** продукта плана, включая zero-source (см. §11.1/§11.3).
 4. `_coverage_for` (`core/pipeline/evaluate.py:2610`) — ✅ **реализовано**: `None` для
    продукта плана даёт synthetic zero-source строку (`reason=coverage_missing`,
-   `core/pipeline/evaluate.py:2445`), которая запрещает `❌` и даёт failed-ячейки, а не «покрытие неизвестно».
+   `core/pipeline/evaluate.py:2420`), которая запрещает `❌` и даёт failed-ячейки, а не «покрытие неизвестно».
 5. `load_effective_seeds` (`core/pipeline/onboarding.py:146`) — ✅ **реализовано**:
    приоритет `--urls > seeds.yaml > corpus_urls.yaml` (`urls_override` заменяет набор
    целиком, `:167-198`; `seeds.yaml` — `:201-206`; legacy `corpus_urls.yaml` — `:203`).

@@ -966,7 +966,7 @@ request-файлы гейтов — `core/pipeline/gate_subject.py:532`); вер
 гранулярность транзакций SQLite при массовой записи — ✅ сделано
 (`core/store/sqlite.py:125` `PRAGMA journal_mode = WAL` +
 `core/store/sqlite_store.py:97` `DEFAULT_BATCH_SIZE = 200`, `save_cells_batch`
-`core/store/sqlite_store.py:662` — одна транзакция на пачку).
+`core/store/sqlite_store.py:691` — одна транзакция на пачку).
 
 **Что остаётся открытым, хотя в §H не значится:** шаг (3) эшелона — проверка следствия
 статуса из цитаты (§C.2, V1) и append-only раунды K2 (§G.2). Оба названы в тексте и оба

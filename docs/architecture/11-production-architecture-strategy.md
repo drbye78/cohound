@@ -245,8 +245,17 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (сегменты `<level>/<device>/<build>/<policy>/<finalize>`; `cpu`/`cuda` — ось
 >   `crawl.pdf_device`, P9).
 > - ✅ воркеры из бюджета + уровень из профиля: `core/pipeline/resources.py:525`
->   (`workers_from_budget`), preflight `core/cli/wiring.py:2643`
+>   (`workers_from_budget`), preflight `core/cli/wiring.py:2833`
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
+> - ✅ preflight не отказывает в работе, которой не будет: при корпусе из durable-чанков
+>   (`dispatch_refresh(...).corpus_source is CrawlCorpusSource.CHUNKS`, то есть
+>   `--refresh offline` и `frozen`+`frozen_source=chunks`) документы не читаются, окно
+>   экстракции не нужно, и гейт публикует заметку «не проверял», а не отказ. Граница —
+>   источник корпуса, а не слово политики: `frozen`+`bytes` пере-извлекает байты и
+>   по-прежнему отказывает. Измерено 22.11.2026: до правки `run --refresh offline` на этом
+>   хосте падал с «budget=3229 MB … workers=0»; обходом было бы завышение
+>   `COHOUND_MEM_BUDGET_MB` (ложь о бюджете) или понижение `document_level` (смена оси
+>   измерения ради гейта).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:392-393,562,1168`), подключены в
 >   `core/pipeline/extract_consume.py:1279-1280`; видимая строка пропуска по бюджету —

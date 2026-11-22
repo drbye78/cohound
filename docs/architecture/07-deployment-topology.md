@@ -422,10 +422,10 @@ LLM-endpoint корп. облака — только в Z0.
    корне цепочкой app < run < site (`core/pipeline/corpus.py:1432`,
    `profiles=domain_profiles`), поэтому `domain_profiles.yaml` переопределяет уровень для
    конкретного хоста. Под `split` порты собираются **до** per-root резолва:
-   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3497`) отдаёт
+   `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3725`) отдаёт
    только app+run — и это сказано в самом коде: «per-root слой здесь не виден — порты
    собираются до per-root резолва (то же ограничение, что у ``pdf_pipeline`` выше)»
-   (`core/cli/wiring.py:3374-3376`). Итог: под `split` действуют app+run, per-root
+   (`core/cli/wiring.py:3665-3667`). Итог: под `split` действуют app+run, per-root
    переопределение — нет; под `local` действует вся цепочка. Это не «тихий успех» (непринятое
    значение нигде не выдаётся за применённое), но и не сообщается — поэтому пункт открыт, а не
    выдан за сделанный.
