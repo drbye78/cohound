@@ -19,8 +19,17 @@
     чанков не резалось из-за отсутствия точного среза.
 ``invariants``
     ``p1_violations`` — документы, где склейка текстов чанков после ограничителя не равна
-    склейке до него. Инвариант: **0** (P1). ``span_violations`` — куски, где
-    ``text`` не совпал со срезом ``[char_start:char_end]``. Инвариант: **0**.
+    склейке до него. Инвариант: **0** (P1). Сам инвариант «кусок — точный срез текста
+    документа» здесь **не** проверяется: из чанков документ не восстановить, если между
+    кусками есть пропуски, и прежняя проверка срезом от конкатенации давала ложные
+    нарушения (замер 22.11.2026: 5 243 из 50 813 при нуле настоящих). Его проверяет
+    ``scripts/check_chunk_slices.py`` — с текстом документа из сохранённых байтов.
+``scripts``
+    Тот же набор чисел, разрезанный по **доле CJK-символов в чанке**. Нужен потому, что
+    один коэффициент ток/симв по смешанному корпусу не отвечает ни на один вопрос: в
+    китайском корпусе живут SQL-примеры, таблицы и латинские идентификаторы, поэтому
+    средняя доля описывает смесь, а не язык. Границы разрезов — **представление**, а не
+    порог: ни одно правило от них не зависит.
 ``cost``
     Время и число вызовов токенизатора: цена ограничителя — измеренная величина, а не
     «быстро/медленно».
@@ -53,12 +62,52 @@ from core.adapters.token_limit import (
     TokenLimiter,
 )
 from core.ports.types import Chunk
+from core.util.cjk_lexical import iter_cjk_runs
+from core.util.document_formats import FAMILY_MARKDOWN, FAMILY_TEXT, textual_family
 
 #: Порог «обрывка»: тот же, что у ограничителя по умолчанию (публикуется отдельно).
 TINY_TOKENS = 64
 
 #: Порог публикуемого хвоста распределения — лимит замера, а не свойство чанкера.
 DEFAULT_TOKEN_LIMIT = 512
+
+#: Разрезы по доле CJK-символов, в порядке публикации.
+#:
+#: Это **представление**, а не порог: ни одно правило вердикта от разреза не зависит.
+#: Он существует потому, что коэффициент ток/симв по смешанному корпусу отвечает про
+#: смесь: в китайском корпусе живут SQL-примеры, таблицы и латинские идентификаторы, и
+#: средняя доля занижает коэффициент ровно на их объём.
+SCRIPT_BUCKETS: tuple[str, ...] = ("0", "(0,0.1]", "(0.1,0.5]", "(0.5,0.9]", "(0.9,1]")
+
+
+def cjk_share(text: str) -> float:
+    """Доля символов текста внутри прогонов CJK (Han/кана/хангыль).
+
+    Считается по **всем** символам, включая пробелы и разметку: это доля того, что
+    реально лежит в чанке. Диапазоны берутся у лексического контура
+    (:func:`core.util.cjk_lexical.iter_cjk_runs`), чтобы у «китайского» был один
+    источник правды, а не второй список код-поинтов внутри прибора.
+    """
+    if not text:
+        return 0.0
+    return sum(end - start for start, end in iter_cjk_runs(text)) / len(text)
+
+
+def script_bucket(share: float) -> str:
+    """Метка разреза для доли CJK. Границы включительны справа; ``0`` — отдельный разрез.
+
+    Ноль отделён намеренно: «в чанке нет ни одного иероглифа» и «иероглифов мало» — разные
+    факты, и сливать их значило бы растворить латинские чанки в китайских.
+    """
+    if share <= 0.0:
+        return "0"
+    if share <= 0.1:
+        return "(0,0.1]"
+    if share <= 0.5:
+        return "(0.1,0.5]"
+    if share <= 0.9:
+        return "(0.5,0.9]"
+    return "(0.9,1]"
 
 
 @dataclass
@@ -117,6 +166,11 @@ def _share(part: int, whole: int) -> float:
     return part / whole if whole else 0.0
 
 
+def _num(value: float | None) -> str:
+    """Число для человека: ``None`` — это «не измерено», а не ноль."""
+    return "—" if value is None else f"{value:.3f}"
+
+
 def _percentile(ordered: list[int], quantile: float) -> float:
     """Линейная интерполяция — та же формула, что у приборов чанкеров."""
     if not ordered:
@@ -131,8 +185,22 @@ def _percentile(ordered: list[int], quantile: float) -> float:
     return float(ordered[low]) + (float(ordered[high]) - float(ordered[low])) * weight
 
 
-def _family(extractor_version: str | None) -> str:
-    """Семейство по версии читателя: у плоского текста своя единица смысла."""
+def _family(url: str | None, extractor_version: str | None) -> str:
+    """Семейство **чанкера**: ``text`` (абзацный) против ``markdown`` (всё остальное).
+
+    Метка нужна для разреза «плоский текст против markdown/документов»: у них разные
+    бюджеты в символах. Версия читателя для этого не годится — ``.md`` читает
+    ``text-plain-2`` (тот же читатель, что у ``.txt``), а режет его markdown-чанкер:
+    замер 22.11.2026 — все 5 555 документов ZH-корпуса попали в «text» при том, что
+    чанкер у них markdown. Поэтому сначала адрес (тот же
+    :func:`core.util.document_formats.textual_family`, что у маршрутизатора), и только
+    если адрес молчит (HTML/PDF без суффикса) — версия читателя.
+    """
+    family = textual_family(url)
+    if family == FAMILY_TEXT:
+        return "text"
+    if family == FAMILY_MARKDOWN:
+        return "markdown"
     version = extractor_version or ""
     return "text" if version.startswith("text-plain") else "markdown"
 
@@ -204,6 +272,8 @@ def _measure_document(
     limit: int,
     before: dict[str, Distribution],
     after: dict[str, Distribution],
+    script_before: dict[str, Distribution],
+    script_after: dict[str, Distribution],
     totals: dict[str, int],
     invariant: dict[str, int],
     calls: int,
@@ -226,39 +296,41 @@ def _measure_document(
 
     if "".join(chunk.text for chunk in limited) != "".join(chunk.text for chunk in chunks):
         invariant["p1_violations"] += 1
-    document_text = "".join(chunk.text for chunk in chunks)
-    base = chunks[0].char_start or 0
-    for chunk in limited:
-        if chunk.char_start is None or chunk.char_end is None:
-            continue
-        if document_text[chunk.char_start - base : chunk.char_end - base] != chunk.text:
-            invariant["span_violations"] += 1
 
     counts_before: list[int] = []
+    buckets: list[str] = []
     for chunk in chunks:
         tokens = len(counter.token_ends(chunk.text))
         counts_before.append(tokens)
+        bucket = script_bucket(cjk_share(chunk.text))
+        buckets.append(bucket)
         before[family].add(tokens, len(chunk.text), limit)
+        script_before[bucket].add(tokens, len(chunk.text), limit)
 
     # Куски сгруппированы по родителю: ``chunk_no`` выходного списка сквозной, поэтому
     # принадлежность видна по префиксу ``chunk_id``.
     by_parent: dict[str, list[Chunk]] = defaultdict(list)
     for chunk in limited:
         by_parent[chunk.chunk_id.rsplit("#", 1)[0]].append(chunk)
-    for chunk, tokens in zip(chunks, counts_before, strict=True):
+    for chunk, tokens, bucket in zip(chunks, counts_before, buckets, strict=True):
         prefix = chunk.chunk_id.rsplit("#", 1)[0]
         pieces = by_parent.get(prefix, [])
         if len(pieces) == 1 and pieces[0].text == chunk.text:
             after[family].add(tokens, len(chunk.text), limit)
+            script_after[bucket].add(tokens, len(chunk.text), limit)
             continue
         for piece in pieces:
-            after[family].add(len(counter.token_ends(piece.text)), len(piece.text), limit)
+            piece_tokens = len(counter.token_ends(piece.text))
+            after[family].add(piece_tokens, len(piece.text), limit)
+            script_after[bucket].add(piece_tokens, len(piece.text), limit)
     return totals, invariant, calls
 
 
 def _report(
     before: dict[str, Distribution],
     after: dict[str, Distribution],
+    script_before: dict[str, Distribution],
+    script_after: dict[str, Distribution],
     *,
     limit: int,
     report: dict[str, Any],
@@ -268,6 +340,9 @@ def _report(
     declared: bool,
 ) -> dict[str, Any]:
     families = sorted(set(before) | set(after))
+    buckets = list(SCRIPT_BUCKETS) + sorted(
+        (set(script_before) | set(script_after)) - set(SCRIPT_BUCKETS)
+    )
     payload: dict[str, Any] = {
         "token_limit": limit,
         "token_limit_policy": TOKEN_LIMIT_POLICY,
@@ -280,6 +355,13 @@ def _report(
                 "after": after[family].summary(limit),
             }
             for family in families
+        },
+        "scripts": {
+            bucket: {
+                "before": script_before.get(bucket, Distribution()).summary(limit),
+                "after": script_after.get(bucket, Distribution()).summary(limit),
+            }
+            for bucket in buckets
         },
         "total": {
             "before": _merge(before, limit),
@@ -336,6 +418,22 @@ def _print_report(payload: dict[str, Any]) -> None:
             f"{after['tiny']} ({after['tiny_share']:.3%}); доля токенов "
             f"{before['tiny_token_share']:.3%} → {after['tiny_token_share']:.3%}"
         )
+    scripts = payload.get("scripts") or {}
+    if scripts:
+        print("")
+        print("разрезы по доле CJK-символов в чанке (границы — представление, не порог):")
+        for bucket, arms in scripts.items():
+            before = arms["before"]
+            after = arms["after"]
+            mean_chars = before["chars"] // before["chunks"] if before["chunks"] else 0
+            print(
+                f"  {bucket:10s} чанков {before['chunks']:6d} → {after['chunks']:6d}; "
+                f"ток/симв {_num(before['tokens_per_char'])} → "
+                f"{_num(after['tokens_per_char'])}; "
+                f">{payload['token_limit']}: {before['over_limit']} "
+                f"({before['over_limit_share']:.3%}) → {after['over_limit']} "
+                f"({after['over_limit_share']:.3%}); средняя длина {mean_chars} симв"
+            )
     total_before = payload["total"]["before"]
     total_after = payload["total"]["after"]
     print("")
@@ -351,10 +449,7 @@ def _print_report(payload: dict[str, Any]) -> None:
         f">лимита после {policy['over_limit']}, max {policy['max_tokens_after']}"
     )
     invariants = payload["invariants"]
-    print(
-        f"инварианты (цель 0): P1 {invariants['p1_violations']}, "
-        f"срез {invariants['span_violations']}"
-    )
+    print(f"инварианты (цель 0): P1 {invariants['p1_violations']}")
     cost = payload["cost"]
     print(
         f"цена: {cost['seconds']:.1f} с, вызовов токенизатора {cost['tokenizer_calls']} "
@@ -391,6 +486,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     conn.row_factory = sqlite3.Row
     before: dict[str, Distribution] = defaultdict(Distribution)
     after: dict[str, Distribution] = defaultdict(Distribution)
+    script_before: dict[str, Distribution] = defaultdict(Distribution)
+    script_after: dict[str, Distribution] = defaultdict(Distribution)
     totals: dict[str, int] = {
         "chunks_in": 0,
         "chunks_out": 0,
@@ -400,7 +497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "over_limit": 0,
         "max_tokens_after": 0,
     }
-    invariant = {"p1_violations": 0, "span_violations": 0}
+    invariant = {"p1_violations": 0}
     calls = 0
     documents = 0
     # Один проход по ``corpus_chunks``, а не запрос на документ: у ``corpus_chunks`` нет
@@ -409,7 +506,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Измерено 15.11.2026: три документа за 5 минут против секунд при одном проходе.
     try:
         rows = conn.execute(
-            "SELECT c.doc_id, d.extractor_version, c.chunk_id, c.chunk_no, c.text, "
+            "SELECT c.doc_id, c.url, d.extractor_version, c.chunk_id, c.chunk_no, c.text, "
             "c.heading_path, c.context_prefix, c.content_hash, c.char_start, c.char_end "
             "FROM corpus_chunks c JOIN corpus_docs d ON d.doc_id = c.doc_id "
             "ORDER BY c.doc_id, c.chunk_no"
@@ -431,6 +528,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         args.token_limit,
                         before,
                         after,
+                        script_before,
+                        script_after,
                         totals,
                         invariant,
                         calls,
@@ -440,7 +539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     exhausted = True
                     break
                 current_doc = doc_id
-                current_family = _family(row["extractor_version"])
+                current_family = _family(row["url"], row["extractor_version"])
                 chunks = []
             chunks.append(_chunk(row))
         if chunks and not exhausted:
@@ -452,6 +551,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.token_limit,
                 before,
                 after,
+                script_before,
+                script_after,
                 totals,
                 invariant,
                 calls,
@@ -464,6 +565,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     payload = _report(
         before,
         after,
+        script_before,
+        script_after,
         limit=args.token_limit,
         report=totals,
         invariant=invariant,
