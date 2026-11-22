@@ -281,13 +281,17 @@ def _retrieval_key_parts(
         return None, None, None, None
     profile = retrieval.profile or None
     cutoff = int(retrieval.cutoff_K) if retrieval.cutoff_K else None
-    # Тот же сериализатор, что у провенанса ячейки (``evaluate._provenance``): иначе
-    # ключ переноса и ячейка описывали бы условия по-разному (план 26 O2).
+    # Тот же сериализатор, что у провенанса ячейки (``evaluate._provenance``), и с тем же
+    # составом слагаемых: иначе ключ переноса и ячейка описывали бы условия по-разному
+    # (план 26 O2). ``query_lang`` добавлен вместе с полем в ``RetrievalResult``: он был
+    # пропущен здесь **и** там, а условие измерения одно, и разойтись эти две записи не
+    # могут — ровно на этом класс ошибок и стоит правило «один сериализатор».
     params = json.dumps(
         retrieval_params(
             profile=retrieval.profile,
             cutoff_k=retrieval.cutoff_K,
             rrf_k=retrieval.rrf_k,
+            query_lang=retrieval.query_lang or "all",
         ),
         ensure_ascii=False,
         sort_keys=True,

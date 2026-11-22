@@ -37,6 +37,7 @@ from core.domain import (
     Status,
 )
 from core.pipeline.carry_forward import (
+    _retrieval_key_parts,
     carry_forward_cell,
     cell_reuse_conditions,
     evidence_digest,
@@ -952,3 +953,34 @@ def test_evidence_digest_is_comparable_between_runs(
     second_evidence = second_store.iter_cell_evidence(RUN_2, PRODUCT, "param_alpha")
     assert evidence_digest(first_evidence) == evidence_digest(second_evidence)
     assert first_evidence[0].evidence_id != second_evidence[0].evidence_id
+
+
+def test_carry_key_params_match_cell_provenance() -> None:
+    """Строка параметров ретривала у ключа переноса и у ячейки — **одна и та же**.
+
+    Оба носителя описывают одно условие измерения (план 26 O2), и расхождение между ними
+    не падает, а тихо живёт: ключ переноса перестаёт совпадать с провенансом ячейки, и
+    перенос отвергается по причине, которой нет. Измерено 22.11.2026: в обоих местах
+    пропускался ``query_lang`` (провенанс подставлял дефолт ``all``), а после починки
+    одного места — только в ключе. Тест держит равенство, а не форму каждого.
+    """
+    from core.pipeline.evaluate import _provenance
+    from core.pipeline.retrieve import RetrievalResult
+
+    retrieval = RetrievalResult(
+        chunks=[],
+        profile="R0",
+        cutoff_K=10,
+        build_id="build-1",
+        rrf_k=48,
+        query_lang="en",
+    )
+
+    _build, _profile, cell_params = _provenance(retrieval)
+    _p, _k, key_params, _pb = _retrieval_key_parts(retrieval)
+
+    assert cell_params == key_params, (
+        "провенанс ячейки и ключ переноса описывают условия по-разному: "
+        f"{cell_params} против {key_params}"
+    )
+    assert json.loads(cell_params or "{}")["query_lang"] == "en"

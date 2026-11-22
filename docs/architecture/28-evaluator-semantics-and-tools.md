@@ -421,6 +421,13 @@ same thread`; `subject_mention` (читает только каталог, в st
 Регрессии — `test_retrieval_provenance_is_same_whether_from_holder_or_cells` (равенство
 двух путей) и `test_cell_provenance_carries_declared_query_language` (условие ячейки).
 
+Тот же класс нашёлся ещё раз, уже внутри одной правки: `carry_forward._retrieval_key_parts`
+строит строку параметров для **ключа переноса** и обещает «ту же формулу, что у провенанса
+ячейки». `query_lang` пропускался в обоих местах; починив только провенанс, я развёл бы две
+записи одного условия — и перенос отвергался бы по причине, которой нет. Регрессия —
+`test_carry_key_params_match_cell_provenance`: сверяет две строки на одном срезе, а не форму
+каждой.
+
 **Тот же класс, но хуже: чтение вне лока возвращало пустоту вместо материала.** Три метода
 окна (`_doc_id_by_version`, `document_tables`, `table_context`) брали соединение через
 `self._read(lambda reader: reader)` и исполняли запрос **снаружи** лока. Соединение открыто с
