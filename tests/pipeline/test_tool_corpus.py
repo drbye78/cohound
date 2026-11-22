@@ -434,3 +434,214 @@ def test_corpus_satisfies_port_contract() -> None:
     corpus = StoreToolCorpus(_FakeStore([]), "p1")
 
     assert isinstance(corpus, ToolCorpusPort)
+
+
+# --------------------------------------------------------------------------- #
+# Чтение из пула потоков: дефект, найденный живым прогоном 22.11.2026
+# --------------------------------------------------------------------------- #
+
+
+def test_read_from_worker_thread_works_on_file_db(tmp_path: Any) -> None:
+    """Окно читает корпус из **другого** потока, а не падает на ``check_same_thread``.
+
+    Измерено 22.11.2026 на прогоне ``ru-pg-dbms-2bcd38ddf99e``: **22 из 22** вызовов
+    ``expand_to_section``/``table_row`` вернули ``ok=False`` с
+    ``ProgrammingError: SQLite objects created in a thread can only be used in that same
+    thread``. Причина — инструменты исполняются в пуле оценщика, а соединение фазы
+    открыто с ``check_same_thread=True``. Тогда объявленный профиль исполнялся, а
+    материал не отдавал: трасса называла сбой, вердикт же выглядел как «инструмент не
+    помог».
+
+    Проверка идёт на **файловой** БД: у ``:memory:`` второе соединение увидело бы другую
+    базу, поэтому там окно намеренно остаётся на исходном хранилище и дефект не
+    воспроизводится. Отсюда и требование к тесту — реальный файл, а не заглушка.
+    """
+    import datetime as _dt
+    import threading
+
+    from core.domain import (
+        CorpusChunk,
+        CorpusDoc,
+        Focus,
+        RankingPolicy,
+        RunConfig,
+        RunMode,
+    )
+    from core.store.sqlite_store import SqliteStore
+
+    path = tmp_path / "run.db"
+    store = SqliteStore(path)
+    try:
+        store.create_run(
+            "run-thread",
+            RunConfig(
+                case_id="case",
+                anchor="p1",
+                cohort="cohort.yaml",
+                products=["p1"],
+                package="pkg",
+                focus=Focus(),
+                snapshot_date=_dt.date(2026, 1, 1),
+                mode=RunMode.STRICT,
+                ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+            ),
+        )
+        store.upsert_corpus_doc(
+            CorpusDoc(
+                doc_id="p1:d1",
+                product_id="p1",
+                url="https://docs.test/p1/d1",
+                content_hash="d1",
+            )
+        )
+        text = "| a | b |\n|---|---|\n| 1 | 2 |\n"
+        store.add_chunk(
+            CorpusChunk(
+                chunk_id="p1:dv_1:0",
+                doc_id="p1:d1",
+                product_id="p1",
+                chunk_no=0,
+                text=text,
+                content_hash="hash-0",
+                build_id="build-1",
+                char_start=0,
+                char_end=len(text),
+                # Адрес таблицы: без него ``table_context`` не читает соединение вовсе,
+                # и тест не проверил бы тот путь, который падал (``conn.execute``).
+                table_ref=TableRef("t0", 1, 2),
+            )
+        )
+
+        corpus = StoreToolCorpus(store, "p1")
+        seen: list[Any] = []
+        failures: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                seen.append(corpus.chunk("p1:dv_1:0"))
+                seen.append(corpus.table_context(["p1:dv_1:0"]))
+            except BaseException as exc:  # noqa: BLE001 — тест обязан увидеть причину
+                failures.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=30)
+
+        assert failures == [], f"чтение из воркера упало: {failures}"
+        assert seen[0] is not None, "чанк не прочитан из воркера"
+        assert seen[0].chunk_id == "p1:dv_1:0"
+        # ``table_context`` читает ``corpus_chunks`` через соединение окна — ровно тот
+        # путь, который падал на ``check_same_thread``. Пустой ответ здесь означал бы
+        # «соединение не открылось», то есть тот же дефект под другим видом.
+        addresses, _tables = seen[1]
+        assert addresses == {"p1:dv_1:0": TableRef("t0", 1, 2)}, addresses
+    finally:
+        corpus.close()
+        store.close()
+
+
+def test_concurrent_reads_never_return_empty_material(tmp_path: Any) -> None:
+    """Параллельные чтения возвращают материал, а не пустоту.
+
+    Дефект, измеренный 22.11.2026 на копии run-БД стенда (``ru-pg-dbms-2bcd38ddf99e``):
+    ``_doc_id_by_version``, ``document_tables`` и ``table_context`` брали соединение через
+    ``self._read(lambda reader: reader)`` и исполняли запрос **вне** лока окна. Соединение
+    открыто с ``check_same_thread=False``, то есть сериализация — обязанность окна, и
+    запрос, исполненный снаружи, делил его с чтением другого воркера. На 8 потоках это
+    дало **70 пустых** ``section_chunks`` из 600 и **68 пустых** ``table_context`` из 600
+    при материале, который есть. Пустой ответ не исключение: он читается как «в разделе
+    нет фрагментов» и уходит в промпт фактом.
+
+    Тест держит именно это свойство — **непустоту** на каждом чтении, а не отсутствие
+    исключения: ``check_same_thread``-ошибку ловит соседний тест, и она была лишь первой,
+    видимой формой дефекта. Файловая БД обязательна: на ``:memory:`` окно читает исходное
+    хранилище, и дефект не воспроизводится.
+    """
+    import datetime as _dt
+    import threading
+
+    from core.domain import (
+        CorpusChunk,
+        CorpusDoc,
+        Focus,
+        RankingPolicy,
+        RunConfig,
+        RunMode,
+    )
+    from core.store.sqlite_store import SqliteStore
+
+    path = tmp_path / "run.db"
+    store = SqliteStore(path)
+    try:
+        store.create_run(
+            "run-concurrent",
+            RunConfig(
+                case_id="case",
+                anchor="p1",
+                cohort="cohort.yaml",
+                products=["p1"],
+                package="pkg",
+                focus=Focus(),
+                snapshot_date=_dt.date(2026, 1, 1),
+                mode=RunMode.STRICT,
+                ranking_policy=RankingPolicy.CAPABILITY_RANKED,
+            ),
+        )
+        # Формы адреса — как в живом корпусе: ``chunk_id`` несёт версию (``dv_1``), а
+        # ``corpus_chunks.doc_id`` — ``product:content_hash``. Их связывает
+        # ``corpus_doc_version``; без этого отображения тест не увидел бы дефект вовсе —
+        # именно ложное «отображения нет» и уводило поиск на пустую форму адреса.
+        store.upsert_corpus_doc(
+            CorpusDoc(
+                doc_id="p1:d1",
+                product_id="p1",
+                url="https://docs.test/p1/d1",
+                content_hash="d1",
+            ),
+            doc_version_id="dv_1",
+        )
+        for number in range(3):
+            text = f"фрагмент {number}\n"
+            store.add_chunk(
+                CorpusChunk(
+                    chunk_id=f"p1:dv_1:{number}",
+                    doc_id="p1:d1",
+                    product_id="p1",
+                    chunk_no=number,
+                    text=text,
+                    content_hash=f"hash-{number}",
+                    build_id="build-1",
+                    char_start=0,
+                    char_end=len(text),
+                )
+            )
+
+        corpus = StoreToolCorpus(store, "p1")
+        empty: list[tuple[int, int]] = []
+        failures: list[BaseException] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            try:
+                for _ in range(40):
+                    chunks = len(corpus.document_chunks("p1:dv_1:0"))
+                    section = len(corpus.section_chunks("p1:dv_1:0"))
+                    addresses, _tables = corpus.table_context(["p1:dv_1:0"])
+                    with lock:
+                        if chunks != 3 or section != 3 or "p1:dv_1:0" not in addresses:
+                            empty.append((chunks, section))
+            except BaseException as exc:  # noqa: BLE001 — тест обязан увидеть причину
+                with lock:
+                    failures.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        assert failures == [], f"чтение упало: {failures}"
+        assert empty == [], f"пустые ответы на материале, который есть: {empty[:5]}"
+    finally:
+        corpus.close()
+        store.close()

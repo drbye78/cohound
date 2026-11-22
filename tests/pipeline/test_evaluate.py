@@ -499,6 +499,36 @@ def test_retrieval_provenance_lands_on_cell() -> None:
     assert "cutoff_K" in (outcome.cell.retrieval_params_json or "")
 
 
+def test_cell_provenance_carries_declared_query_language() -> None:
+    """Язык запросов — условие ячейки, а не дефолт модуля.
+
+    ``retrieval_params`` подставлял ``query_lang="all"`` по умолчанию, и провенанс ячейки
+    записывал ``all`` при объявленном ``en``: ``hound retry`` читает условия **отсюда**,
+    то есть повторил бы ячейку другим языком, чем она измерена. Найдено 22.11.2026 тестом,
+    сверяющим два пути до провенанса (держатель и ячейки).
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    retrievals = RetrievalResult(
+        chunks=[],
+        profile="R0",
+        cutoff_K=10,
+        build_id="build-42",
+        # ``rrf_k`` нарочно **не** дефолтный: провенанс обязан взять исполненное значение
+        # из среза, а не константу модуля — иначе повтор ячейки исполнил бы другое.
+        rrf_k=48,
+        query_lang="en",
+    )
+    outcome = _evaluate(data, evaluator, retrievals=retrievals)
+
+    params = json.loads(outcome.cell.retrieval_params_json or "{}")
+    assert params["query_lang"] == "en", params
+    assert params["rrf_k"] == 48, params
+    # Остальные слагаемые — те же, что у контракта: усечённая форма расходилась бы с
+    # ``run_id``, и провенанс отвечал бы на более узкий вопрос, чем идентичность.
+    assert params["max_queries"] == 3 and params["pool_multiplier"] == 1, params
+
+
 def test_store_persists_cell_and_evidence() -> None:
     data = _data()
     evaluator = _ScriptedEvaluator([_ok_output(data)])

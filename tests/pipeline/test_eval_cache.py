@@ -40,6 +40,7 @@ from core.domain import (
 )
 from core.domain.anchors import ResolvedSource
 from core.domain.scoring import scoring_policy_spec
+from core.domain.tools import ToolProfile, ToolSpec
 from core.pipeline.eval_cache import (
     ENVELOPE_FORMAT,
     EVAL_CACHE_FORMAT,
@@ -52,6 +53,7 @@ from core.pipeline.eval_cache import (
 from core.pipeline.evaluate import evaluate_cell
 from core.pipeline.prompt import compile_prompt
 from core.pipeline.retrieve import RetrievalResult
+from core.ports.llm import LLMResponse, ToolTurn
 from core.store.sqlite_store import SqliteStore
 from core.util.hashing import content_hash
 from tests.pipeline.test_evaluate import (
@@ -974,3 +976,66 @@ def test_cached_unknown_carries_reason_and_satisfies_i3(tmp_path: Path) -> None:
     assert (second.cell.evidence_scope.reason or "").strip()
 
     assert check_unknown_exhaustion(second.cell, None) == []
+
+
+class _SpecOnlyTools:
+    """``LocalToolPort``-двойник: набор объявлен, вызовов нет (они тут не проверяются)."""
+
+    def specs(self):  # noqa: ANN201 - форма порта, тип не нужен тесту ключа
+        return (ToolSpec(name="expand_to_section", description="Раздел документа."),)
+
+    def invoke(self, invocation):  # noqa: ANN001, ANN201 - см. выше
+        raise AssertionError("в этом тесте инструмент не вызывается")
+
+
+class _ImmediateCaller:
+    """``LocalToolCallerPort``-двойник: сразу вердикт, без хода с вызовом."""
+
+    def __init__(self, output) -> None:  # noqa: ANN001 - LLMCellOutput фикстуры
+        self._output = output
+        self.requests: list[object] = []
+
+    def turn(self, req):  # noqa: ANN001, ANN201
+        self.requests.append(req)
+        return ToolTurn(
+            final=LLMResponse(
+                output=self._output, raw=self._output.model_dump_json(), prompt_hash="h"
+            )
+        )
+
+
+def test_tool_profile_change_busts_key(tmp_path: Path) -> None:
+    """Профиль инструментов — условие измерения, значит он в ключе кэша.
+
+    Иначе вердикт, полученный **без** инструментов, обслужил бы прогон **с** ними: тот же
+    `run_id` (профиль — 37-е поле контракта), но другое исполнение.
+
+    **Что этот тест доказывает и чего не доказывает.** Доказывает наблюдаемое: смена профиля
+    не переиспользует вердикт. Не доказывает, что именно поле ``tool_profile`` в ``echo``
+    это обеспечивает, — проверено откатом: при снятом поле тест **проходит**, потому что
+    промпт профили различает сам (слот ``{{TOOLS}}`` меняет текст, а с ним
+    ``prompt_sha256``). Поле в ``echo`` оставлено как страховка по правилу «ключ покрывает
+    условие», а не как единственный механизм: полагаться на то, что два условия случайно
+    дают разный текст, — совпадение, которое снимет первое же изменение шаблона.
+    """
+    data = _data()
+    evaluator = _ScriptedEvaluator([_ok_output(data)])
+    cache = EvalVerdictCache(tmp_path / "cache")
+    profile = ToolProfile(name="t1", tools=("expand_to_section",), max_calls=3)
+    output = _ok_output(data)
+
+    _evaluate(data, evaluator, cache)
+    caller = _ImmediateCaller(output)
+    _evaluate(
+        data,
+        evaluator,
+        cache,
+        tool_profile=profile,
+        tool_caller=caller,
+        local_tools=_SpecOnlyTools(),
+    )
+
+    # Считаются вызовы **транспорта инструментов**: при совпадении ключа вердикт взялся бы
+    # из кэша и диалог не начался бы вовсе — тогда список пуст, и тест падает.
+    assert len(caller.requests) == 1, "смена профиля обязана сменить ключ кэша"
+    assert len(evaluator.calls) == 1, "tool-режим идёт своим транспортом, не complete"

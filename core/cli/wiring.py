@@ -126,12 +126,14 @@ from core.config.deploy import (
 )
 from core.config.domain_profiles import DomainProfile
 from core.domain.enums import (
+    CrawlCorpusSource,
     DocumentLevel,
     EmbedDevice,
     EmbedPrecision,
     PdfDevice,
     PdfPipeline,
     ReasoningEffort,
+    RefreshPolicy,
 )
 from core.domain.models import CrawlRunConfig, EmbedRunConfig
 from core.domain.scoring import endpoint_host_notices
@@ -149,6 +151,7 @@ from core.pipeline.crawl_frontier import (
     resolve_pdf_device,
 )
 from core.pipeline.extraction_runtime import ExtractionPool
+from core.pipeline.refresh_modes import FrozenSourceArg, dispatch_refresh
 from core.pipeline.resources import (
     MEM_BUDGET_ENV,
     PARENT_FLOOR_MB,
@@ -2835,6 +2838,8 @@ def preflight_extraction_budget(
     profiles: Mapping[str, DomainProfile],
     mem_budget_mb: int | None,
     derive_extract_workers: bool,
+    refresh_policy: RefreshPolicy | str | None = None,
+    frozen_source: FrozenSourceArg = None,
 ) -> tuple[MemoryBudgetError | None, tuple[str, ...]]:
     """Preflight §3.3: отказ начинать заведомо невозможную конфигурацию экстракции.
 
@@ -2854,6 +2859,24 @@ def preflight_extraction_budget(
     :returns: ``(error | None, warnings)`` — ``error`` несёт числа
         (:meth:`MemoryBudgetError.describe`), ``warnings`` — тексты для ``errors``/логов.
     """
+    # Извлечения не будет — проверять нечего. Гейт считает окно под **документную**
+    # экстракцию, а при ``offline`` (и ``frozen`` с ``frozen_source=chunks``) корпус
+    # собирается из durable-чанков (`dispatch_refresh(...).corpus_source is CHUNKS`),
+    # то есть ни один документ не читается. Прежде отказ срабатывал и здесь: на этом хосте
+    # `run --refresh offline` падал с «budget=3229 MB … workers=0» (измерено 22.11.2026),
+    # хотя единственная работа прогона — оценка по уже нарезанному корпусу. Отказ в
+    # конфигурации, которая не будет исполняться, — не предохранитель, а помеха: он
+    # вынуждал бы завышать `COHOUND_MEM_BUDGET_MB` (то есть объявлять ложь о бюджете) или
+    # понижать уровень, меняя ось измерения ради обхода гейта. Соседний
+    # :func:`preflight_network` политику уже учитывает — это та же граница, а не новое
+    # исключение.
+    if refresh_policy is not None:
+        execution = dispatch_refresh(refresh_policy, frozen_source=frozen_source)
+        if execution.corpus_source is CrawlCorpusSource.CHUNKS:
+            return None, (
+                "memory: бюджет извлечения не проверялся — корпус берётся из чанков "
+                f"(refresh={RefreshPolicy(refresh_policy).value}), документы не читаются",
+            )
     error: MemoryBudgetError | None = None
     warnings: list[str] = []
     seen: set[tuple[int, str]] = set()

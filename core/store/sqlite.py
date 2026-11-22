@@ -500,13 +500,13 @@ CREATE TABLE IF NOT EXISTS cells (
     absence_as_of     TEXT,
     primary_evidence_id TEXT,
     reviewed_by       TEXT,
-    -- 09 §10 (схема cell-reuse-3): происхождение ячейки. ``observed`` — вердикт получен
+    -- 09 §10 (схема cell-reuse-4): происхождение ячейки. ``observed`` — вердикт получен
     -- в этом прогоне, ``carried`` — перенесён из ``carried_from_run_id`` по совпадению
     -- ``cell_reuse_key``. Дефолт ``observed`` семантически верен и для строк, записанных
     -- до появления колонки: они действительно были измерены, поэтому backfill не нужен.
     measurement_origin TEXT NOT NULL DEFAULT 'observed',  -- observed|carried
     carried_from_run_id TEXT,                           -- NULL ⟺ measurement_origin=observed
-    cell_reuse_key    TEXT,                             -- ключ переноса (cell-reuse-3); NULL = не вычислялся
+    cell_reuse_key    TEXT,                             -- ключ переноса (cell-reuse-4); NULL = не вычислялся
     updated_at        TEXT,
     PRIMARY KEY (run_id, product_id, param_id),
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
@@ -984,7 +984,9 @@ class StoreNotInitialized(FileNotFoundError):
     code = "not_found"
 
 
-def connect_read_only(db_path: str | Path = ":memory:") -> sqlite3.Connection:
+def connect_read_only(
+    db_path: str | Path = ":memory:", *, check_same_thread: bool = True
+) -> sqlite3.Connection:
     """Открывает **существующую** БД только на чтение: без каталога, DDL и миграций.
 
     Отличие от :func:`connect`: тот создаёт файл, каталог и применяет ``DDL`` — поэтому
@@ -1008,6 +1010,12 @@ def connect_read_only(db_path: str | Path = ":memory:") -> sqlite3.Connection:
 
     :param db_path: путь к существующему файлу БД либо ``":memory:"`` (последний
         создаётся в памяти процессом — на диске ничего не появляется).
+    :param check_same_thread: разрешено ли пользоваться соединением из другого потока.
+        По умолчанию ``True`` — драйвер сам ловит гонку. ``False`` нужен только
+        **читателю**, который обязан сам сериализовать доступ (единственное такое место —
+        окно локальных инструментов оценщика: оно читает корпус из пула потоков и держит
+        свой ``threading.Lock``). Писатель остаётся однопоточным: ``False`` здесь не
+        ослабляет «один писатель в store», потому что ``mode=ro`` писать не может.
     :raises StoreNotInitialized: файла нет (читатель его не создаёт).
     :raises SchemaVersionMismatch: файл объявляет другую ``schema_version``.
     """
@@ -1020,7 +1028,11 @@ def connect_read_only(db_path: str | Path = ":memory:") -> sqlite3.Connection:
             f"БД прогона не найдена: {path} — read-only команда файл не создаёт "
             "(проверьте run_id/--runs-dir/--db)"
         )
-    conn = sqlite3.connect(f"file:{path.absolute().as_posix()}?mode=ro", uri=True)
+    conn = sqlite3.connect(
+        f"file:{path.absolute().as_posix()}?mode=ro",
+        uri=True,
+        check_same_thread=check_same_thread,
+    )
     conn.row_factory = sqlite3.Row
     try:
         # ``busy_timeout`` — не запись, а ожидание чужой блокировки: живой писатель держит

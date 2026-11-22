@@ -38,9 +38,11 @@ I17 не по решению, а по возможности. Здесь окн�
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
-from collections.abc import Sequence
-from typing import Any
+import threading
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar, cast
 
 from core.domain.doc_tables import (
     ExtractedTable,
@@ -54,6 +56,8 @@ from core.ports.store import StorePort
 from core.ports.types import Chunk
 
 __all__ = ["HEADING_PATH_SEP", "StoreToolCorpus"]
+
+_T = TypeVar("_T")
 
 #: Разделитель пути заголовков в ``heading_path``.
 #:
@@ -92,6 +96,127 @@ class StoreToolCorpus:
             )
         self._store = store
         self._product_id = str(product_id)
+        #: Соединение чтения **окна** (см. :meth:`_reader`).
+        self._reader_store: StorePort | None = None
+        #: Сериализация чтений: соединение открыто с ``check_same_thread=False``.
+        #: ``RLock``, а не ``Lock``: адрес документа читается внутри ``document_tables``,
+        #: то есть чтение вкладывается в чтение того же потока, и нереентерабельный лок
+        #: остановил бы его навсегда. Межпоточная сериализация от этого не слабеет:
+        #: повторный вход возможен только из потока, который лок уже держит.
+        self._lock = threading.RLock()
+        #: Создание читателя — **свой** лок. Два лока, а не один: :meth:`_read` держит
+        #: ``_lock`` и зовёт :meth:`_reader`, поэтому общий нереентерабельный лок
+        #: заблокировал бы сам себя (поймано тестом: прогон набора повис до таймаута).
+        self._init_lock = threading.Lock()
+
+    def _reader(self) -> StorePort:
+        """Хранилище для чтения из **любого** потока (одно на окно, доступ сериализован).
+
+        Зачем своё соединение. Инструменты исполняются в пуле оценщика
+        (``ThreadPoolExecutor`` в ``evaluate_batch`` и в пути ремонта), а соединение
+        ``SqliteStore`` открыто с ``check_same_thread=True`` — читать из воркера нельзя.
+        Измерено 22.11.2026 на живом прогоне ``ru-pg-dbms-2bcd38ddf99e``: **22 из 22**
+        вызовов ``expand_to_section``/``table_row`` вернули ``ok=False`` с
+        ``ProgrammingError: SQLite objects created in a thread can only be used in that
+        same thread`` — то есть объявленный профиль исполнялся, а материал не отдавал.
+        Трасса это назвала (``cell_tool_calls``), и именно поэтому дефект виден: без неё
+        «инструмент не помог» и «инструмент не работал» были бы одним фактом.
+
+        Почему это **не** нарушает «один писатель в store». Соединение открывается
+        ``read_only=True`` (``mode=ro``) — писать оно не может by construction, а не по
+        договорённости; право записи остаётся у единственного писателя фазы. Драйверное
+        ограничение снимается ровно настолько, насколько нужно читателю, и компенсируется
+        локом: **каждое** чтение идёт под :attr:`_lock`, поэтому соединение не бывает
+        использовано двумя потоками одновременно.
+
+        Одно соединение на окно, а не на поток, — по цене: пул пересоздаётся на батч, и
+        соединение на поток копилось бы с числом батчей, а не продуктов.
+
+        ``:memory:`` — исключение, названное явно: второе соединение увидело бы **другую**
+        пустую БД, поэтому в памяти возвращается исходное хранилище. Там инструменты
+        исполняются в одном потоке (тесты), и ``check_same_thread`` не срабатывает.
+        """
+        if self._reader_store is not None:
+            return self._reader_store
+        with self._init_lock:
+            if self._reader_store is not None:
+                return self._reader_store
+            base = self._store
+            db_path = getattr(base, "db_path", None)
+            if db_path is None or str(db_path) == ":memory:":
+                self._reader_store = base
+            else:
+                # Конструктор того же класса, что писатель: окно обязано читать **тот же**
+                # файл, поэтому фабрика не параметр, а следствие типа хранилища. Каст
+                # явный: ``StorePort`` — протокол без конструктора, и «создать такой же»
+                # выражается только так. Ошибка здесь видна сразу — неверный класс упадёт
+                # на первом чтении, а не даст тихий пустой ответ.
+                factory = cast(
+                    "Callable[..., StorePort]", type(base)
+                )
+                self._reader_store = factory(
+                    db_path, read_only=True, check_same_thread=False
+                )
+            return self._reader_store
+
+    def _read(self, action: Callable[[StorePort], _T]) -> _T:
+        """Выполняет чтение под локом окна (единственная точка доступа к читателю).
+
+        Лок обязателен: соединение читателя открыто с ``check_same_thread=False``, и без
+        сериализации два воркера могли бы войти в него одновременно. Чтения короткие
+        (индексированные запросы), поэтому очередь на локе — цена, а не узкое место.
+        """
+        with self._lock:
+            return action(self._reader())
+
+    def _read_conn(self, action: Callable[[sqlite3.Connection], _T]) -> _T | None:
+        """SQL-чтение под локом окна; ``None`` — у хранилища нет соединения.
+
+        Почему нельзя «взять соединение и выполнить запрос снаружи». Соединение читателя
+        открыто с ``check_same_thread=False``, то есть драйвер **не** ловит гонку сам:
+        сериализация — обязанность окна. Запрос, исполненный вне :attr:`_lock`, делит
+        соединение с чтением другого воркера. Измерено 22.11.2026 на копии run-БД стенда
+        (``ru-pg-dbms-2bcd38ddf99e``), 8 потоков: **70 из 600** чтений ``section_chunks``
+        вернули пустой раздел, **68 из 600** — пустой ``table_context`` на адресах, где
+        материал есть. Пустой ответ не исключение: он читается как «в разделе нет
+        фрагментов» и уходит в промпт как факт. Причина пустоты названа: ``_doc_id_by_version``
+        (и два других запроса) исполнялись вне лока, ``doc_id`` по версии документа
+        иногда не находился, и ``document_chunks`` искал чанки по форме адреса, которой
+        в ``corpus_chunks.doc_id`` нет — то есть по заведомо пустому множеству.
+
+        Поэтому весь SQL идёт **здесь**: один вход в лок на логическое чтение, и ни одна
+        строка запроса не исполняется вне его. ``None`` — объявленный ответ хранилища без
+        соединения (двойник в тестах, иная реализация порта), а не сбой.
+        """
+        def run(reader: StorePort) -> _T | None:
+            conn = getattr(reader, "conn", None)
+            if conn is None:
+                return None
+            return action(conn)
+
+        return self._read(run)
+
+    def close(self) -> None:
+        """Закрывает соединение чтения окна (идемпотентно).
+
+        Окно живёт на продукт в пределах фазы, а пул потоков пересоздаётся на батч;
+        без закрытия число соединений росло бы с числом батчей. Ошибка закрытия не
+        поднимается: она ничего не меняет в результате чтения, а падение на уборке
+        скрыло бы вердикт ячейки.
+        """
+        # Порядок локов тот же, что в :meth:`_read` (сначала ``_lock``, затем
+        # ``_init_lock``) — иначе закрытие и ленивое создание могли бы встать друг на
+        # друга. Здесь он важен и по существу: ждём in-flight чтения, потом забираем
+        # читателя, чтобы не закрыть соединение под работающим запросом.
+        with self._lock, self._init_lock:
+            reader, self._reader_store = self._reader_store, None
+        if reader is None or reader is self._store:
+            return
+        conn = getattr(reader, "conn", None)
+        if conn is None:
+            return
+        with contextlib.suppress(sqlite3.Error):
+            conn.close()
 
     # -- публичный контракт порта ---------------------------------------- #
 
@@ -99,7 +224,7 @@ class StoreToolCorpus:
         """Чанк по адресу; ``None`` — адрес чужой или его нет в корпусе прогона."""
         if not self._owns(chunk_id):
             return None
-        chunk = self._store.get_chunk(chunk_id)
+        chunk = self._read(lambda reader: reader.get_chunk(chunk_id))
         if chunk is None or not self._owns(chunk.chunk_id):
             return None
         return chunk
@@ -116,12 +241,21 @@ class StoreToolCorpus:
         for address in self._document_addresses(chunk_id):
             found = [
                 candidate
-                for candidate in self._store.iter_chunks_by_doc(address)
+                for candidate in self._chunks_of_document(address)
                 if self._owns(candidate.chunk_id)
             ]
             if found:
                 return tuple(sorted(found, key=lambda c: (c.chunk_no, c.chunk_id)))
         return ()
+
+    def _chunks_of_document(self, address: str) -> tuple[Chunk, ...]:
+        """Чтение документа по одному адресу под локом окна.
+
+        Вынесено в метод, а не в лямбду: аргумент цикла, захваченный замыканием, читал бы
+        последнее значение (``B023``), а ``lambda reader, address=…`` не выводится mypy.
+        Один именованный вызов решает оба.
+        """
+        return self._read(lambda reader: tuple(reader.iter_chunks_by_doc(address)))
 
     def section_chunks(self, chunk_id: str) -> Sequence[Chunk]:
         """Чанки **поддерева** раздела адресованного чанка (пусто — адреса нет).
@@ -166,22 +300,12 @@ class StoreToolCorpus:
         """
         if self.chunk(chunk_id) is None:
             return None
-        conn = getattr(self._store, "conn", None)
-        if conn is None:
-            return None
-        for address in self._document_addresses(chunk_id):
-            try:
-                row = conn.execute(
-                    "SELECT tables FROM corpus_docs WHERE doc_id = ?", (address,)
-                ).fetchone()
-            except sqlite3.Error:
-                # Колонки нет (файл прошлой схемы) или таблица не читается: «читатель
-                # таблиц не даёт» — объявленный ответ, а не сбой инструмента.
-                return None
-            if row is None:
-                continue
-            return tables_from_json(_column(row, "tables", 0))
-        return None
+        # Адрес документа разрешается **до** входа в чтение: он сам читает
+        # ``corpus_doc_version``, и вложенный ``_read`` — это второй вход в лок (``RLock``
+        # его допускает), но порядок «сначала адрес, потом запрос» делает чтение
+        # предсказуемым и не держит лок на время разбора адреса.
+        addresses = self._document_addresses(chunk_id)
+        return self._read_conn(lambda conn: _tables_for(conn, addresses))
 
     def table_context(
         self, chunk_ids: Sequence[str]
@@ -213,62 +337,17 @@ class StoreToolCorpus:
         (:func:`table_ref_from_json`/:func:`tables_from_json` возвращают ``None``), а не
         исключением: промпт не должен зависеть от целостности колонки.
         """
-        conn = getattr(self._store, "conn", None)
         owned = self._owned_ids(chunk_ids)
-        if conn is None or not owned:
+        if not owned:
+            return {}, {}
+        # Оба запроса — под одним входом в лок: они описывают одно чтение, и разрывать
+        # его локом между ними значило бы отдавать адреса без объектов по чужой вине.
+        result = self._read_conn(lambda conn: _table_context_for(conn, owned, self._owns))
+        if result is None:
             # Хранилище без соединения (фейк в тестах, иная реализация порта) адресов не
             # отдаёт: «неизвестно» — объявленный ответ, а не сбой.
             return {}, {}
-        try:
-            rows = conn.execute(
-                "SELECT chunk_id, doc_id, table_ref FROM corpus_chunks"  # noqa: S608 - плейсхолдеры по числу адресов, значения — bind
-                f" WHERE chunk_id IN ({', '.join('?' for _ in owned)})",
-                tuple(owned),
-            ).fetchall()
-        except sqlite3.Error:
-            # Колонки ``table_ref`` нет (файл прошлой схемы) или таблица не читается.
-            return {}, {}
-        addresses: dict[str, TableRef | None] = {}
-        #: ``corpus_chunks.doc_id`` → адрес документа из ``chunk_id`` (первый компонент ключа).
-        #: Один документ может быть адресован несколькими ``chunk_id``: адрес из ``chunk_id``
-        #: у них один и тот же, поэтому первая встреченная форма и запоминается.
-        key_of_doc: dict[str, str] = {}
-        documents: list[str] = []
-        for row in rows:
-            chunk_id = _column(row, "chunk_id", 0)
-            if not self._owns(chunk_id):
-                continue
-            ref = table_ref_from_json(_column(row, "table_ref", 2))
-            addresses[str(chunk_id)] = ref
-            doc_id = _column(row, "doc_id", 1)
-            if ref is None or not doc_id:
-                continue
-            key_of_doc.setdefault(str(doc_id), _document_id(str(chunk_id)))
-            if str(doc_id) not in documents:
-                documents.append(str(doc_id))
-        if not documents:
-            return addresses, {}
-        try:
-            doc_rows = conn.execute(
-                "SELECT doc_id, tables FROM corpus_docs"  # noqa: S608 - плейсхолдеры по числу адресов, значения — bind
-                f" WHERE doc_id IN ({', '.join('?' for _ in documents)})",
-                tuple(documents),
-            ).fetchall()
-        except sqlite3.Error:
-            return addresses, {}
-        tables: dict[TableKey, ExtractedTable] = {}
-        for row in doc_rows:
-            doc_id = _column(row, "doc_id", 0)
-            if not doc_id or str(doc_id) not in documents:
-                continue
-            document = key_of_doc.get(str(doc_id)) or ""
-            if not document:
-                # ``chunk_id`` не разобрался в документ — ключ был бы выдуман (промпт ищет
-                # по ``_document_id``), поэтому таблицы этого документа не кладутся вовсе.
-                continue
-            for table in tables_from_json(_column(row, "tables", 1)) or ():
-                tables[(document, table.table_id)] = table
-        return addresses, tables
+        return result
 
     # -- внутреннее ------------------------------------------------------- #
 
@@ -306,27 +385,119 @@ class StoreToolCorpus:
         read-only файле прошлой версии и нет у хранилища без соединения — тогда ``None``,
         и вызывающий остаётся с формой версии (объявленный фолбэк, не догадка).
         """
-        conn = getattr(self._store, "conn", None)
-        if conn is None:
-            return None
         prefix = f"{self._product_id}:"
         if not address.startswith(prefix):
             return None
         version = address[len(prefix) :]
         if not version:
             return None
+        # Запрос — **под локом окна** (см. :meth:`_read_conn`). Исполненный снаружи, он
+        # делит соединение с чтением другого воркера, и ответ «отображения нет» бывает
+        # ложным: тогда адрес документа остаётся формой версии, а ``corpus_chunks.doc_id``
+        # хранит форму хеша — поиск идёт по заведомо пустому множеству, и раздел
+        # выглядит пустым (замер — в докстроке ``_read_conn``).
+        def lookup(conn: sqlite3.Connection) -> str | None:
+            try:
+                row = conn.execute(
+                    "SELECT doc_id FROM corpus_doc_version"
+                    " WHERE product_id = ? AND doc_version_id = ?",
+                    (self._product_id, version),
+                ).fetchone()
+            except sqlite3.Error:
+                return None
+            if row is None:
+                return None
+            value = _column(row, "doc_id", 0)
+            return str(value) if value else None
+
+        return self._read_conn(lookup)
+
+
+def _table_context_for(
+    conn: sqlite3.Connection,
+    owned: Sequence[str],
+    owns: Callable[[str], bool],
+) -> tuple[dict[str, TableRef | None], dict[TableKey, ExtractedTable]]:
+    """Тело :meth:`StoreToolCorpus.table_context`: два запроса одного чтения.
+
+    Вынесено из метода, чтобы **всё** чтение шло под одним входом в лок окна
+    (:meth:`StoreToolCorpus._read_conn`): соединение открыто с ``check_same_thread=False``,
+    и запрос, исполненный снаружи, делит его с чтением другого воркера — тогда ответ
+    бывает пустым на материале, который есть (замер — в докстроке ``_read_conn``).
+    ``owns`` передаётся функцией, а не окном: модульная функция не держит ссылку на
+    хранилище и не может прочитать чужой продукт (I17).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT chunk_id, doc_id, table_ref FROM corpus_chunks"  # noqa: S608 - плейсхолдеры по числу адресов, значения — bind
+            f" WHERE chunk_id IN ({', '.join('?' for _ in owned)})",
+            tuple(owned),
+        ).fetchall()
+    except sqlite3.Error:
+        # Колонки ``table_ref`` нет (файл прошлой схемы) или таблица не читается.
+        return {}, {}
+    addresses: dict[str, TableRef | None] = {}
+    #: ``corpus_chunks.doc_id`` → адрес документа из ``chunk_id`` (первый компонент ключа).
+    #: Один документ может быть адресован несколькими ``chunk_id``: адрес из ``chunk_id``
+    #: у них один и тот же, поэтому первая встреченная форма и запоминается.
+    key_of_doc: dict[str, str] = {}
+    documents: list[str] = []
+    for row in rows:
+        chunk_id = _column(row, "chunk_id", 0)
+        if not owns(str(chunk_id)):
+            continue
+        ref = table_ref_from_json(_column(row, "table_ref", 2))
+        addresses[str(chunk_id)] = ref
+        doc_id = _column(row, "doc_id", 1)
+        if ref is None or not doc_id:
+            continue
+        key_of_doc.setdefault(str(doc_id), _document_id(str(chunk_id)))
+        if str(doc_id) not in documents:
+            documents.append(str(doc_id))
+    if not documents:
+        return addresses, {}
+    try:
+        doc_rows = conn.execute(
+            "SELECT doc_id, tables FROM corpus_docs"  # noqa: S608 - плейсхолдеры по числу адресов, значения — bind
+            f" WHERE doc_id IN ({', '.join('?' for _ in documents)})",
+            tuple(documents),
+        ).fetchall()
+    except sqlite3.Error:
+        return addresses, {}
+    tables: dict[TableKey, ExtractedTable] = {}
+    for row in doc_rows:
+        doc_id = _column(row, "doc_id", 0)
+        if not doc_id or str(doc_id) not in documents:
+            continue
+        document = key_of_doc.get(str(doc_id)) or ""
+        if not document:
+            # ``chunk_id`` не разобрался в документ — ключ был бы выдуман (промпт ищет
+            # по ``_document_id``), поэтому таблицы этого документа не кладутся вовсе.
+            continue
+        for table in tables_from_json(_column(row, "tables", 1)) or ():
+            tables[(document, table.table_id)] = table
+    return addresses, tables
+
+
+def _tables_for(
+    conn: sqlite3.Connection, addresses: Sequence[str]
+) -> tuple[ExtractedTable, ...] | None:
+    """Тело :meth:`StoreToolCorpus.document_tables`: таблицы первого найденного документа.
+
+    ``None`` — колонки нет или она не читается («читатель таблиц не даёт»); ``()`` —
+    документ найден, таблиц в нём нет. Различие объявлено в ``core/domain/doc_tables.py``.
+    """
+    for address in addresses:
         try:
             row = conn.execute(
-                "SELECT doc_id FROM corpus_doc_version"
-                " WHERE product_id = ? AND doc_version_id = ?",
-                (self._product_id, version),
+                "SELECT tables FROM corpus_docs WHERE doc_id = ?", (address,)
             ).fetchone()
         except sqlite3.Error:
             return None
         if row is None:
-            return None
-        value = _column(row, "doc_id", 0)
-        return str(value) if value else None
+            continue
+        return tables_from_json(_column(row, "tables", 0))
+    return None
 
 
 def _in_section(candidate: str, heading: str) -> bool:

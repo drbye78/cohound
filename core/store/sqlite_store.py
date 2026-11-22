@@ -130,7 +130,7 @@ _CELL_COLUMNS = (
     #: Пишется **слиянием** с уже записанным (``_merge_validation_notes``), поэтому
     #: повторная оценка при resume не теряет прежнюю причину.
     "validation_notes",
-    #: 09 §10 (схема ``cell-reuse-3``): происхождение ячейки. ``observed`` — измерена в
+    #: 09 §10 (схема ``cell-reuse-4``): происхождение ячейки. ``observed`` — измерена в
     #: этом прогоне, ``carried`` — перенесена из ``carried_from_run_id``. ``cell_reuse_key``
     #: — ключ, которым помечена ячейка (``NULL`` — не вычислялся: ячейка высокого
     #: источника, ``failed`` или модульный вызов без условий переноса).
@@ -363,13 +363,33 @@ class SqliteStore:
         (:func:`core.store.sqlite.connect_read_only`): файл/каталог не создаются, ``DDL``
         и миграции не применяются, запись падает ошибкой SQLite. Гейт версии схемы
         действует как обычно.
+    :param check_same_thread: разрешено ли пользоваться соединением из другого потока.
+        По умолчанию ``True``. ``False`` осмысленен только вместе с ``read_only`` и только
+        для читателя, который сам сериализует доступ: так устроено окно локальных
+        инструментов оценщика (``core/pipeline/tool_corpus.py``) — оно читает корпус из
+        пула потоков. Писатель остаётся однопоточным.
     """
 
-    def __init__(self, db_path: str | Path = ":memory:", *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        *,
+        read_only: bool = False,
+        check_same_thread: bool = True,
+    ) -> None:
+        if not check_same_thread and not read_only:
+            # Ослабление драйвера без ``mode=ro`` открыло бы запись из потоков — то есть
+            # сняло бы «один писатель в store» ради удобства. Отказ, а не предупреждение.
+            raise ValueError(
+                "SqliteStore: check_same_thread=False допустим только с read_only=True — "
+                "иначе соединение стало бы многопоточным писателем"
+            )
         self.db_path = db_path
         self.read_only = read_only
         self.conn: sqlite3.Connection = (
-            connect_read_only(db_path) if read_only else connect(db_path)
+            connect_read_only(db_path, check_same_thread=check_same_thread)
+            if read_only
+            else connect(db_path)
         )
         #: Кэш фактических колонок таблиц (см. :meth:`_readable`).
         self._present_columns: dict[str, frozenset[str]] = {}
@@ -1206,6 +1226,30 @@ class SqliteStore:
             )
             self.conn.executemany(insert_sql, rows)
         return len(rows)
+
+    def clear_tool_calls(self, run_id: str, product_id: str, param_id: str) -> int:
+        """Стирает трассу **одной** ячейки; возвращает число удалённых строк.
+
+        Зачем отдельный метод, если ``save_tool_calls`` и так чистит затронутые ячейки.
+        Затем, что повторное исполнение ячейки **без** вызовов (вердикт из кэша оценок,
+        модель не позвала инструмент) пришло бы пустым списком, а пустой список по
+        контракту ``save_tool_calls`` ничего не стирает — и в таблице остался бы хвост
+        прошлого исполнения. Измерено 22.11.2026 на стенде: после ``run --reset`` пять
+        строк ``cell_tool_calls`` с ошибкой соединения остались от прогона, в котором
+        ячейки исполнялись **до** починки, потому что их вердикт взялся из кэша и новых
+        вызовов не было. Тогда «цена вердикта в вызовах» читалась бы по смеси двух
+        исполнений — то есть ровно то, что идемпотентность по ячейке и должна исключать.
+
+        Удаление по ячейке, а не по прогону: трасса других ячеек этим исполнением не
+        затронута.
+        """
+        with self.conn:
+            cursor = self.conn.execute(
+                "DELETE FROM cell_tool_calls"
+                " WHERE run_id = ? AND product_id = ? AND param_id = ?",
+                (run_id, product_id, param_id),
+            )
+        return int(cursor.rowcount or 0)
 
     def iter_tool_calls(self, run_id: str) -> Iterator[ToolCallRecord]:
         """Трасса прогона по ``product_id, param_id, seq`` (аудит и отчёт).

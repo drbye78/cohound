@@ -112,7 +112,7 @@ from core.pipeline.report import (
     declared_identity_digests,
     write_reports,
 )
-from core.pipeline.retrieve import RetrievalProfile
+from core.pipeline.retrieve import RetrievalProfile, retrieval_params_json
 from core.pipeline.review import review_queue
 from core.pipeline.runner import PhaseFn, PhaseResult, Ports, RunContext
 from core.pipeline.table_provenance import human_line as tables_human_line
@@ -157,13 +157,23 @@ IMPLEMENTED_PHASES: tuple[str, ...] = (
 
 
 def _retrieval_params_json(holder: Mapping[str, Any]) -> str | None:
-    """``retrieval_params_json`` манифеста в формате ячейки: ``{profile, cutoff_K}`` (R7/§13).
+    """``retrieval_params_json`` манифеста — тем же сериализатором, что контракт и ячейки.
 
-    Тот же ``sort_keys=True``-формат, что пишет :func:`core.pipeline.evaluate._provenance`,
-    поэтому манифест и ячейки несут одно и то же провенанс-значение.
+    Раньше здесь стояла **своя** форма ``{profile, cutoff_K, query_lang}``, и это был
+    дефект, а не вариант записи: тот же ``run_id`` считался по полному набору
+    (:func:`core.pipeline.retrieve.retrieval_params_json` — профиль, K, ``rrf_k``, пул,
+    ``max_queries``, слияние, язык), а манифест нёс усечённый. Измерено 22.11.2026 на двух
+    плечах опыта с инструментами: живой процесс писал короткую форму (держатель в памяти),
+    резюмированный — полную (она приходила из ячеек), и прибор парного сравнения объявил
+    ``execution_change`` по полю, которого никто не менял. То есть значение поля зависело
+    от того, **как** прогон дошёл до отчёта, — а провенанс обязан зависеть только от
+    исполнения.
+
+    ``rrf_k``/пул/``max_queries``/слияние не приходят из держателя: это константы кода,
+    исполняемые всегда, и сериализатор берёт их дефолтами — ровно как ``run.py`` при
+    расчёте контракта. Один сериализатор на все носители: «что исполнено» не может
+    описываться по-разному в разных местах.
     """
-    import json as _json
-
     profile = holder.get("retrieval_profile")
     cutoff = holder.get("retrieval_cutoff_K")
     lang = holder.get("query_lang")
@@ -171,10 +181,8 @@ def _retrieval_params_json(holder: Mapping[str, Any]) -> str | None:
         return None
     # ``query_lang`` — то же условие ячейки, что профиль/K: ``hound retry`` повторяет
     # условия из этого JSON, и без поля повтор мерил бы другой язык, чем прогон.
-    return _json.dumps(
-        {"profile": profile, "cutoff_K": cutoff, "query_lang": lang},
-        ensure_ascii=False,
-        sort_keys=True,
+    return retrieval_params_json(
+        profile=profile, cutoff_k=cutoff, query_lang=lang or "all"
     )
 
 

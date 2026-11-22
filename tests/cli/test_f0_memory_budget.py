@@ -31,7 +31,7 @@ from core.cli.wiring import (
     resolve_extraction_budget,
 )
 from core.config.deploy import CrawlConfig, DeployConfig
-from core.domain.enums import DocumentLevel, PdfDevice
+from core.domain.enums import DocumentLevel, FrozenSource, PdfDevice, RefreshPolicy
 from core.domain.models import CrawlRunConfig
 from core.pipeline.resources import (
     DOCLING_PEAK_MB,
@@ -63,6 +63,8 @@ def _preflight(
     mem_budget_mb: int | None = UNFITTABLE_BUDGET,
     derive: bool = True,
     roots: list[str] | None = None,
+    refresh_policy: RefreshPolicy | str | None = None,
+    frozen_source: FrozenSource | None = None,
 ) -> tuple[MemoryBudgetError | None, tuple[str, ...]]:
     return preflight_extraction_budget(
         roots=roots if roots is not None else [ROOT],
@@ -71,6 +73,8 @@ def _preflight(
         profiles={},
         mem_budget_mb=mem_budget_mb,
         derive_extract_workers=derive,
+        refresh_policy=refresh_policy,
+        frozen_source=frozen_source,
     )
 
 
@@ -162,6 +166,43 @@ def test_preflight_without_budget_does_not_refuse() -> None:
     error, warnings = _preflight(mem_budget_mb=None)
     assert error is None
     assert warnings == ()
+
+
+def test_preflight_does_not_refuse_offline_reuse() -> None:
+    """``offline`` — корпус из чанков, документы не читаются: отказывать не в чем.
+
+    Измерено 22.11.2026: на этом хосте ``run --refresh offline`` падал с
+    «budget=3229 MB … workers=0», хотя единственная работа прогона — оценка по уже
+    нарезанному корпусу. Отказ в несуществующей работе вынуждал бы завышать
+    ``COHOUND_MEM_BUDGET_MB`` (объявлять ложь о бюджете) или понижать уровень — то есть
+    менять ось измерения ради обхода гейта.
+    """
+    error, warnings = _preflight(refresh_policy=RefreshPolicy.OFFLINE)
+    assert error is None
+    # Не молчание: «не проверял» названо, иначе отсутствие отказа неотличимо от проверки.
+    assert len(warnings) == 1
+    assert "из чанков" in warnings[0]
+    assert "offline" in warnings[0]
+
+
+def test_preflight_does_not_refuse_frozen_chunks() -> None:
+    """``frozen`` + ``frozen_source=chunks`` — тот же переиспользованный корпус."""
+    error, _ = _preflight(
+        refresh_policy=RefreshPolicy.FROZEN, frozen_source=FrozenSource.CHUNKS
+    )
+    assert error is None
+
+
+def test_preflight_still_refuses_frozen_bytes() -> None:
+    """``frozen`` + ``bytes`` — байты пере-извлекаются: отказ остаётся в силе.
+
+    Это граница правки: пропуск привязан к ``corpus_source=CHUNKS``, а не к слову
+    «frozen». Иначе объявленный источник менял бы исполнение гейта.
+    """
+    error, _ = _preflight(
+        refresh_policy=RefreshPolicy.FROZEN, frozen_source=FrozenSource.BYTES
+    )
+    assert error is not None
 
 
 # --------------------------------------------------------------------------- #

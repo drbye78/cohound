@@ -354,11 +354,12 @@ def test_cell_reuse_key_is_stable_for_identical_conditions() -> None:
         unknown_policy="excluded",
         partial_score=0.5,
         partition_build_id="pb-1",
+        tool_profile="-;max_calls=0",
     )
 
     assert cell_reuse_key(**kwargs) == cell_reuse_key(**kwargs)
-    # Смена схемы ключа обязана менять ключ: иначе «3» не отличить от «2».
-    assert CELL_REUSE_SCHEMA == "cell-reuse-3"
+    # Смена схемы ключа обязана менять ключ: иначе «4» не отличить от «3».
+    assert CELL_REUSE_SCHEMA == "cell-reuse-4"
 
 
 def test_cell_reuse_key_changes_with_any_condition() -> None:
@@ -383,6 +384,7 @@ def test_cell_reuse_key_changes_with_any_condition() -> None:
         unknown_policy="unknown",
         partial_score=0.5,
         partition_build_id="pb",
+        tool_profile="-;max_calls=0",
     )
     reference = cell_reuse_key(**base)
     for field, value in (
@@ -403,6 +405,10 @@ def test_cell_reuse_key_changes_with_any_condition() -> None:
         ("unknown_policy", "included"),
         ("partial_score", 0.25),
         ("partition_build_id", "pb2"),
+        # Схема ``cell-reuse-4``: профиль инструментов — условие измерения. Без этого
+        # слагаемого плечо с инструментами целиком переняло ячейки плеча без них
+        # (измерено 22.11.2026), и парное сравнение выродилось бы в сравнение с самим собой.
+        ("tool_profile", "expand_to_section;max_calls=7"),
     ):
         assert cell_reuse_key(**{**base, field: value}) != reference, field
 

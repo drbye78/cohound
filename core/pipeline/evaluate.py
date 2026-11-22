@@ -1446,6 +1446,10 @@ def retrieve_for_cell(
         profile=resolved_profile.value,
         cutoff_K=cutoff_k,
         build_id=build_id,
+        # Язык запросов — условие ячейки, а не удобство: он решает, какие термины каталога
+        # ушли в ретривал. Без него провенанс ячейки записывал бы ``all`` при объявленном
+        # ``en``, и ``hound retry`` повторил бы ячейку другим языком.
+        query_lang=query_lang,
         # Исполненная RRF-константа: обратное чтение (``_cell_condition``) вернёт её в
         # повтор, а не подставит дефолт (план 26 O2).
         rrf_k=rrf_k,
@@ -1475,11 +1479,17 @@ def _provenance(
     # Один сериализатор исполненных параметров (план 26 O2): ключ переноса и провенанс
     # ячейки описывают условия одинаково. ``rrf_k`` — из среза: повтор обязан исполнить
     # то же значение, а не константу модуля.
+    # Слагаемые берутся **из среза**, а не дефолтами модуля: повтор ячейки обязан
+    # исполнить то же значение. ``query_lang`` тут был пропущен, и провенанс ячейки
+    # записывал ``all`` при объявленном ``en`` — то есть условие измерения подменялось
+    # дефолтом, а ``hound retry`` повторял ячейку другим языком (найдено 22.11.2026
+    # тестом, который сверяет два пути до провенанса: держатель и ячейки).
     params = json.dumps(
         retrieval_params(
             profile=first.profile,
             cutoff_k=first.cutoff_K,
             rrf_k=first.rrf_k,
+            query_lang=first.query_lang or "all",
         ),
         ensure_ascii=False,
         sort_keys=True,
@@ -3614,6 +3624,14 @@ def evaluate_cell(
             # I16/I20: профиль и K среза — из провенанса ретривала, не пересчитываются.
             "retrieval_profile": retrieval_profile,
             "cutoff_K": retrieval_cutoff,
+            # Профиль инструментов — **условие измерения** (37-е поле контракта), поэтому
+            # он входит в ключ, как и всякое другое условие: иначе вердикт, полученный
+            # без инструментов, обслужил бы прогон с инструментами. На сегодняшний день
+            # промпт их и так различает (слот ``{{TOOLS}}`` меняет текст), но полагаться
+            # на это нельзя: «ключ покрывает условие» — правило, а «два условия случайно
+            # дают разный текст» — совпадение, которое перестанет держаться при первом же
+            # изменении шаблона.
+            "tool_profile": tool_profile.canonical(),
         }
         eval_key = build_eval_key(eval_echo)
 
@@ -4228,6 +4246,15 @@ class _CellWriteBuffer:
         self.ops.append(("save_tool_calls", (run_id, list(records)), {}))
         return None
 
+    def clear_tool_calls(self, *args: Any, **kwargs: Any) -> None:
+        """Откладывает стирание трассы ячейки, исполнившейся **без** вызовов.
+
+        Пара к :meth:`save_tool_calls`: пустая трасса означает «вызовов не было» и
+        обязана стереть прошлую запись той же ячейки — иначе трасса описывала бы смесь
+        двух исполнений. Как и прочие записи, op проигрывается вызывающим потоком.
+        """
+        self.ops.append(("clear_tool_calls", args, dict(kwargs)))
+
     def replay(self, store: StorePort | None) -> None:
         """Проигрывает накопленные записи на настоящем store — **в вызывающем потоке**.
 
@@ -4457,7 +4484,17 @@ def evaluate_batch(
         (``check_same_thread``). Пустая трасса строк не пишет — иначе «вызовов не было» и
         «трасса пустая» стали бы неразличимы.
         """
-        if target is None or not trace:
+        if target is None:
+            return
+        if not trace:
+            # Ячейка **исполнена**, а вызовов нет: вердикт взят из кэша оценок или модель
+            # не позвала инструмент. Прошлая трасса той же ячейки относится к другому
+            # исполнению и обязана исчезнуть — иначе «цена вердикта в вызовах» читается
+            # по смеси двух прогонов. Измерено 22.11.2026 на стенде: после ``--reset``
+            # пять строк остались от исполнения, сделанного до починки соединения.
+            clearer = getattr(target, "clear_tool_calls", None)
+            if callable(clearer):
+                clearer(run_id, product_id, param.param_id)
             return
         writer = getattr(target, "save_tool_calls", None)
         if not callable(writer):
@@ -4992,6 +5029,14 @@ def evaluate_phase(
             for (owner_id, param_id), cell in protected_cells.items()
             if owner_id == product_id
         }
+        # Окно инструментов держит **своё** соединение чтения (пул оценщика не может
+        # читать соединение фазы: ``check_same_thread``). Окно строится здесь, чтобы его
+        # можно было закрыть сразу после продукта: иначе число соединений росло бы с
+        # числом батчей, а не продуктов. Переданное извне окно не закрывается — им
+        # владеет вызывающий.
+        window = (
+            None if tool_corpus is not None else StoreToolCorpus(store, product_id)
+        )
         # 09 §10.1: условия переноса/индекса — свойства прогона. Собираются один раз на
         # продукт: половина слагаемых ключа не зависит от ячейки, и пересчитывать политику
         # расчёта на каждую пару «продукт × параметр» незачем.
@@ -5002,6 +5047,11 @@ def evaluate_phase(
                 conditions=eval_conditions,
                 scoring_policy_version=scoring_policy_version(),
                 evaluator=evaluator,
+                # Профиль инструментов — условие измерения (37-е поле контракта), значит
+                # слагаемое ключа переноса: иначе ячейка, измеренная без инструментов,
+                # переносилась бы в прогон с инструментами. Измерено 22.11.2026: плечо
+                # ``t1+t4+t7`` целиком взяло 40 ячеек плеча ``none``.
+                tool_profile=tool_profile.canonical(),
             )
         # Перенос дополнительно требует предшественника и обе БД; индекс — только
         # ``state`` (он обязан писаться и на первом прогоне, иначе второму нечего
@@ -5214,42 +5264,48 @@ def evaluate_phase(
                 )
                 cells.append(failed)
 
-        outcomes, batch_errors = evaluate_batch(
-            params=[p for p in plan.params if p.param_id not in failed_ids],
-            product_id=product_id,
-            run_id=run_id,
-            evaluator=evaluator,
-            chunks_by_param=chunks_by_param,
-            satellites=product_satellites,
-            role_vocabulary=resolved_vocabulary,
-            resolver=resolver,
-            strict=strict,
-            store=store,
-            retrievals_by_param=retrievals_by_param,
-            protected_by_param=protected_by_param,
-            coverage=coverage,
-            min_retrieval_score=min_retrieval_score,
-            eval_cache=eval_cache,
-            eval_conditions=eval_conditions,
-            prompt_archive=prompt_archive,
-            artifact_dates=artifact_dates,
-            llm_journal=call_journal,
-            carry=carry_ctx,
-            reuse_conditions=reuse_conditions,
-            llm_concurrency=llm_concurrency,
-            # План ``28`` §9: объявленный профиль инструментов и окно в корпус **этого**
-            # продукта (I17). Окно строится всегда: от него зависит и табличная шапка,
-            # которая печатается при любом профиле (это отдельная мера, §4.0).
-            tool_profile=tool_profile,
-            tool_caller=tool_caller,
-            tool_corpus=(
-                tool_corpus
-                if tool_corpus is not None
-                else StoreToolCorpus(store, product_id)
-            ),
-            # V3: объявленная политика — тот же ``max_retries``, что в ``run_id``.
-            max_retries=resolved_max_retries,
-        )
+        try:
+            outcomes, batch_errors = evaluate_batch(
+                params=[p for p in plan.params if p.param_id not in failed_ids],
+                product_id=product_id,
+                run_id=run_id,
+                evaluator=evaluator,
+                chunks_by_param=chunks_by_param,
+                satellites=product_satellites,
+                role_vocabulary=resolved_vocabulary,
+                resolver=resolver,
+                strict=strict,
+                store=store,
+                retrievals_by_param=retrievals_by_param,
+                protected_by_param=protected_by_param,
+                coverage=coverage,
+                min_retrieval_score=min_retrieval_score,
+                eval_cache=eval_cache,
+                eval_conditions=eval_conditions,
+                prompt_archive=prompt_archive,
+                artifact_dates=artifact_dates,
+                llm_journal=call_journal,
+                carry=carry_ctx,
+                reuse_conditions=reuse_conditions,
+                llm_concurrency=llm_concurrency,
+                # План ``28`` §9: объявленный профиль инструментов и окно в корпус **этого**
+                # продукта (I17). Окно строится всегда: от него зависит и табличная шапка,
+                # которая печатается при любом профиле (это отдельная мера, §4.0).
+                tool_profile=tool_profile,
+                tool_caller=tool_caller,
+                tool_corpus=(
+                    tool_corpus
+                    if tool_corpus is not None
+                    else window
+                ),
+                # V3: объявленная политика — тот же ``max_retries``, что в ``run_id``.
+                max_retries=resolved_max_retries,
+            )
+        finally:
+            # Окно инструментов закрывается сразу после продукта — и при отказе батча
+            # тоже: соединения чтения не должны переживать работу, для которой открыты.
+            if window is not None:
+                window.close()
         cells.extend(outcome.cell for outcome in outcomes)
         errors.extend(batch_errors)
         # A2: отказ удостоверения — свойство **прогона**. Первое вхождение завершает
@@ -5890,13 +5946,25 @@ def _save_tool_trace(
     вердикт» читает ``cell_tool_calls`` и видит ноль у каждой повторённой ячейки — то есть
     ровно у тех, чей вердикт получен самым дорогим путём.
 
-    Пустая трасса строк не пишет: «вызовов не было» и «трасса пустая» — разные факты, и
-    ``save_tool_calls`` на пустом входе ничего не стирает (идемпотентность — по ячейке).
+    Пустая трасса **стирает** прошлую запись этой ячейки, а не оставляет её: ячейка
+    исполнилась, вызовов не было (вердикт из кэша оценок либо модель не позвала
+    инструмент), и хвост предыдущего исполнения описывал бы другое исполнение. Различие
+    «трассы нет» и «вызовов не было» живёт не в таблице, а в поле контракта
+    ``tool_profile`` и в ``logs/llm_calls.jsonl``; ``save_tool_calls`` на пустом входе
+    по-прежнему ничего не стирает — стереть обязан вызывающий, знающий адрес ячейки.
 
-    Сбой записи не отнимает вердикт (I4 не про это): причина уходит в ``errors`` с адресом
-    ячейки, а не глотается.
     """
     if not trace:
+        clearer = getattr(store, "clear_tool_calls", None)
+        if not callable(clearer):
+            return
+        try:
+            clearer(str(run_id), str(cell.product_id), str(cell.param_id))
+        except Exception as exc:  # noqa: BLE001 — трасса не доказательство, вердикт важнее
+            errors.append(
+                f"{cell.product_id}/{cell.param_id}: tool_trace_clear: "
+                f"{type(exc).__name__}: {exc} — прошлая трасса не стёрта"
+            )
         return
     writer = getattr(store, "save_tool_calls", None)
     if not callable(writer):
@@ -6161,175 +6229,186 @@ def _evaluate_cells_by_condition(
             evaluation_s=time.monotonic() - started,
         )
 
-    for product_id, profile, cutoff, rrf_k, query_lang in sorted(groups):
-        group = sorted(
-            groups[(product_id, profile, cutoff, rrf_k, query_lang)],
-            key=lambda c: str(c.param_id),
-        )
-        if profile not in embed_notes:
-            embed_notes[profile] = assert_embedder_matches_partition(
-                getattr(ports, "embedder", None),
-                getattr(ports, "vector_index", None),
-                store,
-                str(run_id),
-                profile=profile,
+    # Окна в корпус держат **своё** соединение чтения (пул оценщика не может читать
+    # соединение фазы: ``check_same_thread``). Закрываются они здесь, а не по сборке
+    # мусора: генератор живёт до конца обхода вызывающего, и без ``finally`` число
+    # открытых соединений зависело бы от того, дочитал ли вызывающий (при обрыве
+    # ``retry`` на отказе удостоверения — не дочитал).
+    try:
+        for product_id, profile, cutoff, rrf_k, query_lang in sorted(groups):
+            group = sorted(
+                groups[(product_id, profile, cutoff, rrf_k, query_lang)],
+                key=lambda c: str(c.param_id),
             )
-        embed_note = embed_notes[profile]
-        group_params = [catalog[str(cell.param_id)] for cell in group]
-        try:
-            query_vectors = precompute_query_vectors(
-                group_params,
-                profile=profile,
-                embedder=getattr(ports, "embedder", None),
-                memo={},
-                query_lang=query_lang,
-            )
-        except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
-            errors.append(
-                f"{product_id}: query_vectors: {type(exc).__name__}: {exc}"
-            )
-            query_vectors = None
-        coverage = _coverage_for(None, store, str(run_id), product_id)
-        if product_id not in dates_by_product:
-            try:
-                dates_by_product[product_id] = observe_corpus_artifact_dates(
-                    store, str(run_id), product_id
-                )
-            except Exception as exc:  # noqa: BLE001 — провенанс виден, фазу не роняет
-                errors.append(
-                    f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc} — "
-                    "I2d (датированный носитель ❌) не применён"
-                )
-                dates_by_product[product_id] = None
-        try:
-            dense_by_query = precompute_dense_hits(
-                group_params,
-                product_ids=[product_id],
-                profile=profile,
-                cutoff_k=cutoff,
-                vector_index=getattr(ports, "vector_index", None),
-                query_vectors=query_vectors,
-                query_lang=query_lang,
-            )
-        except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
-            errors.append(
-                f"{product_id}: dense batch: {type(exc).__name__}: {exc} — "
-                "поиск пошёл поштучно"
-            )
-            dense_by_query = None
-
-        prepared: list[
-            tuple[
-                Cell,
-                CatalogRow,
-                RetrievalResult,
-                Mapping[TableKey, ExtractedTable] | None,
-                LocalToolPort | None,
-                float,
-            ]
-        ] = []
-        for cell in group:
-            param = catalog[str(cell.param_id)]
-            started = time.monotonic()
-            try:
-                retrieval = retrieve_for_cell(
-                    param,
-                    product_id=product_id,
+            if profile not in embed_notes:
+                embed_notes[profile] = assert_embedder_matches_partition(
+                    getattr(ports, "embedder", None),
+                    getattr(ports, "vector_index", None),
+                    store,
+                    str(run_id),
                     profile=profile,
-                    cutoff_k=cutoff,
-                    lexical_index=getattr(ports, "lexical_index", None),
-                    vector_index=getattr(ports, "vector_index", None),
+                )
+            embed_note = embed_notes[profile]
+            group_params = [catalog[str(cell.param_id)] for cell in group]
+            try:
+                query_vectors = precompute_query_vectors(
+                    group_params,
+                    profile=profile,
                     embedder=getattr(ports, "embedder", None),
-                    query_vectors=query_vectors,
-                    dense_by_query=dense_by_query,
-                    rrf_k=rrf_k,
+                    memo={},
                     query_lang=query_lang,
                 )
-            except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+            except Exception as exc:  # noqa: BLE001 — сбой виден в errors, а не притворяется успехом
                 errors.append(
-                    f"{product_id}/{cell.param_id}: retrieval: {type(exc).__name__}: {exc}"
+                    f"{product_id}: query_vectors: {type(exc).__name__}: {exc}"
                 )
-                yield _CellAttempt(
-                    cell=cell,
-                    error_kind="retrieval_failed",
-                    detail=f"{type(exc).__name__}: {exc}",
-                    retrieval_s=time.monotonic() - started,
-                    embed_note=embed_note,
+                query_vectors = None
+            coverage = _coverage_for(None, store, str(run_id), product_id)
+            if product_id not in dates_by_product:
+                try:
+                    dates_by_product[product_id] = observe_corpus_artifact_dates(
+                        store, str(run_id), product_id
+                    )
+                except Exception as exc:  # noqa: BLE001 — провенанс виден, фазу не роняет
+                    errors.append(
+                        f"{product_id}: corpus_artifact: {type(exc).__name__}: {exc} — "
+                        "I2d (датированный носитель ❌) не применён"
+                    )
+                    dates_by_product[product_id] = None
+            try:
+                dense_by_query = precompute_dense_hits(
+                    group_params,
+                    product_ids=[product_id],
+                    profile=profile,
+                    cutoff_k=cutoff,
+                    vector_index=getattr(ports, "vector_index", None),
+                    query_vectors=query_vectors,
+                    query_lang=query_lang,
                 )
-                continue
-            # Адреса таблиц и набор инструментов готовятся **здесь**, в вызывающем потоке:
-            # чтение store из воркера запрещено ``check_same_thread``, а шапка таблицы —
-            # часть входа оценщика (план ``28`` §4.0).
-            chunks, tables = _enrich_tables(product_id, param, retrieval.chunks)
-            # Набор инструментов параметро-зависим (``subject_mention`` читает термины
-            # каталога), поэтому объект собирается на ячейку, а не на группу.
-            local_tools = (
-                build_local_tools(
-                    profile=tool_profile,
-                    corpus=_corpus_for(product_id),
-                    param=param,
+            except Exception as exc:  # noqa: BLE001 — батч не удался: идём поштучно, но видимо
+                errors.append(
+                    f"{product_id}: dense batch: {type(exc).__name__}: {exc} — "
+                    "поиск пошёл поштучно"
                 )
-                if tool_profile.enabled
-                else None
-            )
-            prepared.append(
-                (
-                    cell,
-                    param,
-                    replace(retrieval, chunks=list(chunks)),
-                    tables,
-                    local_tools,
-                    time.monotonic() - started,
-                )
-            )
+                dense_by_query = None
 
-        if llm_concurrency > 1 and len(prepared) > 1:
-            with ThreadPoolExecutor(
-                max_workers=llm_concurrency, thread_name_prefix="retry-llm"
-            ) as pool:
-                futures = [
+            prepared: list[
+                tuple[
+                    Cell,
+                    CatalogRow,
+                    RetrievalResult,
+                    Mapping[TableKey, ExtractedTable] | None,
+                    LocalToolPort | None,
+                    float,
+                ]
+            ] = []
+            for cell in group:
+                param = catalog[str(cell.param_id)]
+                started = time.monotonic()
+                try:
+                    retrieval = retrieve_for_cell(
+                        param,
+                        product_id=product_id,
+                        profile=profile,
+                        cutoff_k=cutoff,
+                        lexical_index=getattr(ports, "lexical_index", None),
+                        vector_index=getattr(ports, "vector_index", None),
+                        embedder=getattr(ports, "embedder", None),
+                        query_vectors=query_vectors,
+                        dense_by_query=dense_by_query,
+                        rrf_k=rrf_k,
+                        query_lang=query_lang,
+                    )
+                except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                    errors.append(
+                        f"{product_id}/{cell.param_id}: retrieval: {type(exc).__name__}: {exc}"
+                    )
+                    yield _CellAttempt(
+                        cell=cell,
+                        error_kind="retrieval_failed",
+                        detail=f"{type(exc).__name__}: {exc}",
+                        retrieval_s=time.monotonic() - started,
+                        embed_note=embed_note,
+                    )
+                    continue
+                # Адреса таблиц и набор инструментов готовятся **здесь**, в вызывающем потоке:
+                # чтение store из воркера запрещено ``check_same_thread``, а шапка таблицы —
+                # часть входа оценщика (план ``28`` §4.0).
+                chunks, tables = _enrich_tables(product_id, param, retrieval.chunks)
+                # Набор инструментов параметро-зависим (``subject_mention`` читает термины
+                # каталога), поэтому объект собирается на ячейку, а не на группу.
+                local_tools = (
+                    build_local_tools(
+                        profile=tool_profile,
+                        corpus=_corpus_for(product_id),
+                        param=param,
+                    )
+                    if tool_profile.enabled
+                    else None
+                )
+                prepared.append(
                     (
-                        pool.submit(
-                            _evaluate_one,
-                            cell,
-                            param,
-                            retrieval,
-                            coverage,
-                            retrieval_s,
-                            tables,
-                            local_tools,
-                        ),
                         cell,
-                        retrieval_s,
+                        param,
+                        replace(retrieval, chunks=list(chunks)),
+                        tables,
+                        local_tools,
+                        time.monotonic() - started,
+                    )
+                )
+
+            if llm_concurrency > 1 and len(prepared) > 1:
+                with ThreadPoolExecutor(
+                    max_workers=llm_concurrency, thread_name_prefix="retry-llm"
+                ) as pool:
+                    futures = [
+                        (
+                            pool.submit(
+                                _evaluate_one,
+                                cell,
+                                param,
+                                retrieval,
+                                coverage,
+                                retrieval_s,
+                                tables,
+                                local_tools,
+                            ),
+                            cell,
+                            retrieval_s,
+                        )
+                        for cell, param, retrieval, tables, local_tools, retrieval_s in prepared
+                    ]
+                    attempts = []
+                    for future, cell, retrieval_s in futures:
+                        try:
+                            attempts.append(future.result())
+                        except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
+                            attempts.append(
+                                _CellAttempt(
+                                    cell=cell,
+                                    error_kind="evaluation_error",
+                                    detail=f"{type(exc).__name__}: {exc}",
+                                    retrieval_s=retrieval_s,
+                                )
+                            )
+            else:
+                attempts = [
+                    _evaluate_one(
+                        cell, param, retrieval, coverage, retrieval_s, tables, local_tools
                     )
                     for cell, param, retrieval, tables, local_tools, retrieval_s in prepared
                 ]
-                attempts = []
-                for future, cell, retrieval_s in futures:
-                    try:
-                        attempts.append(future.result())
-                    except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
-                        attempts.append(
-                            _CellAttempt(
-                                cell=cell,
-                                error_kind="evaluation_error",
-                                detail=f"{type(exc).__name__}: {exc}",
-                                retrieval_s=retrieval_s,
-                            )
-                        )
-        else:
-            attempts = [
-                _evaluate_one(
-                    cell, param, retrieval, coverage, retrieval_s, tables, local_tools
-                )
-                for cell, param, retrieval, tables, local_tools, retrieval_s in prepared
-            ]
-        for attempt in attempts:
-            if attempt.error_kind == "evaluation_error":
-                errors.append(
-                    f"{product_id}/{attempt.cell.param_id}: evaluate: {attempt.detail}"
-                )
-            yield replace(attempt, embed_note=embed_note)
+            for attempt in attempts:
+                if attempt.error_kind == "evaluation_error":
+                    errors.append(
+                        f"{product_id}/{attempt.cell.param_id}: evaluate: {attempt.detail}"
+                    )
+                yield replace(attempt, embed_note=embed_note)
+    finally:
+        for window in corpora.values():
+            closer = getattr(window, "close", None)
+            if closer is not None:
+                closer()
 
 
 def reevaluate_stale(

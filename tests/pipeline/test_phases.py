@@ -1425,9 +1425,18 @@ def test_build_phases_records_default_retrieval_provenance(tmp_path: Path) -> No
     manifest = _run_chain_to_report(tmp_path)
     assert manifest["retrieval_profile"] == DEFAULT_RETRIEVAL_PROFILE.value
     assert manifest["retrieval_cutoff_K"] == DEFAULT_RETRIEVAL_CUTOFF_K
+    # Форма — **та же**, что у контракта (``retrieve.retrieval_params``): профиль, K,
+    # ``rrf_k``, пул, ``max_queries``, слияние и язык. Усечённая форма была дефектом:
+    # ``run_id`` считался по полному набору, а манифест нёс часть, и значение зависело от
+    # того, живым ли процессом прогон дошёл до отчёта (измерено 22.11.2026 на двух плечах
+    # опыта с инструментами — прибор объявил ``execution_change`` по неменявшемуся полю).
     assert json.loads(manifest["retrieval_params_json"]) == {
         "profile": DEFAULT_RETRIEVAL_PROFILE.value,
         "cutoff_K": DEFAULT_RETRIEVAL_CUTOFF_K,
+        "rrf_k": 60,
+        "pool_multiplier": 1,
+        "max_queries": 3,
+        "cross_query_fusion": "max",
         # Язык запросов — условие ячейки: без него ``hound retry`` повторил бы ячейку
         # другим языком, чем она измерена.
         "query_lang": "all",
@@ -1442,6 +1451,10 @@ def test_build_phases_forwards_explicit_retrieval_provenance(tmp_path: Path) -> 
     assert json.loads(manifest["retrieval_params_json"]) == {
         "profile": "R1",
         "cutoff_K": 25,
+        "rrf_k": 60,
+        "pool_multiplier": 1,
+        "max_queries": 3,
+        "cross_query_fusion": "max",
         "query_lang": "all",
     }
 
@@ -1457,11 +1470,23 @@ class _ObservedCell:
 class _CellStore:
     """Хранилище только с ``iter_cells`` — для проверки чтения провенанса из ячеек."""
 
-    def __init__(self, profiles: tuple[str, ...] = ("R0",), cutoff: int = 10) -> None:
+    def __init__(
+        self,
+        profiles: tuple[str, ...] = ("R0",),
+        cutoff: int = 10,
+        params_json: str | None = None,
+    ) -> None:
+        # ``params_json`` — форма, которую несут **настоящие** ячейки (полный набор из
+        # ``retrieve.retrieval_params``). Умолчание — усечённая форма старого дефекта:
+        # на ней проверяется, что resume-путь не выдумывает слагаемые сам.
         self._cells = [
             _ObservedCell(
                 profile,
-                json.dumps({"profile": profile, "cutoff_K": cutoff}, sort_keys=True),
+                params_json
+                if params_json is not None
+                else json.dumps(
+                    {"profile": profile, "cutoff_K": cutoff}, sort_keys=True
+                ),
             )
             for profile in profiles
         ]
@@ -1508,12 +1533,67 @@ def test_holder_wins_over_cells_for_retrieval_provenance() -> None:
     )
     assert (profile, cutoff) == ("R2", 25)
     # Язык берётся из держателя, а не подставляется: манифест называет то условие,
-    # которым считали сейчас, включая язык запросов.
+    # которым считали сейчас, включая язык запросов. Остальные слагаемые — константы кода,
+    # исполняемые всегда, и они обязаны быть здесь: тем же сериализатором считается
+    # контракт (``run_id``), поэтому усечённая форма расходилась бы с идентичностью.
     assert json.loads(params_json) == {
         "profile": "R2",
         "cutoff_K": 25,
+        "rrf_k": 60,
+        "pool_multiplier": 1,
+        "max_queries": 3,
+        "cross_query_fusion": "max",
         "query_lang": "en",
     }
+
+
+def test_retrieval_provenance_is_same_whether_from_holder_or_cells() -> None:
+    """Провенанс ретривала не зависит от того, **как** прогон дошёл до отчёта.
+
+    Дефект, измеренный 22.11.2026 на двух плечах опыта с инструментами: живой процесс
+    писал ``{profile, cutoff_K, query_lang}`` (держатель в памяти), резюмированный —
+    полную форму из ячеек. Прибор парного сравнения объявил ``execution_change`` по полю,
+    которого никто не менял, и опыт перестал быть парным.
+
+    Проверка держит **равенство двух путей**, а не форму каждого: именно расхождение было
+    дефектом, и именно оно вернётся, если у сериализатора появится второй вариант.
+    """
+    from core.pipeline.phases import _observed_retrieval
+    from core.pipeline.retrieve import retrieval_params_json
+
+    # Форма, которую пишут **настоящие** ячейки: ``_provenance`` берёт её тем же
+    # сериализатором, что контракт.
+    canonical = retrieval_params_json(profile="R0", cutoff_k=10, query_lang="all")
+    from_cells = _observed_retrieval(
+        {}, _CellStore(profiles=("R0",), params_json=canonical), RUN_ID
+    )
+    from_holder = _observed_retrieval(
+        {"retrieval_profile": "R0", "retrieval_cutoff_K": 10, "query_lang": "all"},
+        _CellStore(profiles=("R0",), params_json=canonical),
+        RUN_ID,
+    )
+    assert from_cells[2] is not None and from_holder[2] is not None
+    assert from_cells[2] == from_holder[2] == canonical, (
+        "один прогон, два пути до отчёта — два разных провенанса: "
+        f"{from_cells[2]} против {from_holder[2]}"
+    )
+
+
+def test_legacy_cell_provenance_is_not_rewritten_by_report() -> None:
+    """Усечённая запись прошлого прогона публикуется как есть, а не «исправляется».
+
+    Ячейка — запись о том, что **было** исполнено. Если её провенанс записан старой
+    формой, отчёт обязан прочитать его как исторический факт (AGENTS §1.2), а не
+    дописать в него слагаемые, которых в том исполнении никто не объявлял: иначе
+    манифест заявил бы условие, которого не было.
+    """
+    from core.pipeline.phases import _observed_retrieval
+
+    legacy = json.dumps({"profile": "R0", "cutoff_K": 10}, sort_keys=True)
+    _profile, _cutoff, params_json = _observed_retrieval(
+        {}, _CellStore(profiles=("R0",), params_json=legacy), RUN_ID
+    )
+    assert params_json == legacy
 
 
 def test_mixed_retrieval_profiles_are_not_declared() -> None:

@@ -1359,6 +1359,11 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                     profiles=inputs.domain_profiles or {},
                     mem_budget_mb=mem_budget_mb,
                     derive_extract_workers=derive_extract_workers,
+                    # Объявленный режим входит в проверку: при корпусе из чанков
+                    # (`--refresh offline`, `frozen` + `chunks`) документы не читаются, и
+                    # отказ «окно 0 воркеров» был бы отказом в несуществующей работе.
+                    refresh_policy=refresh_policy,
+                    frozen_source=getattr(args, "frozen_source", None),
                 )
                 config_notices.extend(budget_warnings)
                 if budget_error is not None:

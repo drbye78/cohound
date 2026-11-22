@@ -1,4 +1,4 @@
-"""Перенос ячеек между прогонами (carry-forward), 09 §10 — схема ``cell-reuse-3``.
+"""Перенос ячеек между прогонами (carry-forward), 09 §10 — схема ``cell-reuse-4``.
 
 Модуль отвечает на **один** вопрос: можно ли вердикт ячейки прошлого прогона перенести в
 текущий, не спрашивая оценщика. Он **не** пишет в хранилища и не решает за вызывающего:
@@ -51,6 +51,7 @@ from core.domain.models import (
     CellEvidence,
     absence_evidence_id,
 )
+from core.domain.tools import NO_TOOL_PROFILE
 from core.pipeline.digests import (
     cell_reuse_key,
     coverage_digest,
@@ -117,6 +118,11 @@ class CellReuseConditions:
     model_id: str
     llm_scenario: str
     model_config_digest: str
+    #: Объявленный профиль локальных инструментов (37-е поле контракта) в канонической
+    #: форме ``ToolProfile.canonical()``. Слагаемое ключа переноса с схемы ``cell-reuse-4``:
+    #: без него ячейка, измеренная без инструментов, переносилась в прогон с инструментами
+    #: (измерено 22.11.2026 — все 40 ячеек плеча ``none`` уехали в плечо ``t1+t4+t7``).
+    tool_profile: str = NO_TOOL_PROFILE.canonical()
 
 
 @dataclass(frozen=True)
@@ -234,6 +240,7 @@ def cell_reuse_conditions(
     scoring_policy_version: str,
     evaluator: Any,
     model_id: str | None = None,
+    tool_profile: str = NO_TOOL_PROFILE.canonical(),
 ) -> CellReuseConditions:
     """Собирает условия переноса продукта (09 §10.1) — **без** I/O.
 
@@ -251,6 +258,7 @@ def cell_reuse_conditions(
         model_id=str(resolved_model),
         llm_scenario=_EVALUATOR_SCENARIO,
         model_config_digest=model_config_digest(evaluator),
+        tool_profile=str(tool_profile),
     )
 
 
@@ -518,6 +526,7 @@ def carry_forward_cell(
         unknown_policy=conditions.conditions.unknown_policy,
         partial_score=conditions.conditions.partial_score,
         partition_build_id=partition_build_id,
+        tool_profile=conditions.tool_profile,
     )
     if key != previous.cell_reuse_key:
         # §10.3: расхождение любого слагаемого — переоценка. Причина не угадывается:
@@ -613,7 +622,7 @@ def measurement_row(
     стала бы источником для третьего прогона).
 
     ``doc_set_digest`` в per-cell таблице — набор документов **этой** ячейки
-    (``retrieved_doc_set_digest``, схема ``cell-reuse-3``), а не doc-set продукта: таблица
+    (``retrieved_doc_set_digest``, схема ``cell-reuse-4``), а не doc-set продукта: таблица
     per-cell, и второй смысл в ней означал бы, что «набор документов» в строке и в ключе
     разный. Product-level digest сюда не пишется.
 
@@ -650,6 +659,7 @@ def measurement_row(
         unknown_policy=conditions.conditions.unknown_policy,
         partial_score=conditions.conditions.partial_score,
         partition_build_id=partition_build_id,
+        tool_profile=conditions.tool_profile,
     )
     return CellMeasurementRow(
         run_id=str(cell.run_id),
