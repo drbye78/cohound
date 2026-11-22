@@ -123,6 +123,60 @@ def _without_comments(text: str) -> str:
     )
 
 
+def _assert_seeds_are_declared(
+    seeds: dict[str, list[str]], passports: dict[str, object]
+) -> None:
+    """Seed-набор объявлен: либо вывод из паспорта, либо перечисление с названным источником.
+
+    Пин остаётся тем же — «файл не живёт отдельно от паспортов», — но у части продуктов
+    носитель объявления другой, и это надо назвать, а не ослабить проверку.
+
+    * паспорт без ``seed_enumeration_source``: ``seeds[pid] == passport_urls(passport)``
+      **байт-в-байт** (прежнее утверждение, без исключений);
+    * паспорт с ``seed_enumeration_source``: ``doc_domains`` **не может** выразить набор —
+      у GaussDB страница каталога не несёт текста (замер 22.11.2026: 77 578 байт разметки,
+      ~1 900 символов, ``<div id="content">`` пуст), а вендор публикует машинный индекс на
+      15 235 документов. Тогда проверяется то, что делает набор объявленным: источник
+      назван, адреса уникальны и ``http(s)``, и **каждый** лежит внутри объявленной области
+      ``doc_domains`` (иначе seed затянул бы в партицию чужой продукт — I17).
+    """
+    from urllib.parse import urlsplit
+
+    from core.config.passports import passport_urls
+
+    assert set(seeds) == set(passports), (
+        f"продукты расходятся: только в файле {sorted(set(seeds) - set(passports))}, "
+        f"только в паспортах {sorted(set(passports) - set(seeds))}"
+    )
+    for pid, passport in passports.items():
+        declared = seeds[pid]
+        source = getattr(passport, "seed_enumeration_source", None)
+        if source is None:
+            assert declared == passport_urls(passport), (
+                f"{pid}: corpus_urls.yaml обязан совпадать с деривацией из паспорта"
+            )
+            continue
+        assert source.startswith(("http://", "https://")), f"{pid}: источник не URL: {source}"
+        assert declared, f"{pid}: перечисление объявлено, а адресов нет"
+        assert len(set(declared)) == len(declared), f"{pid}: в перечислении есть дубликаты"
+        areas: list[tuple[str, str]] = []
+        for domain in passport.doc_domains:
+            raw = str(domain).strip().strip("/")
+            if not raw:
+                continue
+            host, _, prefix = raw.partition("/")
+            areas.append((host, prefix))
+        assert areas, f"{pid}: перечисление без объявленной области doc_domains"
+        for url in declared:
+            parts = urlsplit(url)
+            assert parts.scheme in ("http", "https"), f"{pid}: {url} — не http(s)"
+            covered = any(
+                parts.netloc == host and (not prefix or parts.path.lstrip("/").startswith(prefix))
+                for host, prefix in areas
+            )
+            assert covered, f"{pid}: {url} вне объявленной области doc_domains {areas}"
+
+
 def test_generator_emits_domain_profiles_accepted_by_strict_loader(tmp_path: Path) -> None:
     """Выход ``build_domain_profiles()`` проходит ``load_domain_profiles`` (D.2)."""
     module = _load_generator()
@@ -410,16 +464,12 @@ def test_corpus_urls_jatoba_seed_is_live_product_page() -> None:
     Пин: файл остаётся детерминированной деривацией паспортов (``passport_urls``), т.е.
     правка паспорта и регенерация не разъедутся.
     """
-    from core.config.passports import load_passports, passport_urls
+    from core.config.passports import load_passports
 
     seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
     assert "https://www.gaz-is.ru/products/jatoba/" not in seeds["jatoba"]
     assert "https://www.gaz-is.ru/produkty/inform-sistemy/subd-jatoba/" in seeds["jatoba"]
-    derived = {
-        pid: passport_urls(passport)
-        for pid, passport in load_passports(ROOT / "passports").items()
-    }
-    assert seeds == derived, "corpus_urls.yaml обязан совпадать с деривацией из паспортов"
+    _assert_seeds_are_declared(seeds, load_passports(ROOT / "passports"))
 
 
 def test_wiki_astralinux_host_root_does_not_discover_tandocs_is_scoped() -> None:
@@ -552,7 +602,7 @@ def test_postgrespro_seed_order_is_authored_docs_first_portal_last() -> None:
     Список — из трёх корней: учебный ``edu`` выведен 14.11.2026 (решение владельца,
     см. ``test_edu_subdomain_is_excluded_from_corpus_and_scope``).
     """
-    from core.config.passports import load_passports, passport_urls
+    from core.config.passports import load_passports
 
     seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
     assert seeds["postgrespro"] == [
@@ -563,11 +613,7 @@ def test_postgrespro_seed_order_is_authored_docs_first_portal_last() -> None:
     assert seeds["postgrespro"] != sorted(seeds["postgrespro"]), (
         "пин: порядок авторский — sorted() поставил бы портал перед docs"
     )
-    derived = {
-        pid: passport_urls(passport)
-        for pid, passport in load_passports(ROOT / "passports").items()
-    }
-    assert seeds == derived, "corpus_urls.yaml обязан совпадать с деривацией из паспортов"
+    _assert_seeds_are_declared(seeds, load_passports(ROOT / "passports"))
 
 
 def test_edu_subdomain_is_excluded_from_corpus_and_scope() -> None:

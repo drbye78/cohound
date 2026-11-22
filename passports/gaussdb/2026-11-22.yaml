@@ -17,8 +17,12 @@
 #    ни одного абзаца документации), а markdown-представление (`rel="alternate"
 #    type="text/markdown"`) несёт. Поэтому seed-набор — вывод прибора
 #    `scripts/derive_llms_seeds.py` из индекса вендора `…/gaussdb/llms.txt`, и живёт он
-#    в `sources/corpus_urls.yaml` (5 912 адресов), а `doc_domains` ниже называет только
-#    **область документации** — подсказку для `hound discover`, не список для обхода;
+#    в `sources/corpus_urls.yaml` (5 911 адресов), а `doc_domains` ниже называет
+#    **область документации** (18 каталогов) — подсказку для `hound discover`, не список
+#    для обхода. Способ получить перечисление назван отдельным полем
+#    (`seed_enumeration_source`): пин пакета «corpus_urls = деривация паспортов» у этого
+#    продукта не выполним — `doc_domains` не выражает перечень из 5 911 документов, — и
+#    вместо ослабления проверки у объявления появился явный носитель;
 #  * `satellites` пуст **намеренно**: сервисы миграции/резервного копирования Huawei Cloud
 #    (DRS и подобные) — отдельные продукты со своими корпусами; объявить их спутниками
 #    значило бы добавить в область ретривала партиции, которых в корпусе нет (I17).
@@ -43,9 +47,42 @@ edition_assessed: null
 version: "V2.0-10.x (базовая линия документации, снято 22.11.2026)"
 jurisdiction: CN
 doc_domains:
-  # Область документации продукта на общем хосте поддержки Huawei Cloud. Путь, а не хост:
-  # `support.huaweicloud.com` держит документацию десятков продуктов, и host-ключ затянул
-  # бы в партицию GaussDB чужие руководства (I17).
-  - "support.huaweicloud.com/gaussdb"
+  # Область документации продукта — **18 каталогов** на общем хосте поддержки Huawei Cloud,
+  # а не хост и не один каталог. Хост не годится: `support.huaweicloud.com` держит
+  # документацию десятков продуктов, и host-ключ затянул бы в партицию GaussDB чужие
+  # руководства (I17). Один каталог тоже не годится: документация GaussDB разложена по
+  # назначению (`api-`, `bestpractice-`, `centralized-*`, `distributed-*`, `productdesc-`,
+  # `usermanual-`, `gaussdb_faq`, …), и это **измерено**, а не предположено — перепись
+  # фактического seed-набора даёт ровно эти 18 каталогов на 5 911 адресов
+  # (`docs/reports/measurements/2026-11-22-gaussdb-corpus.md`).
+  #
+  # Список служит двум вещам: он объявляет область, внутри которой тест пакета проверяет
+  # **каждый** seed (адрес вне области — дефект scope, а не мелочь), и он же — подсказка
+  # для `hound discover` (`doc_domains` как seed-запросы, никогда не фетчится молча).
+  - "support.huaweicloud.com/api-gaussdb"
+  - "support.huaweicloud.com/bestpractice-gaussdb"
+  - "support.huaweicloud.com/bulletin-gaussdb"
+  - "support.huaweicloud.com/centralized-devg-v10-gaussdb"
+  - "support.huaweicloud.com/centralized-ref-v10-gaussdb"
+  - "support.huaweicloud.com/centralized-tngg-v10-gaussdb"
+  - "support.huaweicloud.com/centralized-vector-devg-v10-gaussdb"
+  - "support.huaweicloud.com/clir-gaussdb"
+  - "support.huaweicloud.com/distributed-devg-v10-gaussdb"
+  - "support.huaweicloud.com/distributed-m-comp-devg-v10-gaussdb"
+  - "support.huaweicloud.com/distributed-ref-v10-gaussdb"
+  - "support.huaweicloud.com/distributed-tngg-v10-gaussdb"
+  - "support.huaweicloud.com/gaussdb_faq"
+  - "support.huaweicloud.com/productdesc-gaussdb"
+  - "support.huaweicloud.com/pwp-gaussdb"
+  - "support.huaweicloud.com/qs-gaussdb"
+  - "support.huaweicloud.com/sdkreference-gaussdb"
+  - "support.huaweicloud.com/usermanual-gaussdb"
+# Область документации объявлена выше (``doc_domains``), но seed-набор ею **не
+# выражается**: ``doc_domains`` — подсказка «где живёт документация», а здесь нужен
+# перечень 5 911 документов, потому что страница каталога не несёт текста. Источник
+# перечисления назван явно, чтобы «5 911 адресов» имели автора и проверяемое
+# происхождение: это машинный индекс вендора, из которого `scripts/derive_llms_seeds.py`
+# выводит блок `corpus_urls.yaml`. Смена источника — новый прогон (`passports_digest`).
+seed_enumeration_source: "https://support.huaweicloud.com/gaussdb/llms.txt"
 satellites: []
 snapshot_date: 2026-11-22

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 from pathlib import Path
 from typing import Any
@@ -327,3 +328,41 @@ def test_comparison_base_passport_loads_from_repository() -> None:
     assert not declared
     assert passport.doc_domains[0] == "www.postgresql.org/docs/18"
     assert passport_urls(passport) == ["https://www.postgresql.org/docs/18/"]
+
+
+def test_seed_enumeration_source_does_not_change_passport_urls() -> None:
+    """``seed_enumeration_source`` — объявление **источника**, а не способ деривации.
+
+    Зачем поле существует (замер 22.11.2026 на GaussDB): у части сайтов страница каталога
+    не несёт текста (77 578 байт разметки, ~1 900 символов, содержимое подгружается
+    скриптом), а вендор публикует машинный индекс на 15 235 документов. ``doc_domains``
+    такую область описать может (18 каталогов), а **перечисление** — нет: его выводит
+    прибор, и паспорт обязан назвать источник, иначе «5 911 адресов» неоткуда проверить.
+
+    Пин нужен потому, что соблазн очевиден: положить список в паспорт и раздавать его
+    через ``passport_urls``. Тогда один и тот же набор жил бы в двух файлах и разъезжался
+    бы без гейта. Здесь фиксируется разделение: ``passport_urls`` отвечает только за
+    ``doc_domains``, а перечисление живёт в ``sources/corpus_urls.yaml`` и проверяется
+    тестом пакета (адрес вне ``doc_domains`` — дефект scope).
+    """
+    passport = Passport(
+        product_id="p",
+        canonical_name="P",
+        vendor="V",
+        jurisdiction="CN",
+        doc_domains=["docs.example.com/area"],
+        seed_enumeration_source="https://docs.example.com/llms.txt",
+        snapshot_date=_dt.date(2026, 11, 22),
+    )
+    assert passport_urls(passport) == ["https://docs.example.com/area/"]
+    # Поле необязательное: паспорт без него читается и ведёт себя как прежде.
+    plain = Passport(
+        product_id="q",
+        canonical_name="Q",
+        vendor="V",
+        jurisdiction="RU",
+        doc_domains=["docs.example.com/area"],
+        snapshot_date=_dt.date(2026, 11, 22),
+    )
+    assert plain.seed_enumeration_source is None
+    assert passport_urls(plain) == passport_urls(passport)
