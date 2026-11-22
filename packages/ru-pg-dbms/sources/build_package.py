@@ -11,9 +11,8 @@
 
 Генератор **детерминирован**: YAML пишется с ``sort_keys=True``/``allow_unicode``,
 CSV — фиксированным порядком строк/колонок и ``lineterminator="\\n"``. Повторный
-прогон даёт байт-идентичные ``catalog.csv`` и ``catalog.lock.csv``: существующие
-``param_id`` переиспользуются из ``catalog.lock.csv`` по ключу
-``(source_file, source_row)`` (иммутабельность slug, §13).
+прогон даёт байт-идентичный ``catalog.csv``: ``param_id`` — функция ``title`` и группы,
+порядок строк — порядок источника.
 
 Повреждение psq (``?"`` в 82 ячейках, 63 строки) обходится так:
 
@@ -24,7 +23,11 @@ CSV — фиксированным порядком строк/колонок и
   origin ``needs_human``. Дополнительно каждая повреждённая строка фиксируется полем
   ``row_integrity`` (origin ``needs_human``).
 
-Соблюдается A3: выведенные поля не выдаются за факт — см. ``derived_fields.csv``.
+Соблюдается A3: выведенные поля не выдаются за факт — отчёт генератора печатает
+``needs_human``/``fallback rule``/``corrupted rows``, то есть сколько строк пришло из
+источника, а сколько из fallback. Отдельного артефакта ``derived_fields.csv`` больше нет
+(снят 22.11.2026: 119 ``param_id`` старого каталога, пересечение с текущим — 0, и никто
+его не читал).
 
 Правило A3/§1.3: генератор лежит в ``packages/`` и не влияет на нейтральность ``core/``.
 """
@@ -59,7 +62,6 @@ SRC_PSQ = Path("/mnt/c/Work/gtm/psq_params_091_demo.xlsx")
 SRC_GOLDEN = Path("/mnt/c/Work/gtm/golden_091.xlsx")
 PSQ_SHEET = "final"
 GOLDEN_SHEET = "data"
-PSQ_SOURCE_REF = f"{SRC_PSQ.name}#{PSQ_SHEET}"
 GOLDEN_SOURCE_REF = f"{SRC_GOLDEN.name}#{GOLDEN_SHEET}"
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent
@@ -1240,19 +1242,6 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
 # ---------------------------------------------------------------------------
 
 
-def load_lock() -> dict[tuple[str, str], str]:
-    """Читает существующий ``catalog.lock.csv`` → ``{(source_file, source_row): param_id}``."""
-    path = PACKAGE_DIR / "catalog.lock.csv"
-    lock: dict[tuple[str, str], str] = {}
-    if not path.is_file():
-        return lock
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            key = (row["source_file"], str(row["source_row"]))
-            lock[key] = row["param_id"]
-    return lock
-
-
 def yaml_dump(data: object) -> str:
     """Детерминированный YAML (``sort_keys``, unicode)."""
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=True, default_flow_style=False)
@@ -1274,13 +1263,10 @@ def write_csv(name: str, header: list[str], rows: list[list[object]]) -> None:
 def main() -> int:
     psq = read_psq()
     golden = read_golden()
-    lock = load_lock()
     used_slugs: set[str] = set()
 
-    # --- catalog.csv + derived_fields --------------------------------------
+    # --- catalog.csv ------------------------------------------------------
     catalog_rows: list[list[object]] = []
-    lock_rows: list[list[object]] = []
-    derived_rows: list[list[object]] = []
     baseline_rows: list[list[object]] = []
     param_by_row: dict[int, str] = {}
     needs_human = 0
@@ -1294,11 +1280,11 @@ def main() -> int:
         role_binding = GROUP_ROLE_MAP[group]
 
         title = row["title"]
-        lock_key = (PSQ_SOURCE_REF, str(row["source_row"]))
-        if lock_key in lock:
-            param_id = lock[lock_key]
-        else:
-            param_id = ensure_unique(slug_for(title, group), used_slugs)
+        # ``catalog.lock.csv`` снят 22.11.2026: файл был пуст (один заголовок) и никем,
+        # кроме этого генератора, не читался. Slug выводится из ``title``; неизменность
+        # slug при переименовании держит процедура §13 (``deprecated`` + ``replaced_by``),
+        # а не переиспользование lock-файла.
+        param_id = ensure_unique(slug_for(title, group), used_slugs)
         used_slugs.add(param_id)
         param_by_row[row["source_row"]] = param_id
 
@@ -1310,11 +1296,9 @@ def main() -> int:
         f_damaged = is_damaged(row["semantics"])
         if not (g_damaged or f_damaged):
             rule = str(g_raw).strip()
-            rule_origin = "source"
         else:
             body = clean_head(row["semantics"])[: 300 - len("Засчитывается: ")]
             rule = f"Засчитывается: {body}" if body else "Засчитывается: (семантика отсутствует)"
-            rule_origin = "needs_human"
             fallback_count += 1
 
         # Помечаем строку needs_human, если повреждены F или G (сдвиг колонок).
@@ -1345,33 +1329,6 @@ def main() -> int:
                 "ru|en",
             ]
         )
-        lock_rows.append([param_id, PSQ_SOURCE_REF, row["source_row"], title, GENERATED_AT])
-
-        # --- derived_fields: выведенные/сопоставленные поля (A3) -----------
-        note = ""
-        if row["damaged_cols"]:
-            note = "повреждённые колонки psq: " + ",".join(row["damaged_cols"])
-        derived_rows.append([param_id, "title", title, "source", "колонка C psq дословно", note])
-        derived_rows.append([param_id, "module", module, "mapped", "A psq → module_id", row["module"]])
-        derived_rows.append([param_id, "group", group, "mapped", "B psq → ASCII-slug", row["group_raw"]])
-        derived_rows.append([param_id, "importance", str(row["importance"]).strip(), "source", "колонка D psq", ""])
-        derived_rows.append([param_id, "param_type", "fact", "derived", "нет гарантированной публичной величины → fact", ""])
-        derived_rows.append([param_id, "absence_rule", "distribution_absence", "mapped", "политика пакета для технических fact-параметров", ""])
-        derived_rows.append([param_id, "role_binding", role_binding, "mapped", "group → роль", group])
-        derived_rows.append([param_id, "concept_terms", _json_compact(concept_terms), "derived", "title (RU) + латинские токены и глоссарий RU→EN (EN)", ""])
-        derived_rows.append([param_id, "rule", rule, rule_origin, "чистая G → source; иначе fallback F", note])
-        derived_rows.append(
-            [
-                param_id,
-                "row_integrity",
-                ",".join(row["damaged_cols"]) if row["damaged_cols"] else "clean",
-                "needs_human" if row["damaged_cols"] else "source",
-                "проверка повреждаемости ячеек psq (F..I)",
-                note,
-            ]
-        )
-        derived_rows.append([param_id, "param_id", param_id, "derived", "translit(title) с префиксом группы", ""])
-
         # --- baselines ------------------------------------------------------
         baseline = derive_baseline(row["reference"])
         if baseline is not None:
@@ -1382,16 +1339,6 @@ def main() -> int:
                     baseline["min_version"] or "",
                     baseline["inheritance_mode"],
                     baseline["note"] or "",
-                ]
-            )
-            derived_rows.append(
-                [
-                    param_id,
-                    "baseline",
-                    f"{BASELINE_ID}|{baseline['inheritance_mode']}|{baseline['min_version'] or ''}",
-                    "derived",
-                    f"колонка E psq ({baseline['class']})",
-                    str(row["reference"]),
                 ]
             )
 
@@ -1430,11 +1377,6 @@ def main() -> int:
         catalog_rows,
     )
     write_csv(
-        "catalog.lock.csv",
-        ["param_id", "source_file", "source_row", "title", "generated_at"],
-        lock_rows,
-    )
-    write_csv(
         "baselines.csv",
         ["baseline_id", "param_id", "min_version", "inheritance_mode", "note"],
         baseline_rows,
@@ -1444,11 +1386,6 @@ def main() -> int:
         ["product_id", "param_id", "expected_status", "expected_evidence_kind",
          "case_class", "tier", "note"],
         golden_rows,
-    )
-    write_csv(
-        "derived_fields.csv",
-        ["param_id", "field", "value", "origin", "rule", "note"],
-        derived_rows,
     )
 
     package_yaml = {
@@ -1598,7 +1535,6 @@ def main() -> int:
     print(f"catalog rows:  {len(catalog_rows)}")
     print(f"baselines:     {len(baseline_rows)}")
     print(f"golden rows:   {len(golden_rows)} (matched psq params: {matched})")
-    print(f"derived rows:  {len(derived_rows)}")
     print(f"needs_human:   {needs_human} (fallback rule: {fallback_count} = "
           f"повреждена G: {fallback_count - shift_fragments} + сдвиг из F: {shift_fragments})")
     print(f"corrupted rows (любая из F..I): {corrupted_rows}")

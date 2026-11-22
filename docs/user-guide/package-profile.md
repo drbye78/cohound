@@ -77,7 +77,7 @@ packages/example_case/
     manual_artifacts.yaml        шаблонный файл, не читается обычным load_inputs/run
 ```
 
-`catalog.lock.csv`, `derived_fields.csv`, `adversarial/`, `sources/render_modes.yaml`, `sources/scout/` и `sources/crawl_probe/` упоминаются в архитектурной раскладке или связаны с отдельными процедурами; это не обязательные входы обычного запуска и не все присутствуют в шаблоне. `sources/seeds.yaml` — канонический формат по архитектуре; загрузчик сохраняет legacy fallback `sources/corpus_urls.yaml`. В актуальных пакетах ещё встречается legacy-файл. Не считайте архитектурно описанный артефакт автоматически подключённым: сверяйте фактическую команду и loader.
+`adversarial/`, `sources/render_modes.yaml`, `sources/scout/` и `sources/crawl_probe/` упоминаются в архитектурной раскладке или связаны с отдельными процедурами; это не обязательные входы обычного запуска и не все присутствуют в шаблоне. `sources/seeds.yaml` — канонический формат по архитектуре; загрузчик сохраняет legacy fallback `sources/corpus_urls.yaml`. В актуальных пакетах ещё встречается legacy-файл. Не считайте архитектурно описанный артефакт автоматически подключённым: сверяйте фактическую команду и loader.
 
 ## Профильные файлы
 

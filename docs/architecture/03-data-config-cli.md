@@ -31,9 +31,7 @@ repo/
     paths.example.yaml       # пример раскладки операционных каталогов (COHOUND_HOME/COHOUND_*_DIR)
   packages/{case_id}/
     package.yaml             # §4.2
-    catalog.csv              # 11 колонок
-    catalog.lock.csv         # зафиксированные авторские величины каталога (после фиксации)
-    derived_fields.csv       # вычисленные поля каталога (production-экспорт)
+    catalog.csv              # 11 обязательных колонок + 3 необязательные (semantics/evidence/param_class)
     baselines.csv
     cohort.yaml              # §1.6
     golden.csv

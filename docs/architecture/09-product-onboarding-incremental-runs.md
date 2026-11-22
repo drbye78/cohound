@@ -3839,8 +3839,8 @@ diff — инкрементальность была полезна только
   > Источники теперь настоящие, оба вычислимы внутри той же чистой функции:
   > `catalog_version` ← :func:`core.pipeline.digests.catalog_digest` (отпечаток
   > содержимого `inputs.catalog`; авторской версии каталога в пакете нет — `catalog.csv`
-  > это таблица, `catalog.lock.csv` несёт только происхождение строк, поэтому
-  > доказуемый ответ на «какой каталог» один — отпечаток), а `scoring_policy_version` ←
+  > это таблица, поэтому доказуемый ответ на «какой каталог» один — отпечаток), а
+  > `scoring_policy_version` ←
   > :func:`core.pipeline.digests.scoring_policy_version` (`resolved-only-v1+excluded@<hash>`
   > от :func:`core.domain.scoring.scoring_policy_spec`). Формат «имя@хеш» — тот же, что у
   > `prompt_template`: имя без содержимого позволило бы изменить правила, не сменив

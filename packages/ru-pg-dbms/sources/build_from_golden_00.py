@@ -71,7 +71,6 @@ def main() -> None:
     write('golden.csv',['product_id','param_id','expected_status','expected_evidence_kind','case_class','tier','note'],golden)
     write('sources/golden_00_cells.csv',MAP_HEADERS,mapping)
     (PACKAGE/'baselines.csv').write_text('baseline_id,param_id,min_version,inheritance_mode,note\n',encoding='utf-8')
-    (PACKAGE/'catalog.lock.csv').write_text('param_id,source_file,source_row,title,generated_at\n',encoding='utf-8')
     sha=hashlib.sha256(SOURCE.read_bytes()).hexdigest()
     # `generated_at` — когда собран пакет (этот скрипт), `snapshot_date` — дата состояния
     # источника: таблица снята 01.10.2026 (та же дата в шапках паспортов продуктов,
