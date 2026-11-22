@@ -46,7 +46,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:245`).
 - Блокирующий отказ делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:2724`, `core/pipeline/corpus_coverage.py:337-339`, условие 2) —
+  (`core/domain/models.py:3014`, `core/pipeline/corpus_coverage.py:337-339`, условие 2) —
   **пока URL не закрыт объявленным артефактом**: материал, предъявленный артефактом
   (`corpus_docs.origin=manual`), перестаёт делать сеанс неполным (`resolved_manually`,
   `core/pipeline/corpus_coverage.py:416-435`, сверено 07.11.2026, якорь переставлен
@@ -348,7 +348,7 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
-(`core/domain/models.py:1818` — `CrawlSessionProvenance.failed: int`;
+(`core/domain/models.py:1852` — `CrawlSessionProvenance.failed: int`;
 `core/pipeline/report.py:1859-1930` — движки в шапке; `core/pipeline/report.py:2557-2562` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL

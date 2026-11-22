@@ -621,7 +621,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   (`tests/selfcheck.py:1037` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:375`;
   тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1653` и `core/domain/models.py:1817`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1653` и `core/domain/models.py:1852`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:146` (`TEMPLATE_VERSION = "evaluator_v6"`), `templates/{version}.txt`,
