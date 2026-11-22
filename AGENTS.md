@@ -802,9 +802,14 @@ Three facts that are cheap to state and expensive to rediscover:
   version-comparison **tables** (fill 0.034–0.60 vs 0.89–0.97 for prose), which are read by rows
   and are not a defect (`2026-11-16-reading-order.md`). So "reading order is not guaranteed"
   stays a named limit about *other* corpora, not a defect of this one.
-  `error="no_text_layer"` is raised only when the **whole document** has no text: an individual
-  empty page currently vanishes without a mark and does not set `partial` — the visibility fix
-  is plan `26` O26. A failing page does not kill the document (`partial=True`); control
+  `error="no_text_layer"` is raised only when the **whole document** has no text: a page that
+  is read but carries no text layer is counted (`pages_without_text_layer`) and sets
+  `partial=True` with the count and the page list in `partial_reason`, and
+  `pages_converted` subtracts it — otherwise "read 7 of 2763" would read as "read
+  everything", and a silent page downstream would become "the vendor did not state" →
+  `❌` (I2/I2c). Plan `26` O26 closed this on 09.11.2026; the earlier wording here ("an
+  individual empty page vanishes without a mark") described the pre-fix state and was
+  stale. A failing page does not kill the document (`partial=True`); control
   characters and `\r\n` are normalized, without which the
   paragraph chunker matches nothing and the document becomes one chunk.
 - **Recognition provenance is a tri-state, never a zero placeholder.** `ExtractedDoc.pages_ocr`/
