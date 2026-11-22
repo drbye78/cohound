@@ -29,6 +29,7 @@ from measure_zh_retrieval import (  # noqa: E402 — путь к прибору 
     CellResult,
     _paired,
     anchor_census,
+    anchor_visibility,
     is_anchor,
 )
 
@@ -93,6 +94,30 @@ def test_shared_anchor_is_not_counted_for_any_param() -> None:
     assert unique["p3"] == ["TOAST"]
 
 
+@pytest.mark.parametrize(
+    ("title", "terms", "expected"),
+    [
+        ("Плагируемый TOAST", {}, "both"),  # якорь в заголовке — виден обоим плечам
+        ("Хранилище", {"en": ["TOAST storage"], "ru": ["хранилище TOAST"]}, "both"),
+        ("Хранилище", {"en": ["TOAST storage"], "ru": ["хранилище"]}, "en"),
+        ("Хранилище", {"en": ["storage"], "ru": ["TOAST хранилище"]}, "ru"),
+        ("Хранилище", {"en": ["storage"], "ru": ["хранилище"]}, "none"),
+    ],
+)
+def test_anchor_visibility_separates_confounded_params(
+    title: str, terms: dict[str, list[str]], expected: str
+) -> None:
+    """Якорь, живущий только в ``concept_terms.en``, попадает в англоязычный запрос дословно.
+
+    Это смешение, найденное замером 22.11.2026 на русском корпусе: 6 «только en» параметров
+    дали всю разницу +17.1 п.п., а на остальных 28 дискордансов было ноль. Поэтому класс
+    параметра обязан считаться, иначе сравнение языков читается как «en лучше ищет».
+    """
+    row = _row("p1", title, terms)
+    unique, _df = anchor_census([row])
+    assert anchor_visibility(row, unique["p1"]) == expected
+
+
 def _cell(param_id: str, lang: str, profile: str, hit: bool) -> CellResult:
     return CellResult(
         param_id=param_id,
@@ -141,6 +166,26 @@ def test_lang_axis_compares_languages_at_fixed_profile() -> None:
     assert item["n"] == 2
     assert item["only_right"] == 1
     assert item["delta"] == pytest.approx(0.5)
+
+
+def test_params_filter_keeps_only_named_parameters() -> None:
+    """Чистое сравнение считается на подмножестве, а не на всех параметрах.
+
+    Фильтр нужен именно для смешения: параметр с якорем только в ``concept_terms.en``
+    не может попасть в русское плечо по построению запроса, и его нельзя держать в
+    сравнении «какой язык лучше ищет».
+    """
+    cells = [
+        _cell("a", "ru", "R0", False),
+        _cell("a", "en", "R0", True),
+        _cell("b", "ru", "R0", True),
+        _cell("b", "en", "R0", True),
+    ]
+    item = _paired(cells, axis="lang", fixed="R0", left="ru", right="en", params={"b"})
+    assert item is not None
+    assert item["n"] == 1
+    assert item["delta"] == pytest.approx(0.0)
+    assert item["only_right"] == 0
 
 
 def test_unpaired_params_are_dropped_not_zeroed() -> None:
