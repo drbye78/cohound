@@ -91,8 +91,8 @@
 
 ```
 RawPage (core/ports/types.py:96-126)
-  → retain (core/pipeline/corpus_ingest.py:1283)   # сам хеширует байты, кладёт в corpus_raw
-    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1546,
+  → retain (core/pipeline/corpus_ingest.py:1294)   # сам хеширует байты, кладёт в corpus_raw
+    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1659,
       `persist_docs`)
 ```
 

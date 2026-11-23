@@ -66,6 +66,7 @@ from core.domain import (
     ProductMode,
     RefreshPolicy,
     ReuseKind,
+    WorkClass,
 )
 from core.domain.doc_tables import TableRef
 from core.pipeline.artifact_probe import probe_artifact
@@ -123,6 +124,7 @@ from core.pipeline.manual_artifacts import (
     ManualArtifact,
 )
 from core.pipeline.refresh_modes import dispatch_refresh
+from core.pipeline.resources import BUDGET_UNACCOUNTED
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.crawl_errors import is_transient_fetch_error
@@ -5690,13 +5692,24 @@ def apply_revalidation_cap(
     )
 
 
-def note_scheduling(limits: CrawlLimits, *, counters: CorpusCounters) -> None:
+def note_scheduling(
+    limits: CrawlLimits,
+    *,
+    counters: CorpusCounters,
+    work_class: WorkClass | None = None,
+    window: int | None = None,
+) -> None:
     """Запоминает разрешённое окно экстракции корня (F0, наблюдаемость расписания).
 
     Максимум по корням, а не последнее значение: пул — фазовый по ключу
-    ``(уровень, окно)``, и фактическая ширина параллелизма фазы — самая широкая из
-    использованных. ``derived`` — «хотя бы на одном корне» (§2.10): тогда источник
+    ``(уровень, механизм, окно)``, и фактическая ширина параллелизма фазы — самая широкая
+    из использованных. ``derived`` — «хотя бы на одном корне» (§2.10): тогда источник
     расписания в метриках — бюджет памяти, а не воля оператора.
+
+    ``work_class``/``window`` (F0, полосы потребителя) публикуют окно **по классу работы**:
+    одно число на прогон больше не описывает расписание, потому что HTML-полоса и
+    PDF-полоса имеют разные окна по построению. ``window is None`` — полоса шла inline
+    (пула нет); такой класс в разбивку не попадает: «окна нет» ≠ «окно 0».
     """
     if limits.extract_workers is not None:
         candidate = int(limits.extract_workers)
@@ -5714,6 +5727,40 @@ def note_scheduling(limits: CrawlLimits, *, counters: CorpusCounters) -> None:
             counters.observed_extract_max_tasks = candidate_tasks
     if limits.extract_workers_derived:
         counters.observed_extract_derived = True
+    if work_class is not None and window is not None:
+        by_class = counters.observed_extract_workers_by_class
+        by_class[work_class.value] = max(by_class.get(work_class.value, 0), int(window))
+
+
+def note_budget_accounting(
+    counters: CorpusCounters,
+    *,
+    accounting: str | None,
+    in_flight_mb_peak: int | None,
+    skipped: dict[str, int],
+) -> None:
+    """Запоминает учёт памяти «в полёте» (F0): пик суммы и отложенные старты.
+
+    Пик берётся максимумом по продуктам, отложенные старты — суммой: оба факта относятся
+    к бюджету **узла**, а не продукта, поэтому агрегируются, а не перезаписываются.
+
+    ``accounting``: ``accounted`` — сумма пиков удерживалась; ``class_budget_unaccounted``
+    — бюджета нет и учёт невозможен (токен **сильнее** частичного учёта: один продукт без
+    бюджета не должен маскироваться другим, у которого бюджет был); ``None`` — учёт не
+    применялся вовсе (полос не было), и это не «всё поместилось».
+    """
+    if accounting == BUDGET_UNACCOUNTED or (
+        accounting is not None and counters.observed_budget_accounting is None
+    ):
+        counters.observed_budget_accounting = accounting
+    if in_flight_mb_peak is not None:
+        current = counters.observed_in_flight_mb_peak
+        counters.observed_in_flight_mb_peak = (
+            in_flight_mb_peak if current is None else max(current, in_flight_mb_peak)
+        )
+    for work_class, count in skipped.items():
+        by_class = counters.observed_class_skipped_for_budget
+        by_class[work_class] = by_class.get(work_class, 0) + int(count)
 
 
 def owner_root(

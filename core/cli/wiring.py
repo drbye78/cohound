@@ -157,6 +157,7 @@ from core.pipeline.resources import (
     MEM_BUDGET_ENV,
     PARENT_FLOOR_MB,
     MemoryBudgetError,
+    class_window_plan,
     cuda_available,
     cuda_total_vram_mb,
     pdf_peak_mb,
@@ -3060,7 +3061,10 @@ def preflight_extraction_budget(
     windows: list[str] = []
     seen: set[tuple[int, str]] = set()
     seen_vram: set[tuple[str, str]] = set()
+    # Два разных предупреждения — два разных ключа «уже сказано»: ``seen_window``
+    # публикует окно уровня (main), ``seen_sum`` — сумму окон по классам работы (F0).
     seen_window: set[tuple[str, str]] = set()
+    seen_sum: set[tuple[str, str]] = set()
     for root in roots:
         try:
             limits = resolve_crawl_limits(
@@ -3121,6 +3125,53 @@ def preflight_extraction_budget(
                 f"пик={pdf_peak_mb(level, pdf_pipeline)} MB, бюджет {mem_budget_mb} MB, "
                 f"окно {capacity}"
             )
+        # F0: **сумма** окон по классам работы. Окно каждого класса считается так, будто он
+        # в корпусе один; пики же складываются: при бюджете 4500 MB это 12×317 (HTML) +
+        # 1×3679 (docling ``layout_tables``) = 7483 MB против доступных 4000 MB. Это
+        # **не** отказ: потребитель ведёт общий счётчик памяти и откладывает старты
+        # (``class_skipped_for_budget``), поэтому сумма держится по построению. Предупреждение
+        # нужно, чтобы упор в бюджет **узла** был виден до прогона, а не только в метриках
+        # после — иначе «полосы разошлись» выглядело бы как «полосы узкие».
+        if (
+            mem_budget_mb is not None
+            and derive_extract_workers
+            and limits.extract_workers_derived
+        ):
+            plan = class_window_plan(
+                mem_budget_mb, level, pdf_pipeline, pdf_device=limits.pdf_device
+            )
+            room = mem_budget_mb - PARENT_FLOOR_MB
+            measured = {
+                cls: (window, peak)
+                for cls, (window, peak) in plan.items()
+                if peak is not None and window > 0
+            }
+            total = sum(window * peak for window, peak in measured.values())
+            plan_key = (level.value, pdf_pipeline.value)
+            if room > 0 and total > room and plan_key not in seen_sum:
+                seen_sum.add(plan_key)
+                parts = " + ".join(
+                    f"{cls.value} {window}×{peak}"
+                    for cls, (window, peak) in measured.items()
+                )
+                unmeasured = [
+                    cls.value
+                    for cls, (window, peak) in plan.items()
+                    if peak is None and window > 0
+                ]
+                warnings.append(
+                    "crawl.extract_workers: сумма окон по классам работы "
+                    f"{parts} = {total} MB > бюджет {room} MB (MemAvailable − "
+                    f"PARENT_FLOOR_MB {PARENT_FLOOR_MB}) — старты идут под общим учётом "
+                    "памяти: избыток откладывается (class_skipped_for_budget в "
+                    "metrics.json.resources.scheduling), отказом это не является"
+                    + (
+                        f"; пик не измерен у {', '.join(unmeasured)} — эти классы идут "
+                        "по одному"
+                        if unmeasured
+                        else ""
+                    )
+                )
         if limits.extract_workers_derived:
             if limits.extract_workers == 0 and error is None:
                 error = MemoryBudgetError(

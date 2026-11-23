@@ -249,7 +249,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
 > - ✅ preflight не отказывает в работе, которой не будет, **и не молчит о работе, которая
 >   будет**: пропуск решается **фактом состояния**, а не словом политики
->   (`core/cli/wiring.py:2833`, `_documents_needing_rebuild`). При `--refresh offline`
+>   (`core/cli/wiring.py:2910`, `_documents_needing_rebuild`). При `--refresh offline`
 >   корпус берётся из durable-чанков, но **негодный** набор (чужая `chunker_version`,
 >   пустой `chunk_meta`) заставляет `rebuild_from_stored_bytes` прочитать документ текущим
 >   экстрактором — сети нет, работа и пик памяти те же. Поэтому гейт считает по
@@ -275,7 +275,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 > - ✅ liveness: `heartbeat_at`/`owner`, `interrupted` в словаре —
 >   `core/pipeline/liveness.py:54,66`, порог 600 s / интервал 60 s.
 > - ⬜ изоляция прогона от соседей по памяти (cgroup/unit) — **не сделана**: cgroup только
->   упомянут в комментарии о том, что `MemAvailable` врёт (`core/pipeline/resources.py:425`),
+>   упомянут в комментарии о том, что `MemAvailable` врёт (`core/pipeline/resources.py:455`),
 >   изоляции запуска нет.
 >
 > **Exit ✅ достигнут (2026-10-27, носитель заменён 06.11):** прогон `ru-pg-dbms-3edf2b06097c`
@@ -631,8 +631,8 @@ docling, а не писатель. При 100 параллельных прог�
   F1 можно начинать, но до изоляции вывод «прогон упал» неотличим от «сосед съел память»,
   а значит F1 не может закрыть G6 честно.
   → ⬜ не сделано: изоляции прогона (cgroup/unit) в коде нет — cgroup упомянут только как
-  источник вранья `MemAvailable` (`core/pipeline/resources.py:425`); бюджет выводится из
-  `MemAvailable` (✅, `core/pipeline/resources.py:417-441`), а изоляция — нет.
+  источник вранья `MemAvailable` (`core/pipeline/resources.py:455`); бюджет выводится из
+  `MemAvailable` (✅, `core/pipeline/resources.py:451-471`), а изоляция — нет.
 - **Нужен ли флот.** → ✅ решено 07.11.2026: флот объявлен обязательным (горизонтальная
   масштабируемость за пределы одного хоста); работы и порядок — `24` §8. Открытым остаётся не
   «нужен ли», а размещение и носитель артефактов (`24` §4, §11).

@@ -59,6 +59,7 @@ __all__ = [
     "FAMILY_MARKDOWN",
     "FAMILY_TEXT",
     "MARKDOWN_SUFFIXES",
+    "OFFICE_SUFFIXES",
     "OOXML_MARKER",
     "OOXML_MARKER_NAME",
     "PDF_SUFFIX",
@@ -77,6 +78,8 @@ __all__ = [
     "is_terminal_artifact_url",
     "is_textual_content_type",
     "normalize_attachment_formats",
+    "normalize_mime",
+    "path_suffix",
     "textual_content_type",
     "textual_family",
     "textual_suffix",
@@ -109,6 +112,14 @@ PDF_SUFFIX = ".pdf"
 
 #: Расширения документных форматов, поддерживаемых экстрактором (нижний регистр).
 DOCUMENT_SUFFIXES: tuple[str, ...] = (PDF_SUFFIX, ".docx", ".pptx", ".xlsx")
+
+#: Документные суффиксы **без** PDF — Office Open XML. Отдельная константа нужна потому,
+#: что PDF и Office обслуживают разные механизмы (``crawl.pdf_pipeline`` и
+#: ``crawl.document_level``), и «документный суффикс» без этого различия склеил бы две
+#: разные цены работы (``WorkClass``): у Office уровня и устройства нет вовсе.
+OFFICE_SUFFIXES: tuple[str, ...] = tuple(
+    suffix for suffix in DOCUMENT_SUFFIXES if suffix != PDF_SUFFIX
+)
 
 #: Суффиксы markdown-разметки (нижний регистр). Отдельная группа нужна не для допуска
 #: (допуск текста общий), а для выбора чанкера: разметка режется по заголовкам
@@ -253,7 +264,17 @@ def _mime(content_type: str | None) -> str:
     return content_type.split(";", 1)[0].strip().lower()
 
 
-def _path_suffix(url_or_name: str) -> str:
+def normalize_mime(content_type: str | None) -> str:
+    """Тот же MIME, что видит реестр: без параметров, нижним регистром (``""`` — пусто).
+
+    Публичная форма :func:`_mime` для вызывающих вне реестра (классификатор класса работы):
+    вторая копия нормализации разошлась бы с первой молча — ``text/HTML; Charset=UTF-8``
+    классифицировался бы одним, а искался другим.
+    """
+    return _mime(content_type)
+
+
+def path_suffix(url_or_name: str) -> str:
     """Суффикс basename URL/имени файла в нижнем регистре (``""`` — суффикса нет).
 
     Путь percent-декодируется и очищается от query/fragment — то же правило, что у
@@ -261,6 +282,10 @@ def _path_suffix(url_or_name: str) -> str:
     """
     path = urlsplit(url_or_name).path or url_or_name
     return PurePosixPath(unquote(path)).suffix.lower()
+
+
+#: Прежнее приватное имя — реестр зовёт его изнутри; публичная форма одна.
+_path_suffix = path_suffix
 
 
 # --------------------------------------------------------------------------- #

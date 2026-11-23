@@ -456,6 +456,29 @@ pdf_device:
   - cpu
   - cuda
 
+# F0/расписание. Класс РАБОТЫ конверсии (WorkClass): цена одного документа — пик RAM/VRAM
+# и наличие моделей, — а не методология и не условие измерения. Поэтому класс НЕ входит в
+# `run_id` (как и `extract_workers`: число одновременных исполнителей — расписание, а не
+# условие измерения, иначе `run_id` стал бы функцией хоста) и НЕ меняет статусы I1–I23;
+# он входит в провенанс расписания (`metrics.json.resources.scheduling.extract_workers_by_class`)
+# и решает, сколько заданий класса помещается в бюджет памяти одновременно.
+# Зачем разделение вообще: в одном FIFO с окном 1 HTML-страница (медиана 0.21 s, 90 MB) и
+# PDF `layout_tables` (7.2 s, 3679 MB пика) стоят друг за другом, поэтому 11.9 ядра из 12
+# простаивают, пока единственный docling-воркер держит документ
+# (`docs/reports/measurements/2026-11-07-work-class-peaks.md`).
+# Значения: model_free — html/text/markdown/epub, читатели без моделей; office —
+# docx/pptx/xlsx (docling, без level/device); pdf_structured — docling, level+device;
+# pdf_text_layer — текстовый слой pdfium, моделей нет; container — распаковка (спуск),
+# не экстракция. Пик office не измерен ⇒ окно 1 с видимой причиной
+# (`work_class_peak_unmeasured`), а не выдуманное число (A3).
+# Операционное перечисление (commodity-слой, A2) — добавление без бампа версии словаря.
+work_class:
+  - model_free
+  - office
+  - pdf_structured
+  - pdf_text_layer
+  - container
+
 # 16 §4.1. Устройство эмбеддера (embed.device): на чём считаются векторы корпуса.
 # Значения только cpu | cuda — `auto` НЕ существует по той же причине, что у pdf_device
 # выше (R5): объявленная ось обязана действовать, а `auto` = «устройство выбрало

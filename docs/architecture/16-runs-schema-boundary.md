@@ -354,10 +354,10 @@ per-site (`core/pipeline/crawl_frontier.py:843`) — два уровня одн�
 - **Порт эмбеддера не меняется.** `core/ports/embedder.py:15-21` знает только `model_id`/`dim`,
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
-  **явным параметром**: `core/pipeline/phases.py:1373-1374` → `core/pipeline/corpus.py:1688`
-  (объявление оси) и `core/pipeline/corpus.py:4735`/`core/pipeline/corpus.py:4810`
+  **явным параметром**: `core/pipeline/phases.py:1373-1374` → `core/pipeline/corpus.py:1790`
+  (объявление оси) и `core/pipeline/corpus.py:5155`/`core/pipeline/corpus.py:5192`
   (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
-  (`core/pipeline/corpus.py:2293` — единственный источник этого значения).
+  (`core/pipeline/corpus.py:2461` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
@@ -688,7 +688,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
   (`docs/status-dictionary.yaml:779`), `run_scope`
   (`docs/status-dictionary.yaml:808`), перечень статусов продукта прогона `run_product_status`
   (`docs/status-dictionary.yaml:822`). Проверка —
-  `core/domain/dictionary.py:82` `assert_dictionary_integrity`, `required`-список
+  `core/domain/dictionary.py:83` `assert_dictionary_integrity`, `required`-список
   (`core/domain/dictionary.py:121` `embed_device`,
   `core/domain/dictionary.py:130` `run_product_status`), `checks`-таблица
   (`core/domain/dictionary.py:187`, `core/domain/dictionary.py:219`);
@@ -745,7 +745,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
      durable-элементы для дренажа». ✅ **As-built** (`core/pipeline/corpus_drain.py:1616-1632`:
      `charged_urls` → `add_revalidate_seed`, комментарий называет дефект 3 и `09` §6.3).
      Плюс приписывание владельцу — тем же предикатом, что
-     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5415`, вызов —
+     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5417`, вызов —
      `core/pipeline/corpus.py:3915`: побеждает самый специфичный
      `root_path_prefix`), а не «кто первый» (дефект 1); продукт-wide множество
      `resume_counted` (`core/pipeline/corpus.py:3538`) остаётся — меняется правило

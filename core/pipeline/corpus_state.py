@@ -28,7 +28,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -88,3 +88,21 @@ class CorpusCounters:
     #: Хотя бы на одном корне окно выведено из бюджета памяти, а не объявлено оператором:
     #: источник расписания в метриках тогда ``derived``, а не ``declared``.
     observed_extract_derived: bool = False
+
+    #: F0: фактическое окно по **классам работы** (``{work_class: window}``, максимум по
+    #: строкам класса). Одно число перестало описывать расписание, когда полосы разошлись:
+    #: HTML идёт с окном из своего пика (317 MB), PDF — из пика docling (3679 MB). Класс,
+    #: которого здесь нет, либо не встречался, либо шёл inline — «не измеряли» ≠ «ноль».
+    observed_extract_workers_by_class: dict[str, int] = field(default_factory=dict)
+
+    #: F0: наблюдённый максимум суммы пиков заданий «в полёте», MB. ``None`` — учёт не
+    #: вёлся (бюджет памяти не объявлен). Ноль здесь означал бы «ничего не занимали», а это
+    #: утверждение, которого без бюджета сделать нельзя.
+    observed_in_flight_mb_peak: int | None = None
+
+    #: F0: сколько стартов отложено из-за бюджета, по классам работы (события, не строки).
+    #: Растущий счётчик при непустой очереди — «бюджет узла исчерпан», а не «полоса узкая».
+    observed_class_skipped_for_budget: dict[str, int] = field(default_factory=dict)
+
+    #: F0: ``accounted`` | ``class_budget_unaccounted`` | ``None`` (учёт не применялся).
+    observed_budget_accounting: str | None = None

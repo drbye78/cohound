@@ -16,11 +16,11 @@ import contextlib
 import operator
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.domain import CorpusChunk, CorpusDoc
+from core.domain import CorpusChunk, CorpusDoc, WorkClass
 from core.pipeline.embed_cache import EmbedCache
 from core.pipeline.liveness import Heartbeat
 from core.ports.embedder import EmbedderPort
@@ -306,6 +306,10 @@ class _CorpusStageTimings:
     build_s: float = 0.0
     #: Фактическое окно экстракции (максимум по корням продукта); ``None`` — inline-путь.
     extract_workers: int | None = None
+    #: Фактическое окно по **классам работы** (``{work_class: window}``): полосы потребителя
+    #: имеют разные окна по построению, и одно число их больше не описывает. Класс, которого
+    #: здесь нет, либо не встречался, либо шёл inline (окна у него нет — не «ноль»).
+    extract_workers_by_class: dict[str, int] = field(default_factory=dict)
     #: Сколько **главный поток** провёл в закрытии продукта (конверсия очереди, Pass B,
     #: покрытие, строка продукта) — на это время выдача новых волн стоит (F9 плана 17).
     #: Это **не** бакет работы: интервал пересекается с ``embed_s``/``build_s``, поэтому
@@ -327,18 +331,29 @@ class _CorpusStageTimings:
         self.embed_s = 0.0
         self.build_s = 0.0
         self.extract_workers = None
+        self.extract_workers_by_class = {}
         self.product_tail_s = 0.0
 
-    def note_extract_window(self, window: int | None) -> None:
-        """Запоминает фактическое окно экстракции корня (максимум по корням продукта).
+    def note_extract_window(
+        self, window: int | None, work_class: WorkClass | None = None
+    ) -> None:
+        """Запоминает фактическое окно экстракции строки (максимум по строкам продукта).
 
-        Максимум, а не последнее значение: окно резолвится на корень, а бакет
+        Максимум, а не последнее значение: окно резолвится на строку, а бакет
         ``extract_wait_s`` — на продукт, и он включает ожидание чужих заданий по самому
         широкому окну.
+
+        ``work_class`` (F0, полосы) публикует то же окно **по классу работы**: ``extract_workers``
+        остаётся максимумом для совместимости отчёта, а разбивка уходит в
+        ``resources.stage_timings``/``scheduling``. ``window is None`` — строка шла inline:
+        в разбивку не попадает, потому что окна у неё нет, а не ноль.
         """
         if window is None:
             return
         candidate = int(window)
+        if work_class is not None:
+            by_class = self.extract_workers_by_class
+            by_class[work_class.value] = max(by_class.get(work_class.value, 0), candidate)
         if self.extract_workers is None or candidate > self.extract_workers:
             self.extract_workers = candidate
 
@@ -364,6 +379,10 @@ class _CorpusStageTimings:
             "extract_wait_s": round(self.extract_wait_s, 3),
             "chunk_s": round(self.chunk_s, 3),
             "extract_workers": self.extract_workers,
+            # Окно по классам работы: одно число больше не описывает расписание (полосы
+            # HTML и PDF имеют разные окна по построению). Пустой словарь — полос не было
+            # (inline-путь) либо класс не встречался.
+            "extract_workers_by_class": dict(self.extract_workers_by_class),
             # Не max(0, …): отрицательное — видимый дефект инструментирования.
             "overhead_s": round(elapsed_s - pass_a, 3),
         }

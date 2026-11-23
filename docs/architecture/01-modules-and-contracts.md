@@ -232,7 +232,7 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 ### 2.5. `domain/r2.py`, `domain/anchors.py`, `domain/dictionary.py`
 
 `r2.py` держит `apply_r2` (`core/domain/r2.py:11`), `dictionary.py` —
-`load_dictionary`/`assert_dictionary_integrity` (`core/domain/dictionary.py:73,82`).
+`load_dictionary`/`assert_dictionary_integrity` (`core/domain/dictionary.py:74,83`).
 `anchors.py` добавляет `resolve_source_url(source_id, resolver: SourceResolver)` — **детерминированный**
 резолв (I10/I15): `source_id` кодирует `product_id`+`doc_id`+`chunk_no` (+ привязку к `build_id`),
 резолв — по индексу, без сети. `SourceResolver` — reader-протокол, **объявленный внутри `domain/`**
@@ -508,7 +508,7 @@ trafilatura) → EPUB (`extract_epub`, stdlib OCF, главы через тот 
 действуют) либо `text_layer` (собственный текстовый слой файла, `pypdfium2`, без моделей — уровням
 и устройству нечего объявлять). Композит получает отдельный `pdf`-адаптер (`extract_pdf_text`),
 который перехватывает **только** PDF-суффикс, оставляя Office docling'у
-(`core/cli/wiring.py:2289`). Явно выбранный `text_layer` при недоступном/сломанном бэкенде —
+(`core/cli/wiring.py:2290`). Явно выбранный `text_layer` при недоступном/сломанном бэкенде —
 `WiringError` → `EXIT_USAGE`, **не** тихая подмена (иначе `extractor_version` назвал бы движок,
 который не исполнялся).
 

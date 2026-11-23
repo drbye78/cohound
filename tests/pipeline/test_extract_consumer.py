@@ -21,25 +21,40 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import threading
 import time
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from core.domain import (
     AnchorRelation,
     Cohort,
     CohortEntry,
     CrawlRunConfig,
+    DocumentLevel,
     ExtractQueueState,
+    PdfPipeline,
     RunConfig,
     RunMode,
+    WorkClass,
 )
-from core.pipeline import RunPlan
+from core.pipeline import RunPlan, extract_consume
 from core.pipeline.corpus import IndexBuild, build_corpus
 from core.pipeline.crawl_session import default_session_id
 from core.pipeline.extraction_runtime import ExtractionPool
+from core.pipeline.resources import (
+    BUDGET_UNACCOUNTED,
+    DOCLING_PEAK_MB,
+    MODEL_FREE_PEAK_MB,
+    PARENT_FLOOR_MB,
+    ResourcesObservation,
+    workers_for_class,
+)
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -276,6 +291,27 @@ def _pool(created: list[_ThreadPool], **kw: Any) -> ExtractionPool:
     return ExtractionPool(pool_factory=_pool_factory(created, **kw), worker=_file_worker)
 
 
+def _failing_pool(created: list[_ThreadPool], names: tuple[str, ...] = ("h0",)) -> ExtractionPool:
+    """Пул, чей воркер отказывает на перечисленных документах.
+
+    Отказ нужен **в воркере**, а не в ``extractor``: при объявленном пуле конверсию ведёт
+    он (:class:`ExtractionPool`), и подменённый экстрактор до строки не доходит. Так тест
+    проверяет возврат резерва на пути ``failed``, а не на пути, где отказа не было.
+    """
+
+    def _worker(request: Any) -> ExtractedDoc:
+        data = Path(request.raw_path).read_bytes()
+        if any(f"body-{name}".encode() in data for name in names):
+            raise RuntimeError("extractor refused this document")
+        return ExtractedDoc(
+            text=data.decode("utf-8", errors="replace"),
+            content_hash=content_hash(data),
+            extractor_version="extractor-1",
+        )
+
+    return ExtractionPool(pool_factory=_pool_factory(created), worker=_worker)
+
+
 def _build(
     tmp_path: Path,
     store: SqliteStore,
@@ -484,3 +520,442 @@ def test_document_write_order_follows_the_queue_not_completion(tmp_path: Path) -
     assert completions[0] != submissions[0]
     # Два разных расписания дают одну и ту же последовательность строк.
     assert sequences[0] == sequences[1]
+
+# --------------------------------------------------------------------------- #
+# (4) Ширина полосы не входит в идентичность корпуса (F0)
+# --------------------------------------------------------------------------- #
+
+
+def _corpus_identity(store: SqliteStore) -> tuple[list[Any], list[Any]]:
+    """Идентичность корпуса: ``doc_id``/``chunk_id``/``content_hash`` и текст чанков.
+
+    Читается из БД, а не из накопителя фазы: предмет пина — то, что записано, а не то,
+    что фаза держала в памяти.
+    """
+    docs = [
+        (row["doc_id"], row["url"], row["content_hash"], row["extractor_version"])
+        for row in store.conn.execute(
+            "SELECT doc_id, url, content_hash, extractor_version "
+            "FROM corpus_docs ORDER BY url"
+        )
+    ]
+    chunks = [
+        (
+            row["chunk_id"],
+            row["doc_id"],
+            row["url"],
+            int(row["chunk_no"]),
+            row["content_hash"],
+            row["text"],
+            row["context_prefix"],
+        )
+        for row in store.conn.execute(
+            "SELECT chunk_id, doc_id, url, chunk_no, content_hash, text, "
+            "context_prefix FROM corpus_chunks ORDER BY url, chunk_no"
+        )
+    ]
+    return docs, chunks
+
+
+def test_window_one_and_window_n_give_the_same_corpus_identity(tmp_path: Path) -> None:
+    """Пин F0: окно полосы — расписание, а не содержимое.
+
+    Сравниваются два расписания **одной** работы:
+
+    * окно 1 — пул с рециклингом воркеров (``extract_max_tasks_per_child``), то есть
+      прежнее поведение «одно задание в полёте, воркер пересоздаётся»;
+    * окно N — объявленная ось ``crawl.extract_workers=3``.
+
+    Требование: ``doc_id``/``chunk_id``/``content_hash``, текст чанков, порядок записи
+    документов и идентичность партиции совпадают до последнего символа. Если бы
+    ``content_hash`` или порядок вставки зависели от ширины окна, ``partition_build_id``
+    описывал бы расписание, а не корпус, и один ``run_id`` давал бы разные партиции.
+    """
+    runs: list[tuple[Any, dict[str, int], list[int]]] = []
+    for index, (defaults, recycle) in enumerate(
+        (
+            (CrawlRunConfig(max_depth=1, extract_max_tasks_per_child=2), True),
+            (CrawlRunConfig(max_depth=1, extract_workers=3), False),
+        )
+    ):
+        store = SqliteStore(":memory:")
+        created: list[_ThreadPool] = []
+        try:
+            pool = ExtractionPool(
+                pool_factory=_pool_factory(created),
+                worker=_file_worker,
+                supports_worker_recycling=recycle,
+            )
+            result = _build(
+                tmp_path / f"window-{index}",
+                store,
+                extraction_pool=pool,
+                crawl_defaults=defaults,
+            )
+            assert result.errors == []
+            build = _build_of(result)
+            observation = next(
+                e for e in result.log_entries if isinstance(e, ResourcesObservation)
+            )
+            runs.append(
+                (
+                    (
+                        _corpus_identity(store),
+                        _doc_url_sequence(store),
+                        build.index_build_id,
+                        [
+                            (entry.product_id, entry.partition_build_id)
+                            for entry in build.entries
+                        ],
+                    ),
+                    dict(observation.extract_workers_by_class),
+                    [p.max_inflight for p in created],
+                )
+            )
+        finally:
+            store.close()
+
+    # Расписания действительно разные — иначе тест не отличал бы окно 1 от окна N.
+    # Сверяется **опубликованное** окно полосы, а не наблюдённая одновременность: потоки
+    # успевают завершиться между подачами, и ``max_inflight`` — факт планировщика ОС,
+    # а не решение потребителя (на этом он и падал под нагрузкой).
+    assert runs[0][1] == {"model_free": 1}, runs[0][1]
+    assert runs[1][1] == {"model_free": 3}, runs[1][1]
+    # Наблюдённая одновременность не превышает объявленного окна — верхняя граница.
+    assert max(runs[0][2]) <= 1, runs[0][2]
+    assert max(runs[1][2]) <= 3, runs[1][2]
+    assert runs[0][0] == runs[1][0]
+
+
+class _MixedCrawler(_Crawler):
+    """Краулер с двумя классами работы: ``/doc.pdf`` отдаётся как PDF, остальное — HTML."""
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008
+        page = super().fetch(url, plan)
+        if url.endswith(".pdf"):
+            return dataclasses.replace(page, content_type="application/pdf")
+        return page
+
+
+def test_each_work_class_gets_its_own_window_from_the_budget(tmp_path: Path) -> None:
+    """Полосы классов: HTML и PDF получают **разные** окна из одного бюджета.
+
+    Бюджет взят так, что три HTML-страницы помещаются (317 MB каждая), а docling
+    ``full`` (4833 MB) — ни одной. Одно общее окно в этой точке либо морило HTML в
+    очереди за PDF (окно 0/1), либо обещало память, которой нет (окно 3 для PDF).
+    Проверяется фактическая ширина полос — по пулам, а не по отчёту: пул адресуется
+    ключом ``(level, pdf_pipeline, window)``, поэтому разные окна дают разные пулы.
+    """
+    budget = 500 + 3 * MODEL_FREE_PEAK_MB
+    pages: dict[str, bytes] = {
+        ROOT: b'<html><a href="/a">a</a><a href="/doc.pdf">pdf</a></html>',
+        f"{ROOT}a": b"<html>body-a</html>",
+        f"{ROOT}doc.pdf": b"%PDF-1.4 body-pdf",
+    }
+    store = SqliteStore(":memory:")
+    created: list[_ThreadPool] = []
+    try:
+        result = _build(
+            tmp_path,
+            store,
+            crawler=_MixedCrawler(pages),
+            extraction_pool=_pool(created),
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+            derive_extract_workers=True,
+            mem_budget_mb=budget,
+        )
+        # Непоместившийся класс назван, а не помолчал: окно 1 без причины выглядело бы
+        # замером. Это единственное сообщение прогона — провалов нет.
+        assert [line for line in result.errors if "не помещается в бюджет" not in line] == []
+        assert any("pdf_structured" in line for line in result.errors), result.errors
+        assert all(row.state is ExtractQueueState.DONE for row in _queue(store))
+
+        # Две полосы с разной шириной: HTML — 3 (по 317 MB), PDF — 1 (пик не помещается,
+        # поэтому окно 1, а не выдуманное число).
+        by_size = {pool.size: pool for pool in created}
+        assert sorted(by_size) == [1, 3], [pool.size for pool in created]
+        pdf_urls = [url for url in by_size[1].submitted if url.endswith(".pdf")]
+        assert pdf_urls == [f"{ROOT}doc.pdf"], by_size[1].submitted
+        # HTML-документы не попали в полосу PDF и наоборот.
+        assert not [url for url in by_size[3].submitted if url.endswith(".pdf")]
+        # Оба класса доведены до корпуса: разное окно не потеряло документ.
+        docs = {row["url"] for row in store.conn.execute("SELECT url FROM corpus_docs")}
+        assert docs == set(pages)
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# (5) Учёт памяти «в полёте»: сумма пиков, а не независимые окна (F0)
+# --------------------------------------------------------------------------- #
+
+
+class _TypedCrawler(_Crawler):
+    """Краулер с объявленными типами: класс работы строки берётся из ``Content-Type``."""
+
+    def __init__(self, pages: dict[str, bytes], types: dict[str, str]) -> None:
+        super().__init__(pages)
+        self.types = dict(types)
+
+    def fetch(self, url: str, plan: FetchPlan = FetchPlan()) -> RawPage:  # noqa: B008
+        page = super().fetch(url, plan)
+        return dataclasses.replace(page, content_type=self.types.get(url, "text/html"))
+
+
+def _observation(result: Any) -> ResourcesObservation:
+    return next(
+        entry for entry in result.log_entries if isinstance(entry, ResourcesObservation)
+    )
+
+
+def _mixed_pages(
+    html_count: int, pdf_count: int
+) -> tuple[dict[str, bytes], dict[str, str]]:
+    """Корень со ссылками на ``html_count`` HTML-страниц и ``pdf_count`` PDF."""
+    html_urls = [f"{ROOT}h{index}" for index in range(html_count)]
+    pdf_urls = [f"{ROOT}d{index}.pdf" for index in range(pdf_count)]
+    links = "".join(
+        f'<a href="{url}">{index}</a>' for index, url in enumerate(html_urls + pdf_urls)
+    )
+    pages: dict[str, bytes] = {ROOT: f"<html>{links}</html>".encode()}
+    for index, url in enumerate(html_urls):
+        # Тело несёт короткое имя: ``_Extractor(fail_names=…)`` ищет ``body-h0``.
+        pages[url] = f"<html>body-h{index}</html>".encode()
+    for index, url in enumerate(pdf_urls):
+        pages[url] = f"%PDF-1.4 body-d{index}".encode()
+    return pages, {url: "application/pdf" for url in pdf_urls}
+
+
+def test_sum_of_windows_may_exceed_budget_but_starts_are_throttled(
+    tmp_path: Path,
+) -> None:
+    """Сумма окон **может** превысить бюджет, но старты держатся учётом памяти.
+
+    Бюджет 8000 MB (доступно 7500): окно HTML — ``7500 // 317`` (сверху CPU), окно
+    ``layout_tables`` — ``7500 // 3679 = 2``. Каждое окно по отдельности помещается, а их
+    сумма — нет (это и есть предусловие теста, считается из тех же функций, а не вписано).
+    Учёт обязан удержать **сумму**: наблюдаемый пик не больше доступного бюджета, а часть
+    стартов отложена — иначе 2 × 3679 + 12 × 317 = 11162 MB против 7500 на 6.9 GB хосте.
+    """
+    budget = 8000
+    room = budget - PARENT_FLOOR_MB
+    level = DocumentLevel.LAYOUT_TABLES
+    pipeline = PdfPipeline.STRUCTURED
+    html_window, _ = workers_for_class(WorkClass.MODEL_FREE, level, pipeline, budget)
+    pdf_window, _ = workers_for_class(WorkClass.PDF_STRUCTURED, level, pipeline, budget)
+    pdf_peak = DOCLING_PEAK_MB[level]
+    # Предусловие: по отдельности помещается, вместе — нет. Если оно перестанет
+    # выполняться, тест обязан упасть, а не проверять вакуум.
+    assert html_window * MODEL_FREE_PEAK_MB <= room
+    assert pdf_window * pdf_peak <= room
+    assert html_window * MODEL_FREE_PEAK_MB + pdf_window * pdf_peak > room
+
+    pages, types = _mixed_pages(html_window + 3, pdf_window)
+    store = SqliteStore(":memory:")
+    created: list[_ThreadPool] = []
+    try:
+        result = _build(
+            tmp_path,
+            store,
+            crawler=_TypedCrawler(pages, types),
+            extraction_pool=_pool(created),
+            crawl_defaults=CrawlRunConfig(max_depth=1, document_level=level),
+            derive_extract_workers=True,
+            mem_budget_mb=budget,
+        )
+        assert result.errors == [], result.errors
+        assert all(row.state is ExtractQueueState.DONE for row in _queue(store))
+
+        observation = _observation(result)
+        assert observation.budget_accounting == "accounted"
+        assert observation.extract_workers_by_class == {
+            "model_free": html_window,
+            "pdf_structured": pdf_window,
+        }
+        # Сумма пиков «в полёте» не превысила доступного бюджета ни в один момент.
+        assert observation.in_flight_mb_peak is not None
+        assert observation.in_flight_mb_peak <= room, observation.in_flight_mb_peak
+        # И это достигнуто откладыванием стартов, а не тем, что окна были малы.
+        assert observation.class_skipped_for_budget, observation.class_skipped_for_budget
+        assert sum(observation.class_skipped_for_budget.values()) > 0
+    finally:
+        store.close()
+
+
+def test_in_flight_released_on_settle(tmp_path: Path) -> None:
+    """Резерв возвращается на **каждом** пути закрытия строки: успех, отказ, мёртвый пул.
+
+    Проверка устроена так, что утечка сразу видна: бюджет 4000 MB (доступно 3500) даёт окно
+    ``3500 // 317 = 11`` для HTML и 12 строк в очереди. Двенадцатая строка стартует только
+    если одиннадцать предыдущих **вернули** свои резервы; забытый возврат оставляет счётчик
+    на 3487 MB, двенадцатая не помещается (3487 + 317 > 3500), стартовать нечему — и проход
+    встаёт с ``pending = 1`` вместо ``pending = 0``.
+
+    Второй проход того же теста — мёртвый пул (``BrokenProcessPool``): остаток полосы
+    закрывается терминально (:func:`_abort_pending`), и его резервы обязаны вернуться в
+    общий счётчик, иначе двенадцатая строка не стартует уже из-за них.
+    """
+    budget = 4000
+    room = budget - PARENT_FLOOR_MB
+    level = DocumentLevel.FULL
+    window, _ = workers_for_class(WorkClass.MODEL_FREE, level, PdfPipeline.STRUCTURED, budget)
+    assert window * MODEL_FREE_PEAK_MB <= room < (window + 1) * MODEL_FREE_PEAK_MB
+    pages, _types = _mixed_pages(window + 1, 0)
+
+    # (а) успех и отказ конверсии: один документ валит экстрактор.
+    store = SqliteStore(":memory:")
+    try:
+        result = _build(
+            tmp_path / "failed",
+            store,
+            crawler=_Crawler(pages),
+            extraction_pool=_failing_pool([]),
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+            derive_extract_workers=True,
+            mem_budget_mb=budget,
+        )
+        rows = _queue(store)
+        assert all(
+            row.state in (ExtractQueueState.DONE, ExtractQueueState.FAILED) for row in rows
+        )
+        assert sum(row.state is ExtractQueueState.FAILED for row in rows) == 1, rows
+        observation = _observation(result)
+        assert observation.in_flight_mb_peak is not None
+        assert observation.in_flight_mb_peak <= room
+        # Все строки закрыты: ни одна не осталась ждать память, которую никто не вернул.
+        assert all(row.state is not ExtractQueueState.PENDING for row in rows)
+    finally:
+        store.close()
+
+    # (б) мёртвый пул: первое задание валит воркера, остаток полосы — терминально.
+    store = SqliteStore(":memory:")
+    try:
+        created: list[_ThreadPool] = []
+
+        def _dying_worker(request: Any) -> Any:
+            raise BrokenProcessPool("воркер умер (эмуляция OOM)")
+
+        pool = ExtractionPool(
+            pool_factory=_pool_factory(created), worker=_dying_worker
+        )
+        result = _build(
+            tmp_path / "dead-pool",
+            store,
+            crawler=_Crawler(pages),
+            extraction_pool=pool,
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+            derive_extract_workers=True,
+            mem_budget_mb=budget,
+        )
+        rows = _queue(store)
+        assert not [row for row in rows if row.state is ExtractQueueState.PENDING], rows
+        assert sum(row.state is ExtractQueueState.FAILED for row in rows) >= 1
+        observation = _observation(result)
+        assert observation.in_flight_mb_peak is not None
+        assert observation.in_flight_mb_peak <= room
+        assert observation.budget_accounting == "accounted"
+    finally:
+        store.close()
+
+
+def test_budget_none_keeps_previous_behaviour_and_is_visible(tmp_path: Path) -> None:
+    """Без бюджета окна классов работают как прежде, но «не считали» видно токеном.
+
+    Учёт требует объявленного бюджета: без него сумма пиков не с чем сравнивать. Молчать
+    об этом нельзя — отсутствие учёта не имеет права читаться как «всё поместилось»,
+    поэтому публикуется ``class_budget_unaccounted``, а пик остаётся ``None`` (не ``0``:
+    ноль был бы утверждением «ничего не занимали», которого сделать нельзя).
+    """
+    store = SqliteStore(":memory:")
+    created: list[_ThreadPool] = []
+    try:
+        result = _build(
+            tmp_path,
+            store,
+            extraction_pool=_pool(created),
+            crawl_defaults=CrawlRunConfig(max_depth=1, extract_workers=3),
+        )
+        assert result.errors == []
+        assert all(row.state is ExtractQueueState.DONE for row in _queue(store))
+        observation = _observation(result)
+        # Поведение прежнее: окно — объявленная ось, по классам оно то же самое.
+        assert observation.extract_workers_by_class == {"model_free": 3}
+        # Учёт не вёлся — и это названо.
+        assert observation.budget_accounting == BUDGET_UNACCOUNTED
+        assert observation.in_flight_mb_peak is None
+        assert observation.class_skipped_for_budget == {}
+    finally:
+        store.close()
+
+
+def test_peak_unmeasured_class_runs_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Класс с неизмеренным пиком идёт один на узел — и не делит узел с docling.
+
+    Пик ``office`` не измерен (``work_class_peak_unmeasured``), подставлять пик PDF-уровня
+    запрещено (A3): число было бы чужим замером. Поэтому такой класс держит не мегабайты,
+    а право быть единственным. Проверяется в точке решения (:meth:`_BandRun._admit`):
+    каждый допущенный старт ``office`` видит пустой узел, а ``model_free`` не стартует,
+    пока ``office`` в полёте, — иначе неизмеренный класс складывался бы с измеренным
+    «бесплатно», то есть бюджет обходился бы через класс без числа.
+    """
+    budget = 4000
+    level = DocumentLevel.FULL
+    window, _ = workers_for_class(WorkClass.MODEL_FREE, level, PdfPipeline.STRUCTURED, budget)
+    assert window > 1  # иначе «рядом» неотличимо от «по одному»
+
+    pages, _types = _mixed_pages(window + 2, 0)
+    office_url = f"{ROOT}manual.docx"
+    pages[ROOT] = pages[ROOT].replace(
+        b"</html>", f'<a href="{office_url}">doc</a></html>'.encode()
+    )
+    pages[office_url] = b"PK\x03\x04 not-a-real-docx"
+    types = {
+        office_url: (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    }
+
+    admitted: list[tuple[str, int, int]] = []
+    original = extract_consume._BandRun._admit
+
+    def _spy(
+        self: Any, band: Any, lvl: Any, pipeline: Any
+    ) -> tuple[bool, int | None, bool]:
+        verdict = original(self, band, lvl, pipeline)
+        if verdict[0]:
+            admitted.append((band.work_class.value, self.in_flight_mb, self.unmeasured_in_flight))
+        return verdict
+
+    monkeypatch.setattr(extract_consume._BandRun, "_admit", _spy)
+
+    store = SqliteStore(":memory:")
+    try:
+        result = _build(
+            tmp_path,
+            store,
+            crawler=_TypedCrawler(pages, types),
+            extraction_pool=_pool([]),
+            crawl_defaults=CrawlRunConfig(max_depth=1),
+            derive_extract_workers=True,
+            mem_budget_mb=budget,
+        )
+        # Пик office не измерен — это **названный** факт (окно 1), а не провал прогона.
+        assert [
+            line for line in result.errors if "work_class_peak_unmeasured" not in line
+        ] == [], result.errors
+        assert any("work_class_peak_unmeasured" in line for line in result.errors)
+        assert all(row.state is ExtractQueueState.DONE for row in _queue(store))
+
+        office_starts = [entry for entry in admitted if entry[0] == WorkClass.OFFICE.value]
+        assert office_starts, "office-строка не стартовала вовсе"
+        for _cls, in_flight_mb, unmeasured in office_starts:
+            assert (in_flight_mb, unmeasured) == (0, 0), (in_flight_mb, unmeasured)
+        # И обратное направление: пока неизмеренный класс в полёте, HTML не стартует.
+        for _cls, _in_flight_mb, unmeasured in [
+            entry for entry in admitted if entry[0] == WorkClass.MODEL_FREE.value
+        ]:
+            assert unmeasured == 0
+    finally:
+        store.close()

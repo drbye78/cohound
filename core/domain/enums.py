@@ -951,6 +951,36 @@ class ExtractQueueState(StrEnum):
     SKIPPED = "skipped"
 
 
+class WorkClass(StrEnum):
+    """Класс **работы** конверсии: цена одного документа (пик RAM/VRAM, наличие моделей).
+
+    Это не методология и не условие измерения: класс не входит в ``run_id`` (как и
+    ``extract_workers``), а описывает **расписание** — сколько заданий класса помещается
+    в бюджет памяти одновременно. Смысл разделения измерен: HTML-страница стоит ~0.2 s и
+    ~90 MB (медиана 32 страниц корпуса), PDF ``layout_tables`` — 7.2 s и 3679 MB пика;
+    в одном FIFO с окном 1 они стояли в очереди друг за другом, и 11.9 ядра из 12
+    простаивали, пока один docling-воркер держал документ
+    (``docs/reports/measurements/2026-11-07-work-class-peaks.md``).
+
+    * ``model_free`` — html, text/markdown, epub: читатели без моделей (trafilatura,
+      stdlib), пик измерен;
+    * ``office`` — docx/pptx/xlsx: docling, уровня и устройства у Office нет;
+    * ``pdf_structured`` — docling, ``crawl.document_level`` + ``crawl.pdf_device``;
+    * ``pdf_text_layer`` — текстовый слой pdfium, моделей нет, пик измерен на корпусе;
+    * ``container`` — распаковка (спуск), не экстракция: члены извлекаются своими классами.
+
+    Пик ``office`` **не измерен**, поэтому окно класса — 1 с видимой причиной
+    (``work_class_peak_unmeasured``), а не выдуманное число (A3). Источник истины —
+    ``docs/status-dictionary.yaml`` (секция ``work_class``).
+    """
+
+    MODEL_FREE = "model_free"
+    OFFICE = "office"
+    PDF_STRUCTURED = "pdf_structured"
+    PDF_TEXT_LAYER = "pdf_text_layer"
+    CONTAINER = "container"
+
+
 class SeedRole(StrEnum):
     """Роль seed'а в корпусе продукта (09 §7).
 
