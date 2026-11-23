@@ -355,7 +355,7 @@ embed:
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
 только кэш векторов по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash,
 embed_model_id, embed_device, embed_precision)`): подключён в
-`core/cli/context.py:2949-2951` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2965-2967` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -544,7 +544,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 3. `vector_digest` в `_partition_reuse_reason` — «чужие векторы» становятся видимым отказом
    от переиспользования, а не тихой подменой прибора.
 
-`corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1565`,
+`corpus_chunks.embedded_at`: чанк собирался с `embedded_at=None` (`core/pipeline/corpus_ingest.py:1687`,
 `core/pipeline/extract_consume.py:552`) и в Pass B не переписывался — колонка без писателя, и
 «не эмбеддилось» по ней не читалось. С 07.11.2026 её заполняет `_embed_and_build`
 (`core/pipeline/corpus_index.py:816`): одно ISO-8601 (UTC) время эмбеддинга на продукт-цикл,

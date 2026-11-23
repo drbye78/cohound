@@ -31,12 +31,12 @@
   полос — `host_concurrency` (`core/pipeline/corpus_driver.py`). Полоса — право на **host**;
   внутри хоста резервы сериализуются лимитером.
 - `crawl_rate_limit` — одно из 37 полей `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:162`)
-  и берётся **только из `run.yaml`** (`core/cli/execution_axes.py:1061`). Отдельно от него
+  и берётся **только из `run.yaml`** (`core/cli/execution_axes.py:1093`). Отдельно от него
   **разрешённый** темп (site > run) входит в `crawl_config_digest` через
   `CrawlLimits.as_dict()` (с 07.11.2026, решение владельца): per-site значение перекрывает
   объявленную run-level ось, то есть без этого ключа его можно было бы нейтрализовать для
   конкретного хоста, не сдвинув `run_id`. Прежнее утверждение «вежливость не меняет состав
-  корпуса» (`core/pipeline/corpus_commit.py:276-278`) оказалось верным только для
+  корпуса» (`core/pipeline/corpus_commit.py:283-285`) оказалось верным только для
   run-level слоя: измеренный всплеск `504` и усечение `max_documents` показывают обратное.
 
 ## 2. Дефект HEAD: два резерва на один фетч в пулевом пути — ✅ ИСПРАВЛЕН (`b80e131`)

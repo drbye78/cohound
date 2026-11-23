@@ -195,7 +195,7 @@ F2/F3/F4 частично; исполнение, ёмкость и размещ�
 из бюджета вместо константы, preflight с `EXIT_USAGE`, пик воркера через файл-сток,
 `COHOUND_MEM_BUDGET_MB` (`03` §D.6). Закрывает Д-7.
 *Доказательство исполнения (HEAD `b278b79`):* блок собирается в прогоне
-(`core/cli/commands/run.py:1635` — `build_resources_block`) и пишется в `metrics.json`
+(`core/cli/commands/run.py:1639` — `build_resources_block`) и пишется в `metrics.json`
 (`_normalize_resources` — `core/pipeline/metrics.py:403`; поле — `core/pipeline/metrics.py:498`); живой прогон его несёт —
 `runs/ru-pg-dbms-c2e7b860ac17/metrics.json` (`resources.budget.source = "available"`,
 `resources.phases.*.peak_rss_mb`). Распределение чанков по семействам наполняется фазой
@@ -244,18 +244,28 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   контракте — `trafilatura-html-8+text-plain-2+epub-3+pdfium-text-5:5.14.0+docling-office-1+docling-doc-4/cpu/docling-2.135.0/md-plain-underscore/finalize-1`
 >   (сегменты `<level>/<device>/<build>/<policy>/<finalize>`; `cpu`/`cuda` — ось
 >   `crawl.pdf_device`, P9).
-> - ✅ воркеры из бюджета + уровень из профиля: `core/pipeline/resources.py:525`
->   (`workers_from_budget`), preflight `core/cli/wiring.py:2833`
+> - ✅ воркеры из бюджета + уровень из профиля: `core/pipeline/resources.py:532`
+>   (`workers_from_budget`), preflight `core/cli/wiring.py:2912`
 >   (`preflight_extraction_budget`, `EXIT_USAGE`).
-> - ✅ preflight не отказывает в работе, которой не будет: при корпусе из durable-чанков
->   (`dispatch_refresh(...).corpus_source is CrawlCorpusSource.CHUNKS`, то есть
->   `--refresh offline` и `frozen`+`frozen_source=chunks`) документы не читаются, окно
->   экстракции не нужно, и гейт публикует заметку «не проверял», а не отказ. Граница —
->   источник корпуса, а не слово политики: `frozen`+`bytes` пере-извлекает байты и
->   по-прежнему отказывает. Измерено 22.11.2026: до правки `run --refresh offline` на этом
->   хосте падал с «budget=3229 MB … workers=0»; обходом было бы завышение
->   `COHOUND_MEM_BUDGET_MB` (ложь о бюджете) или понижение `document_level` (смена оси
->   измерения ради гейта).
+> - ✅ preflight не отказывает в работе, которой не будет, **и не молчит о работе, которая
+>   будет**: пропуск решается **фактом состояния**, а не словом политики
+>   (`core/cli/wiring.py:2833`, `_documents_needing_rebuild`). При `--refresh offline`
+>   корпус берётся из durable-чанков, но **негодный** набор (чужая `chunker_version`,
+>   пустой `chunk_meta`) заставляет `rebuild_from_stored_bytes` прочитать документ текущим
+>   экстрактором — сети нет, работа и пик памяти те же. Поэтому гейт считает по
+>   `url_state` (единица — **текущий** URL, а не строка истории: `document_version` хранит
+>   и вытесненные версии, и счёт по ним завышал бы работу в 8.7×) и называет число
+>   документов рядом с пиком, бюджетом и окном. Ноль негодных — пропуск с числом
+>   «0 из M»; состояние недоступно — предупреждение с числами формулы и явным «НЕ
+>   проверено», а не отказ (отказ без факта — ложный предохранитель). `frozen`+`bytes`
+>   пере-извлекает байты и по-прежнему отказывает по бюджету.
+>   Измерено 23.11.2026 на стенде (`file:…state.db?mode=ro`): **2 057 из 35 040** URL с
+>   текущей версией требуют пересборки (`policy-5` 1 516 + `md-heading-4` 541) — прежняя
+>   редакция этого пункта утверждала «документы не читаются» и была неверна.
+>   Предсказание формулы окна (4 179 MB) и факт `VmHWM` (4 313 MB, +3.2 %) сходятся;
+>   до правки `run --refresh offline` на этом хосте падал с «budget=3229 MB … workers=0»,
+>   и обходом было бы завышение `COHOUND_MEM_BUDGET_MB` (ложь о бюджете) или понижение
+>   `document_level` (смена оси измерения ради гейта).
 > - ✅ durable хвост спуска (write-through): синки `persist_observation`/`persist_member`
 >   (`core/pipeline/archive_descent.py:392-393,562,1168`), подключены в
 >   `core/pipeline/extract_consume.py:1279-1280`; видимая строка пропуска по бюджету —
@@ -285,15 +295,15 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
   Выбор — по замеру F0 достоверности таблиц, не по вкусу.
 - Хвост фазы durable: провенанс спуска по контейнеру, а не в конце. **Дизайн согласован
   (совет 2026-10-24, три полосы независимо + синтез).** `archive_observations`/
-  `corpus_members` копились в памяти (`core/pipeline/corpus.py:2784,3027`) и писались пачкой
-  (`core/pipeline/corpus.py:5587-5592`) ⇒ SIGKILL терял всё. Лечение — write-through:
+  `corpus_members` копились в памяти (`core/pipeline/corpus.py:2799,3042`) и писались пачкой
+  (`core/pipeline/corpus.py:5619-5624`) ⇒ SIGKILL терял всё. Лечение — write-through:
   `ArchiveDescentWalker` получает два необязательных колбэка (`persist_observation`,
   `persist_member`), `None` — прежнее поведение байт-в-байт. Точки: наблюдение — `_record`
   (`core/pipeline/archive_descent.py:514`, вызовы `642`/`686`/`708`/`1059`), член — `_settle`
   (`core/pipeline/archive_descent.py:773`), где уже есть `doc_id`/`extracted_content_hash`; вложенные кадры идут через те же
   `_record`/`_settle`. Финальную пачку сохранить как идемпотентный reconciliation-pass
   (дешёвый повторный upsert). Сбой записи изолируется в `errors` по образцу `persist_docs`
-  (`core/pipeline/corpus_ingest.py:1429`) — отказ store не должен убивать спуск.
+  (`core/pipeline/corpus_ingest.py:1551`) — отказ store не должен убивать спуск.
   Идемпотентность уже обеспечена: `observation_id` детерминирован (`run|product|root|hash|depth`),
   `corpus_members` — UPSERT. **Не делать в первом патче:** предварительное observation «контейнер
   начат» (нужна отдельная семантика промежуточного состояния) и micro-batch (сначала измерить
@@ -352,7 +362,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 >   объявлено флагом `rnd_endpoint` (`config/deploy.yaml:257`, стенд RnD).
 > - **SERP-контур:** ✅ реализован, но **не** через `run_serp_loop`. Производитель запросов —
 >   `_run_serp_contour` (`core/pipeline/corpus.py:1347-1483`), вызов внутри фазы корпуса **до**
->   дренажа (`core/pipeline/corpus.py:2359`); `run_serp_loop` сам остаётся невызываемым
+>   дренажа (`core/pipeline/corpus.py:2363`); `run_serp_loop` сам остаётся невызываемым
 >   (единственные вхождения — определение `core/pipeline/serp_loop.py:1553` и реэкспорт).
 >   Ось в контракте — `serp_rounds` (`core/pipeline/digests.py:175`), значение из
 >   `--serp-rounds`/`run.yaml:serp.rounds`/`COHOUND_SERP` (`core/cli/wiring.py:1351`).
@@ -403,7 +413,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 
 > 🟡 **частично (сверено 08.11.2026).** Пакет стадий собран: 9 модулей `core/pipeline/corpus_*.py`
 > (30.10–01.11), `corpus.py` — 5870 строк фасада с публичной `build_corpus`
-> (`core/pipeline/corpus.py:5865`); `IndexBuild.docs` снят (докстринг
+> (`core/pipeline/corpus.py:5897`); `IndexBuild.docs` снят (докстринг
 > `core/pipeline/index_build.py:30-33` объясняет, почему документы не едут в результате);
 > эмбеддинг батчами по `EMBED_BATCH_CHUNKS = 64` (`core/pipeline/corpus_index.py:79`).
 > **Нет** `memmap`-записи партиции и документного `pb`: `product_content_token` по-прежнему

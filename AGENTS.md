@@ -145,6 +145,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `docs/reports/` | Published evidence: measurement reports (`measurements/`, indexed by its `README.md` — a published number lives there with its date and instrument) and incident traces. Per §1.2: the artifact outranks the document, and a number cited in `docs/architecture/` **without** an entry here is a hypothesis, not a proof. Re-measured 2026-11-16 with `rg -n 'замер\w*\s+(от\s+)?[0-9]{2}\.[0-9]{2}' docs/architecture/*.md \| grep -v reports/ \| wc -l` → **40** lines (the 15.11 count was 34): reading one of them means re-measuring or treating it as dated hearsay. |
 | `scripts/derive_*.py` | **Instruments that produce a declared input**, not a measurement: `derive_llms_seeds.py` — seed-набор продукта из машинного индекса вендора (`llms.txt`) для сайтов, где HTML-страница несёт только каркас (замер 22.11.2026 на `gaussdb`: 77 578 байт разметки, ~1 900 символов текста, `<div id="content">` пуст, содержимое подгружается скриптом; markdown-представление `rel="alternate" type="text/markdown"` отдаёт текст). Вывод **статичен** и живёт в `sources/corpus_urls.yaml`, потому что `plan` считает `run_id` без сети, а `seeds_digest` — контрактное поле: смена индекса у вендора обязана дать новый прогон. Печатает перепись разделов (сколько документов объявлено и сколько отобрано — разные числа), отказывает на неизвестном имени раздела (переименование у вендора иначе тихо уменьшило бы корпус), исключает битую ссылку индекса **с публикацией счёта** и сохраняет авторскую шапку блока при перегенерации. |
 | `scripts/measure_*.py`, `scripts/conformance_*.py`, `scripts/check_pdf_page_map.py` | **Named instruments** of measurements and censuses (A3): a claim is out of scope only after a census with one of these, and a re-measurement cites the script + date. `check_pdf_page_map.py` — инвариант карты страниц PDF (`page_map`: покрытие, разрывы, обратная сборка) на реальном корпусе, а не на фикстурах; exit 1 при дефекте. |
+| `scripts/migrate_*.py` | **Миграции данных, а не замеры и не пересчёт**: приводят durable-субстрат в соответствие объявленной версии, когда пере-обработка корпуса покупала бы ноль. `migrate_state.py` — STATE 13→14 (материал пространства снятия). `migrate_chunker_version.py` — пере-штамповка `document_version.chunker_version` + `chunk_meta.chunker_version`/`chunk_id`/`chunk_ids_digest` для **доказанно эквивалентного** набора (policy-5 → policy-6: текст чанков побайтово тот же, замер `2026-11-17-policy6-retrieval.md`, 253 306/253 306 и 0 из 15 golden). Dry-run по умолчанию, `--apply` пишет, отказ если `--to` не равна текущей объявленной версии, аудит — `{state_dir}/chunker_version_migrations.jsonl` одной строкой; `table_ref` не выдумывается (`NULL` = адрес неизвестен). |
 | `scripts/prepare_*.py` | **Артефакты для человека**, а не замеры: `prepare_retrieval_golden_docs.py` (документный эталон O14), `prepare_answer_sets.py` (набор отвечающих документов O42), `prepare_evidence_claims.py` (доказательная сила цитаты O18), `prepare_importance_pairs.py` (парные сравнения O20), `prepare_extraction_golden.py` (PDF-эталон извлечения O38б/D10 — 30–50 документов × пять направлений, двухколоночность определяет **прибор** `measure_reading_order.py`), `prepare_parameter_semantics.py` (семантика и правило зачёта каждого параметра каталога: `semantics`/`rule`/`evidence`/`absence_rule`/`concept_terms`; XLSX с подсветкой строк, в семантике которых автор не уверен, `apply` собирает `catalog.csv` только по заполненному `review`), `prepare_baseline_signatures.py` (подписи под `present`-фактами предка: лист на 255 строк с цитатой, разделом и **подсветкой** шума — указатель, обрывок, однословная фраза; решение можно дать по параметру разом, `apply` подписывает набор одной записью журнала через `review_facts`). Каждый пишет XLSX-лист на разметку и собирает результат обратно (`compile`/`validate`), отказывая на неразмеченном или чужом значении. Разметку не выдумывают: `candidate` в имени файла и `status: candidate` в наборе — это состояние «человек ещё не подтвердил». **Исключение по входу, а не по роли:** `prepare_retrieval_golden_chunks.py` разметки не требует — он выводит чанковый адрес из **уже размеченного** документного эталона и `cell_evidence` (`citation_quote`), поэтому пересобирается скриптом при каждой пере-нарезке, а `validate` отказывает на нерезолвимом `chunk_id`. |
 | `.env.example` | Environment variables and external keys (LLM, scout, search adapters), no secrets. |
 
@@ -371,7 +372,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
 - The root host is always in scope. A subdomain is in scope **only if declared** (product
   seed root, or a `domain_profiles.yaml` key). `www.` is equivalent to the bare host on both
   sides.
-- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1499`). This is
+- The predicate is `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1589`). This is
   **different** semantics from `fetch_plan._host_matches`: there a subdomain **inherits
   profile axes** (`fetch`/`extract`/limits), which is correct and needed. Inheriting axes ≠
   the right to spend another seed root's budget.
@@ -417,7 +418,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
   worklist (`artifacts_gap`, sourced from `PROVIDABLE_FAILURE_KINDS`,
   `core/domain/enums.py:266` — wider than the blocking set on purpose: narrowing it would shrink
   the worklist exactly where provision is irreplaceable). The frontier keeps the refused
-  **addresses** (`core/pipeline/crawl_frontier.py:1461`), and
+  **addresses** (`core/pipeline/crawl_frontier.py:1551`), and
   `_recompute_root_captures` (`core/pipeline/corpus.py:1705`) publishes only how many refusals a
   provision closed — it no longer rewrites `complete`. If material really is behind the boundary
   (as with `jatoba`), **the user adds the artifacts themselves**, widening what later runs know
@@ -464,10 +465,29 @@ root is named by `--refresh-scope`), `scheduled` (update when `now - observed_at
 interval_hours` **or** the declared crawl space differs from the space of the root's last
 capture, resolved to `refresh`/`reuse` — the decision, not the intent, enters the digest),
 `network_denied` (**no** requests for that root). `refresh_policy` (run level:
-`auto|revalidate|refresh|offline|frozen`) composes **inside** the resolved policy:
+`auto|revalidate|refresh|offline|frozen|drain`) composes **inside** the resolved policy:
 `offline` reuses chunks (no requests), `frozen` reuses `corpus_raw` bytes with current
 extraction/chunking and `frozen_source ∈ bytes|chunks` (canonicalised to `n/a` outside
-`frozen`).
+`frozen`), `drain` allows the network **only for unknown** URLs — a known page is replayed
+from `corpus_raw` via `state.db` without a request, so the BFS still runs from the seed and
+`max_depth` keeps meaning "steps from the root" (revalidation groups are **not** built under
+`drain`).
+
+**Draining a truncated root to exhaustion (plan 29).** `--drain-root HOST[/PATH]` removes
+`max_documents` and replaces `max_depth` with `--drain-max-depth` for the named roots; both
+enter `CrawlLimits.as_dict()`/`crawl_config_digest` **only for a root that is actually
+drained** (otherwise every run's `run_id` would shift without a changed measurement).
+`hound crawl drain --package …` is the one-command path: it reads the recorded provenance
+(`effective_limits.roots`), runs `crawl run --refresh drain --crawl-only --until corpus`
+passes (depth ladder for `max_depth` truncation, each pass a new `run_id`) and rewrites
+`max_documents`/`max_depth` in `domain_profiles.yaml` to **measured + declared margin**
+(`--margin-percent`, published next to the measurement). `--list` is the offline report;
+`--apply --actor` writes the profile and `sources/crawl_drain/{date}-{actor}.json`. Only a
+root whose walk was exhausted is declared — a limit written from a partial observation
+would be smaller than measured, i.e. a guaranteed new truncation. `round_budget` /
+`disk_low_headroom` are **not** drained (reported as `not_drainable`), and a replayed page
+counts in `observed` (`frontier.replayed`) but not in `fetched`, so a root replayed
+entirely from bytes still captures `complete=1` (I2d).
 
 **The clock is not the only anchor for `reuse` — the space is the second.** A `scheduled`
 reuse is legitimate only if the stored corpus was gathered in the **declared** space (same

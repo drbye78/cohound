@@ -120,7 +120,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Экономия:** запросы.
 * **Корпус:** не меняется (уже так).
 * **Публикует:** `duplicate_form_count`/`duplicate_form_examples` в сеансе; `duplicate_forms`
-  по корню в провенансе (`core/pipeline/corpus_commit.py:216`). Это **единственное** число дедупа адресов,
+  по корню в провенансе (`core/pipeline/corpus_commit.py:223`). Это **единственное** число дедупа адресов,
   которое сегодня доезжает до артефакта прогона.
 * **Хук:** существующий, и он **уже** узкий по построению: `url_form_key`
   (`core/pipeline/crawl_frontier.py:153`) снимает ровно **один** завершающий `/`, а scheme/netloc/query/
@@ -157,7 +157,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Решение:** ключ кэша извлечения — **объявленный**, а не выведенный из `raw_path`. У документа
   верхнего уровня остался прежний `_extract_cache_key` (stem ретейленного файла,
   `core/pipeline/extraction_runtime.py:276`); член приходит с явным `cache_key` = sha256 его байт
-  (`core/pipeline/extraction_runtime.py:286`). Прежний вывод из `raw_path` давал члену хеш **архива**
+  (`core/pipeline/extraction_runtime.py:289`). Прежний вывод из `raw_path` давал члену хеш **архива**
   (1 397 документов членов → 52 `.bin`), и кэш не мог различить членов одного архива.
   Ключ члена: `(member_bytes_hash, extractor_version, level)`. Повтор → конвертации нет, текст
   берётся из конверта (`doc_content_hash`), `doc_id` тот же. **Реализовано 07.11.2026 (P0-A).**
@@ -182,7 +182,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 ### S3. Точная идентичность текста
 
 * **Вход:** финализированный текст (`finalize_extracted_text` → `content_hash` текста).
-* **Решение:** `doc_id = {product_id}:{text_hash}` (`core/pipeline/corpus_ingest.py:1801`); при совпадении
+* **Решение:** `doc_id = {product_id}:{text_hash}` (`core/pipeline/corpus_ingest.py:1923`); при совпадении
   второй адрес становится алиасом первого, победитель — `min(url)`.
 * **Экономия:** ноль (извлечение уже оплачено) — но это и есть цена: **дедуп стоит после
   конвертации**. S2 снимает повторные байты до неё.
@@ -190,7 +190,7 @@ member-PDF за 69 мин; паспортные 0.17 с/стр — коротк�
 * **Публикует:** `IndexBuild.duplicates` (`core/pipeline/index_build.py:103`) → note фазы (`core/pipeline/phases.py:412`) →
   `results[].notes`. Перенести в ledger как отдельную строку (сейчас это нота в логе, а не
   счётчик в артефакте).
-* **Хук:** `core/pipeline/corpus_ingest.py:1729` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:481`,
+* **Хук:** `core/pipeline/corpus_ingest.py:1851` (`seen_docs[doc_hash]`), `core/pipeline/corpus_persist.py:481`,
   пост-проход `canonicalize_doc_urls` (`core/pipeline/corpus.py:630`) — он группирует по
   `crawl_session_items.doc_hash` и ставит победителем `min(urls)` (`core/pipeline/corpus.py:723`).
 * **Дефект детерминизма (найден при разведке).** `canonicalize_doc_urls` покрывает только
@@ -593,7 +593,7 @@ S7 в `retrieval_params_json` (новый `run_id`, `execution_change`). Вор�
 | 6 | отказы уровня плана не порождают строку члена вовсе | `core/util/container_policy.py:91` | отказ виден только в памяти фазы | **✅ 09.11.2026**: бюджетные причины (`PLAN_SKIP_ROW_REASONS`) дают строку — пачкой фазы; каталог/шифрование/чужой формат остаются агрегатом прогноза (не члены-файлы), `path_rejected` — после колонки `raw_member_path` |
 | 7 | `corpus_docs.url` документа-члена = последний писатель ⇒ зависит от порядка спуска | `core/store/sqlite_store.py:1623`; канонизация членов — `core/pipeline/corpus.py:630` | адрес члена — функция расписания | **✅ P0-A 07.11.2026** |
 | 8 | EPUB не финализировал текст перед хешем | `core/adapters/extract_epub.py:61` vs `core/util/sanitize.py:485` | нарушен контракт «каждый читатель зовёт границу очистки»: тела глав чистил `HtmlExtractor`, а шапки глав и заметки — нет. **Не** про равенство хешей EPUB и HTML: книга склеена читателем, хеши не совпадут и после фикса | **✅ 09.11.2026**, `epub-3` (`execution_change`) |
-| 9 | `03-data-config-cli.md:64` называет ретейленный файл `doc_hash`, код — хешем байтов | `03-data-config-cli.md:64` | терминологический дрейф в справочнике (AGENTS §1.2: чинить в том же коммите) | **✅ 09.11.2026**: `{raw_hash}` + абзац «чем он отличается от `content_hash`» |
+| 9 | `03-data-config-cli.md:66` называет ретейленный файл `doc_hash`, код — хешем байтов | `03-data-config-cli.md:66` | терминологический дрейф в справочнике (AGENTS §1.2: чинить в том же коммите) | **✅ 09.11.2026**: `{raw_hash}` + абзац «чем он отличается от `content_hash`» |
 | 10 | `_by_work` не переживает resume: финальный URL прошлого исполнения может дать вторую строку очереди | `core/pipeline/extract_queue.py:181` (названный остаток) | вторая конвертация тех же байт = кэш-хит; документ не удваивается | не чиним, цена названа |
 
 ---

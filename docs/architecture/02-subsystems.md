@@ -251,8 +251,8 @@ products × doc_domains
 
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
-| `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:495-522`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1125-1140`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5250-5277`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
+| `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:495-522`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1127-1142`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5394-5421`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул (`recycle_tasks` в `new_extract_pool`) | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |
@@ -270,8 +270,8 @@ products × doc_domains
   `errors`), а не тихо. При её наличии экстракция идёт пулом даже при `extract_workers == 1`
   (окно = 1).
 - **Браузерный фетч в пул фетча не идёт никогда** — у не-poolable маршрута **свой
-  однопоточный** пул (`phase.browser_pool`, поле — `core/pipeline/corpus_drain.py:1262`,
-  потребитель — `core/pipeline/corpus_drain.py:1864`):
+  однопоточный** пул (`phase.browser_pool`, поле — `core/pipeline/corpus_drain.py:1264`,
+  потребитель — `core/pipeline/corpus_drain.py:1906`):
   `BrowserCrawler` водит единственную страницу без лока, поэтому маршрут остаётся одним
   потоком и `max_workers` его не параллелит.
 - **`document_level`** применяется только к документным форматам (PDF/Office); HTML не
@@ -316,7 +316,7 @@ URL ставится в очередь, если он (1) проходит SSRF-
 **объявленному** хосту, (3) укладывается в path-prefix корня по границе сегмента, (4) не в
 блэклисте. SSRF-проверка — не проверка scope, это разные предикаты.
 
-- `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1259-1283`): хост корня — всегда,
+- `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1300-1324`): хост корня — всегда,
   `www.`-вариант эквивалентен базовому (`normalize_scope_host`,
   `core/pipeline/crawl_frontier.py:189`); поддомен — **только если
   объявлен** (`scope_hosts`: seed-корень продукта или ключ `domain_profiles.yaml`); чужой
@@ -372,7 +372,7 @@ recovery-on-open переводит «зависшие» `running` обратн�
 retained-байтами не фетчится заново
 (правка 07.11.2026: до неё `--reset` стирал сеанс, превращая повтор фазы в новый обход —
 измерено 5 060 `fetched`-элементов и ≈7 ч сети на трёх продуктах при байтах на диске;
-`core/cli/commands/run.py:1455-1479`). У команды `hound crawl run` своя семантика: там `--reset`
+`core/cli/commands/run.py:1457-1481`). У команды `hound crawl run` своя семантика: там `--reset`
 сеанс очищает до старта. Глобальный R7-кэш при `--from-scratch` не используется
 (`cache=None`), поэтому живой фетч гарантирован. Ошибки записи изолируются (фаза остаётся
 `ok`-с-ошибками); счётчики `pending/fetched/failed` идут в `IndexBuild` (наблюдаемость).
@@ -398,13 +398,13 @@ retained-байтами не фетчится заново
 `failed`/`source_unavailable` → сеанс `partial` (не «тихо пусто»).
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
-краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2318-2357`) вызывается в
-цикле продукта (`core/pipeline/corpus.py:3458`), и каждая запись становится **отдельным
+краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2440-2479`) вызывается в
+цикле продукта (`core/pipeline/corpus.py:3483`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
 фронтьера** размером `executor_wave_items` (`submit_collect`,
-`core/pipeline/corpus_ingest.py:2134-2186`),
+`core/pipeline/corpus_ingest.py:2256-2308`),
 и `idempotency_key` выводится из набора работ **этой** волны, а не из вида источника.
 
 #### Контейнеры: спуск
@@ -596,11 +596,11 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1613-1644`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1623-1654`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
-  адаптер (`_resolve_llm_scenarios`, `core/cli/execution_axes.py:806-890`). Провайдер может
+  адаптер (`_resolve_llm_scenarios`, `core/cli/execution_axes.py:838-922`). Провайдер может
   игнорировать `seed`: замер — 4.2 % (5 из 119) ячеек меняют вердикт при идентичном
   `prompt_hash` (`docs/reports/measurements/2026-10-26-verdict-reproducibility.md`). Это
   остаточный недетерминизм, а не гарантия.
@@ -666,7 +666,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 из 70 без доказательства о предмете.
 **Следствие-аномалия теперь публикуется** (V1 закрыт 08.11.2026): записи замера идут в
 операторский `nda_questions.csv` строками `anomaly_kind=unrelated_support`
-(`core/pipeline/report.py:2210`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
+(`core/pipeline/report.py:2223`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
 не меняется. Маркерная проверка класса утверждения (отрицание/условность в цитате против
 заявленного ✅) остаётся **названным ограничением**, а не работой: она требует замера шума
 на корпусе, иначе превращается в порог из головы (A3).
@@ -687,7 +687,7 @@ retry ≤ объявленный `max_retries` (дефолт 2) → `failed` (st
   В профиле `split` исполняются в DMZ (`edge/`),
   ядро вызывает через `gateway` (07).
 - **Бюджет:** объявлен во входе, дефолта нет. `serp.budget` — потолок запросов **на продукт
-  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:936-943`);
+  на раунд**, обязателен при `rounds > 0` (`SerpRunConfig`, `core/domain/models.py:946-953`);
   молчаливый безлимит запрещён. Языки запросов — `run.yaml: languages` (дефолт `["ru"]`),
   сильнее — `catalog.csv: search_langs` параметра (`core/pipeline/serp_loop.py:951-955`);
   отдельной квоты «на язык» в коде нет — бюджет расходуется запросами независимо от языка.
@@ -716,7 +716,7 @@ llm_scenarios:
 **Только `evaluator` и объявляется.** Остальные сценарии (`search_adapter`/`discovery`/
 `concept_scout`) слотов в `deploy.llm` не имеют и в `llm_scenarios` не пишутся —
 пустая таблица честнее выдуманной (`_resolve_llm_scenarios`,
-`core/cli/execution_axes.py:821-825`). Строка `evaluator` появляется только при **активном**
+`core/cli/execution_axes.py:853-857`). Строка `evaluator` появляется только при **активном**
 слоте (непустой `base_url`); если endpoint пришёл из env, таблица остаётся пустой и факт
 «оценщик вне execution contract» сообщает `llm_env_notices`.
 
@@ -822,13 +822,13 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 
 | Артефакт | Писатель | Содержание |
 |---|---|---|
-| `battle_card.xlsx` | `report.py` (openpyxl) | шапка (capability/coverage + `coverage_defined`/`coverage_universe`/`coverage_n_used`, comparability), матрица, сателлиты, модульное покрытие, sensitivity |
+| `battle_card.xlsx` | `report.py` (openpyxl) | шапка (capability/coverage + `coverage_defined`/`coverage_universe`/`coverage_n_used`, comparability), матрица, модульное покрытие, sensitivity |
 | `preliminary_findings.xlsx` | `report.py` | кандидаты + validation_notes (маркер «не публикация») |
 | `nda_questions.csv` | `report.py` | все ❓ + `protocol_status` (`complete`/`incomplete`/`unknown`) и `i3_anomaly` (§5/I3) |
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3884`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3881`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -951,7 +951,7 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3884` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:3881` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:175`, `TEMPLATE_VERSION = "evaluator_v7"`, файлы

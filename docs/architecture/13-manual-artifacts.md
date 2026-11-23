@@ -46,7 +46,7 @@
 
 - `robots_disallow` входит в `BLOCKING_FAILURE_KINDS` (`core/domain/enums.py:245`).
 - Блокирующий отказ делает `CorpusCoverage.complete = False`
-  (`core/domain/models.py:3014`, `core/pipeline/corpus_coverage.py:337-339`, условие 2) —
+  (`core/domain/models.py:3024`, `core/pipeline/corpus_coverage.py:337-339`, условие 2) —
   **пока URL не закрыт объявленным артефактом**: материал, предъявленный артефактом
   (`corpus_docs.origin=manual`), перестаёт делать сеанс неполным (`resolved_manually`,
   `core/pipeline/corpus_coverage.py:416-435`, сверено 07.11.2026, якорь переставлен
@@ -84,15 +84,15 @@
 развалится.
 
 В репозитории есть ровно один правильный шов, и он **единственный по коду**, а не по
-намерению: `retain` (`core/pipeline/corpus_ingest.py:1161`) — единственный writer сырых
-байтов, с единственным вызовом (`core/pipeline/corpus.py:2671`, `_commit_local`), в который
+намерению: `retain` (`core/pipeline/corpus_ingest.py:1283`) — единственный writer сырых
+байтов, с единственным вызовом (`core/pipeline/corpus.py:2675`, `_commit_local`), в который
 сходятся оба
 транспорта (локальный и executor).
 
 ```
 RawPage (core/ports/types.py:96-126)
-  → retain (core/pipeline/corpus_ingest.py:1161)   # сам хеширует байты, кладёт в corpus_raw
-    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1424,
+  → retain (core/pipeline/corpus_ingest.py:1283)   # сам хеширует байты, кладёт в corpus_raw
+    → экстракция → чанкер → индекс → corpus_docs (core/pipeline/corpus_ingest.py:1546,
       `persist_docs`)
 ```
 
@@ -215,7 +215,7 @@ provide:
 сверки адресов, — поэтому корень, чей запрещённый материал фактически предъявлен
 артефактом, оставался `complete=0`. Одно правило было реализовано в двух местах по-разному.
 20.11 сверка была сведена (фронтьер держит адреса, `Frontier.robots_refused_urls`,
-`core/pipeline/crawl_frontier.py:1461`), а 21.11 сам вопрос снят: `robots` больше не
+`core/pipeline/crawl_frontier.py:1551`), а 21.11 сам вопрос снят: `robots` больше не
 отнимает полноту, поэтому `_recompute_root_captures` (`core/pipeline/corpus.py:1724`)
 переписывать снятие не должен — он публикует только разрез «сколько отказов корня закрыто
 предъявленным материалом» (`CorpusRootCoverage.resolved_manually`). Усечение `max_*` и
@@ -348,18 +348,18 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 Это самая дешёвая часть и без неё остальное бесполезно: оператору нужен заполняемый файл.
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
-(`core/domain/models.py:1852` — `CrawlSessionProvenance.failed: int`;
-`core/pipeline/report.py:1859-1930` — движки в шапке; `core/pipeline/report.py:2557-2562` —
+(`core/domain/models.py:1862` — `CrawlSessionProvenance.failed: int`;
+`core/pipeline/report.py:1873-1944` — движки в шапке; `core/pipeline/report.py:2571-2576` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 Сделано — §8 п. 1: файл пишется (`core/pipeline/artifacts_gap.py:354`).
 
-Ближайший образец формы — `core/pipeline/report.py:2182` `render_nda_questions`: единый
+Ближайший образец формы — `core/pipeline/report.py:2198` `render_nda_questions`: единый
 CSV, строка =
 аномалия, `anomaly_kind` из набора `i3_protocol`/`crawl_truncation`/`corpus_incomplete`/
-`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2248-2314`,
+`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2262-2328`,
 сверено 08.11.2026 — видов **шесть**; диапазон пере-указан 21.11.2026 после правки шапки
 battle card). Тот же приём,
 другая таблица.
@@ -417,7 +417,7 @@ gaps:
 `run_lineage.previous_run_id` и `change_class` (`core/store/state_sqlite.py:285-289`; запись —
 `core/pipeline/state_adopt.py:1536,1807`). Прогон N+1, объявивший артефакты, попадает в эту
 цепочку автоматически, а `hound diff` называет смену `manual_artifacts_digest` осью
-расхождения (`core/pipeline/report.py:2903-2957`). Отдельная пометка на артефакте не нужна:
+расхождения (`core/pipeline/report.py:2917-2971`). Отдельная пометка на артефакте не нужна:
 состояния «артефакт перенесён из прогона X» нет — файл перечитывается каждый прогон, а
 перенос типизирован на уровне ячейки (`measurement_origin=carried` + `carried_from_run_id`);
 см. §8 п. 3.
@@ -476,16 +476,16 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:354` — единственный writer, зовут
-   `core/pipeline/corpus.py:5641` и `core/pipeline/report.py:4282`; человеческая строка —
+   `core/pipeline/corpus.py:5673` и `core/pipeline/report.py:4296`; человеческая строка —
    `core/pipeline/artifacts_gap.py:213`, сбор — `core/pipeline/artifacts_gap.py:267`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:225`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
-   `core/pipeline/corpus.py:5641`; `origin` — `core/store/sqlite.py:323`;
-   `resolved_manually` — `core/domain/models.py:3049` + `core/pipeline/corpus_coverage.py:301`;
-   доля — `core/pipeline/phases.py:1826`; дайджест — `core/pipeline/digests.py:206`, материал
+   `core/pipeline/corpus.py:5673`; `origin` — `core/store/sqlite.py:323`;
+   `resolved_manually` — `core/domain/models.py:3059` + `core/pipeline/corpus_coverage.py:301`;
+   доля — `core/pipeline/phases.py:1835`; дайджест — `core/pipeline/digests.py:206`, материал
    `core/pipeline/digests.py:458`).
    As-built и расхождения — §10.
 3. ➖ **неактуально (сверено 08.11.2026)** — типизированной пометки «этот артефакт перенесён
@@ -494,10 +494,10 @@ gaps:
    per-run (`PRIMARY KEY (run_id, product_id, url)`, `core/store/sqlite.py:378-393`), поэтому
    у артефакта свои `run_id` и `provided_at`, а не чужая история. Между прогонами переносится
    **ячейка** — и она типизирована: `measurement_origin=carried` + обязательный
-   `carried_from_run_id` (`core/domain/models.py:1487`, схема `cell-reuse-4`); документ —
+   `carried_from_run_id` (`core/domain/models.py:1497`, схема `cell-reuse-4`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
-   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2903-2957`).
+   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2917-2971`).
 4. ➖ **переехало** — документный `pb` (`F3`) ведётся как гейт флота в
    `24-fleet-work-units.md` F1.5; здесь не ведётся. Цена «шаг 2 стоит часы на продукт»
    остаётся фактом §6 этого документа.
@@ -533,7 +533,7 @@ gaps:
 
 **Цепочка.** `_build_corpus` подаёт объявленные файлы после дренажа продукта (отказы краула
 уже в элементах сеанса) и до Pass B (документы входят в ту же сборку): файл → `RawPage`
-(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1161`)
+(`engine=ORIGIN_MANUAL`, `content=`байты) → `retain` (`core/pipeline/corpus_ingest.py:1283`)
 → экстракция → чанкер → индекс. Второго
 пути байтов в evidence нет (I19): retained-файл называет хеш самих байтов, а хеш от
 декларации не принимается.
@@ -566,7 +566,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
    дренажа корня (пулы, окна, провенанс). Объявленный контейнер получает видимую запись
    `errors` и retained-байты; предоставлять нужно документы членов. Молчаливого «скормить
    архив экстрактору» нет.
-2. `RawPage` ручной подачи несёт `engine=ORIGIN_MANUAL` (`core/pipeline/corpus_ingest.py:2088`),
+2. `RawPage` ручной подачи несёт `engine=ORIGIN_MANUAL` (`core/pipeline/corpus_ingest.py:2210`),
    а `corpus_docs.origin` заведён **в дополнение** к движку: движок
    описывает транспорт, а происхождение байтов — отдельный факт, который нужен и без
    `RawPage` (после прогона). `render_mode` у ручной подачи — `NULL` (получения не было;
@@ -582,11 +582,11 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   (`core/pipeline/manual_artifacts.py:202`), сверка `sha256` (`core/pipeline/manual_artifacts.py:308`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5574`), и `report` (`core/pipeline/report.py:4200`); форма —
+  (`core/pipeline/corpus.py:5606`), и `report` (`core/pipeline/report.py:4214`); форма —
   `core/pipeline/artifacts_gap.py:267` (`collect_artifact_gaps`), человеческая строка —
   `core/pipeline/artifacts_gap.py:213` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:133`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:4176`), т.е. §5 исполнен буквально.
+  живёт внутри `corpus` (`core/pipeline/corpus.py:4450`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:179`,
   материал `(product_id, url, sha256)` — `core/pipeline/digests.py:432`), считается даже
   при пустом наборе.

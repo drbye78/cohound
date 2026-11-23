@@ -58,6 +58,8 @@ repo/
       render_modes.yaml      # per-URL ось `fetch` (§D.6, runbook)
       scout/                 # кандидаты разведки пакета (`hound package scout`)
       crawl_probe/           # предложения `hound package crawl-probe`
+      crawl_drain/           # артефакты `hound crawl drain --apply` (замер + объявленный
+                             # запас + проходы); `manual_artifacts.yaml` рядом — не путать
   passports/{product_id}/{YYYY-MM-DD}.yaml
   docs/status-dictionary.yaml
   docs/architecture/*.md
@@ -83,7 +85,7 @@ repo/
 
 Имя файла в `corpus_raw/` — `raw_hash`, sha256 **наблюдённых байтов** (не извлечённого текста и
 не `doc_hash`): это адрес носителя для I19, а `content_hash` текста живёт отдельно и меняется при
-смене экстрактора (`core/pipeline/corpus_ingest.py:1132`).
+смене экстрактора (`core/pipeline/corpus_ingest.py:1254`).
 
 #### A.1.2. Артефакты вне репозитория (раскладка хоста)
 
@@ -1604,7 +1606,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 | `hound package scout` | веб-заземлённая разведка пакета категории: pipeline сам делает SERP+краул+extract, tool-less LLM синтезирует гипотезы → консервативный маппинг → кандидаты (`needs_human=True`; auto-approve нет, I18/I19/A3). Провайдер поиска резолвится из `config/deploy.yaml` (`search.adapter`/`search.by_language` по `--lang`) детерминированно; `--search-adapter` переопределяет (I16/I21/I23) | `packages/{case_id}/sources/scout/{date}.candidates.json` (+ `.provenance.json`, в т.ч. `search_provider`) |
 | `hound package {module\|role\|param\|baseline\|cohort\|scope\|golden\|seeds\|run\|artifact\|profile} <действие>` | read/CRUD-плоскость управления пакетом. **Глаголы у подкоманд разные** (см. матрицу ниже); `--json` | — (read-only, кроме `*: add/update/remove/set/clear/attest`) |
 | `hound run [--until PHASE]` | конвейер Ш1–Ш9 (15 фаз) | БД, артефакты |
-| `hound crawl {run\|status\|list\|resume\|restart\|cancel\|policy}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики (`status --per-url`/`--per-host`), resume/restart/cancel; `policy {set\|list\|clear}` — режим обновления по области (§D.2.2) | `crawl_sessions`, `crawl_session_items`; `crawl_policy` (только `policy`) |
+| `hound crawl {run\|status\|list\|resume\|restart\|cancel\|policy\|drain}` | сеансы краула (`local`): durable-запуск фазы корпуса Ш5, статус/счётчики (`status --per-url`/`--per-host`), resume/restart/cancel; `policy {set\|list\|clear}` — режим обновления по области (§D.2.2); `drain` — докачка усечённых корней до исчерпания (`--refresh drain`, известные страницы из сохранённых байтов) и правка `max_documents`/`max_depth` по «измерено + объявленный запас» (план `29`) | `crawl_sessions`, `crawl_session_items`; `crawl_policy` (только `policy`) |
 | `hound extract consume --run-yaml … --package …` | довести durable-очередь `extract_queue` завершённого сеанса краула до корпуса: запускает **ту же** фазу Ш5 в режиме `consume_only` (сетевые шаги — дренаж корней, ревалидация, SERP — не исполняются), печатает наблюдённое (`done`/`failed`/`skipped`/`claimed`/`pending`, `backlog_bytes`); незакрытая очередь → `EXIT_ERROR`, не «ok». Пара к `crawl run --crawl-only` (F2): «краул выполнен» ≠ «корпус собран» | `corpus_docs`/`corpus_chunks` через фазу корпуса |
 | `hound artifacts {list\|fetch}` | недоступные артефакты прогона (13-manual-artifacts §3.5). `list` — что краул не взял и почему; источник — **БД прогона** (`crawl_session_items`), не `outputs/artifacts_gap.yaml` (его перезаписывает следующий `report`). Фильтры `--product`/`--root`/`--path`/`--mask '*.pdf'`/`--kind` (дефолт `robots_disallow`); `--db` > `--run-id` > `--package` (последний читаемый прогон пакета). `fetch` — **действие человека**, а не обход robots: адаптер идёт без `RobotsGate`, но SSRF-валидация (вход и каждый хоп), scope объявленных хостов продукта, блэклист и потолок `crawl.max_artifact_bytes` действуют; контейнеры отвергаются видимо. Байты → `sources/manual/{product_id}/{путь URL}` (в `.gitignore`), объявление → `sources/manual_artifacts.yaml` (`sha256`, `provided_by`, `provided_at`, `robots_override: true`). Повтор идемпотентен (`unchanged`, `changed: 0`); `run_id` двигает только материал `(product_id, url, sha256)` — это видно как `declaration.digest_changed`. `--actor` обязателен, `--dry-run` ничего не пишет | `sources/manual/` + `sources/manual_artifacts.yaml` пакета (`list` — только чтение) |
 | `hound review` | очередь ревью / preliminary-стол: `preliminary`-контур + `❓`-кандидаты (Ш7) — **только печать**, ячейки не меняет | — (только чтение БД) |
@@ -1678,7 +1680,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
   **все оси краула** `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document`,
   `--document-level`, `--pdf-pipeline`, `--document-timeout`, `--host-concurrency`,
   `--extract-backlog` (через `crawl_config_digest`). Инвентарь — `CONTRACT_FLAGS`/
-  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:484`, `core/cli/execution_axes.py:193`);
+  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:514`, `core/cli/execution_axes.py:193`);
   полный список флагов — `hound run --help`. Частичный прогон — **другой прогон**, а не
   resume полного.
 * **Меняют объём работы, но не идентичность:** `--reset` (повторить фазы в обход resume;
@@ -1813,7 +1815,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1213` (`_shims_removed`) |
 | 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:155`, `SCHEMA_VERSION` — `core/store/sqlite.py:153`; тот же гейт `tests/selfcheck.py:1213` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1037` (`_import_graph`), вызов `tests/selfcheck.py:375` |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1452` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1462` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется

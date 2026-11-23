@@ -433,7 +433,7 @@ LLM-endpoint корп. облака — только в Z0.
    `10-extraction-pipeline-architecture.md` §6 при его удалении 08.11.2026). Проба ключа берёт
    идентичность **прокси**: у `RemoteExtractor` нет `extractor_version_for`, поэтому
    `_cache_extractor_version` возвращает `.version` = `remote-extractor-1`
-   (`core/pipeline/extraction_runtime.py:331-334`, `core/adapters/remote_extractor.py:220`), а
+   (`core/pipeline/extraction_runtime.py:332-335`, `core/adapters/remote_extractor.py:220`), а
    запись кладёт `ExtractedDoc.extractor_version` — штамп docling, названный **edge**
    (`core/pipeline/extract_cache.py:503`). Ключи не совпадают никогда ⇒ под `split` кэш не
    даёт попаданий, и каждый цикл пере-извлекает весь корпус. Это не регресс, а названная

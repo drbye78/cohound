@@ -177,7 +177,7 @@ PostgreSQL 10, не позволяют реализовать такую дву�
   построению.** *Отменено 21.11.2026 (§10): отказ `robots` больше не блокирует — это
   объявленная граница сайта.* `BLOCKING_FAILURE_KINDS` включает `robots_disallow`, а снятие
   корня пишется как `complete = not (truncated or skipped_documents or robots_refused)`
-  (`core/pipeline/corpus.py:3258`). Отказы по продуктам (прогоны `145ad66ca3f9` и
+  (`core/pipeline/corpus.py:3278`). Отказы по продуктам (прогоны `145ad66ca3f9` и
   `3e7b7468dd9c`): `digital_q` **53** (все — `?PAGEN_1=2`, robots вендора запрещает `/*PAGEN`),
   `jatoba` **17**, `postgrespro` **17** (`/order/*`, `/useragreement`), `tantor` **2**.
   У `jatoba` это не мелочь: `www.gaz-is.ru/robots.txt` содержит `Disallow: *.pdf$`, а

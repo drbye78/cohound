@@ -92,7 +92,7 @@
 (`core/cli/context.py:2354`).
 
 **Мёртвые значения в словаре.** `SkipReason` объявляет 7 значений, но производятся **пять**
-(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1230,1220`, `gate_delegated_external`/
+(`no_search_adapter`/`no_queries` — `core/pipeline/phases.py:1232,1220`, `gate_delegated_external`/
 `gate_not_blocking` — `core/pipeline/runner.py:625,568`, `no_embedder` — на уровне CLI,
 `core/cli/commands/experiment.py:284`);
 `no_urls` и `no_registry_spec` не производятся ничем (`grep` по `core/` пуст). Пустой план
@@ -714,7 +714,7 @@ class DiscoveryLLMPort(Protocol):
 
 | Группа | Модули |
 |---|---|
-| Краул | `crawl_frontier` (frontier обхода in-site ссылок и контрольные оси краула, D1/D2) · `crawl_session` (локальная оркестрация сеанса краула для фазы корпуса) · `crawl_sources` (резолвер цели краула по слоям источников) · `fetch_plan` (резолвер плана получения страницы, D2) · `crawl_probe` / `crawl_probe_driver` (ядро решений автоподбора осей краула и его read-only драйвер) · `crawl_policy` (разрешение политики краула по областям, план 19) · `crawl_metric` (метрика краула из durable-фактов сеанса, F8) · `crawl_pacing` (прибор темпа: наблюдённая конкурентность и ожидание по origin) · `archive_descent` (спуск в контейнеры — исполнение плана членов, B3) · `artifact_probe` (классификация артефакта **до** экстракции) · `artifacts_gap` (`artifacts_gap.yaml` — недоступные артефакты как вход следующего прогона) · `liveness` (свидетельство живости сеанса: `owner`, heartbeat, recovery; F1/Д-6) |
+| Краул | `crawl_frontier` (frontier обхода in-site ссылок и контрольные оси краула, D1/D2) · `crawl_session` (локальная оркестрация сеанса краула для фазы корпуса) · `crawl_sources` (резолвер цели краула по слоям источников) · `fetch_plan` (резолвер плана получения страницы, D2) · `crawl_probe` / `crawl_probe_driver` (ядро решений автоподбора осей краула и его read-only драйвер) · `crawl_policy` (разрешение политики краула по областям, план 19) · `crawl_metric` (метрика краула из durable-фактов сеанса, F8) · `drain_plan` (план докачки усечённых корней: чтение записанного провенанса, объявленный предел «измерено + запас», правка `domain_profiles.yaml` без потери шапки; план 29) · `crawl_pacing` (прибор темпа: наблюдённая конкурентность и ожидание по origin) · `archive_descent` (спуск в контейнеры — исполнение плана членов, B3) · `artifact_probe` (классификация артефакта **до** экстракции) · `artifacts_gap` (`artifacts_gap.yaml` — недоступные артефакты как вход следующего прогона) · `liveness` (свидетельство живости сеанса: `owner`, heartbeat, recovery; F1/Д-6) |
 | Корпус и кэши | `corpus_driver` (драйвер полос когорты: чередование корней по праву на host) · `corpus_drain` (дренаж одного seed-root: окно фетча/экстракции, frontier, спуск) · `corpus_ingest` (допуск и разбор одного URL: retention, переиспользование, фетч, развёртка) · `corpus_persist` (durable-субстрат фазы: версии документов, элементы сеанса, границы продуктов) · `corpus_state` (мутабельное состояние фазы, пересекающее границы замыканий) · `corpus_commit` (фиксация исхода корня и жизненный цикл пула экстракции) · `corpus_coverage` (покрытие корпуса и статус продукта в прогоне) · `corpus_freshness` (даты актуальности артефактов в отчёте, план 20) · `corpus_index` (идентичность индексной сборки и эмбеддинг продукт-партиции) · `extract_queue` (очередь «документ добыт → сконвертирован») · `extract_consume` (потребитель очереди: документ → корпус) · `extraction_runtime` (runtime экстракции: пул, воркер-процесс, кэш, память) · `index_build` (`IndexBuild` — результат сборки корпуса) · `extract_cache` (контент-адресуемый кэш экстракции, переживающий прогоны) · `eval_cache` (межпрогонный кэш вердиктов оценщика) · `embed_cache` (контент-адресуемый кэш векторов) · `partial_docs` (частичное извлечение — **числом**, а не прилагательным) · `composition` (композиция индексных партиций и её иммутабельный манифест) · `idempotency` (инвалидация и идемпотентность конвейера) |
 | Идентичность | `digests` (канонические дайджесты идентичности прогона) · `run_identity` (цикл, объём, lineage) |
 | Оценка | `prompt` (механическая компиляция промпта оценщика) · `exhaustion` (протокол исчерпания как провенанс поиска) · `evaluation_policy` (политика повтора оценщика — объявленное условие измерения, V3) · `measurement_uncertainty` (полоса неопределённости вердиктов) · `support_quality` (качество поддержки карты: два замера) · `evaluator_benchmark` (benchmark моделей оценщика при всём прочем фиксированном) · `extraction_eval` (extraction-golden и A/B экстракторов) · `adversarial` (adversarial-набор и регрессионный гейт) |
@@ -941,7 +941,7 @@ pytest + `--cov` (`scripts/ci.sh:91-97`).
 
 **Открытые вопросы к итерации 2 — закрыты все пять.** Точные сигнатуры фьюжна RRF —
 `core/pipeline/retrieve.py:295` `rrf_fuse_chunks(…, rrf_k=60, top_k)`; формат `AlignmentReport` —
-`core/domain/models.py:1776`; структура `ProtocolExhaustion` — `core/domain/models.py:1671`;
+`core/domain/models.py:1786`; структура `ProtocolExhaustion` — `core/domain/models.py:1681`;
 политика ретраев в `evaluate.py` — `core/pipeline/evaluate.py:3377` (`max_retries` в
 `evaluate_cell`), цикл `core/pipeline/evaluate.py:3771`;
 как передавать чанки в `validate` — **объектами из RetrievalResult**, а не выборкой из store:

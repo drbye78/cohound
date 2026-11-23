@@ -621,7 +621,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   (`tests/selfcheck.py:1037` `_import_graph`, AST по `core.*`, вызов `tests/selfcheck.py:375`;
   тот же шаг в CI — `scripts/ci.sh:59`);
 - `ProtocolExhaustion`/`AlignmentReport` — **контракт**, а не отложено: структура фиксируется в
-  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1653` и `core/domain/models.py:1852`; производитель
+  итерации 1/M0 (§2.2, §5) — ✅ сделано (`core/domain/models.py:1663` и `core/domain/models.py:1862`; производитель
   протокола — `core/pipeline/exhaustion.py:150`);
 - версионирование prompt-шаблонов (по файлам? по hash?) — ✅ сделано **по файлам**:
   `core/pipeline/prompt.py:146` (`TEMPLATE_VERSION = "evaluator_v6"`), `templates/{version}.txt`,
@@ -636,7 +636,7 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
   (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:310`; маркер
   `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:218`; профиль публикуемости
-  `outputs/publishability.yaml` — `core/pipeline/report.py:3977`);
+  `outputs/publishability.yaml` — `core/pipeline/report.py:3991`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через
   `read_prior_llm_usage`/`merge_llm_usage`, а не «последняя инвокация»; запись —

@@ -420,7 +420,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ### W7 — Корпус — ✅ done по коду; ⚠️ паритет `pb` `local`/`split` не измерен
 
-✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:1259` (`host_in_scope`), `:1236`/`:1241`
+✅ сделано (код, проверено) — `core/pipeline/crawl_frontier.py:1300` (`host_in_scope`), `:1236`/`:1241`
 (`out_of_scope_subdomains`/`accepted_foreign_hosts`), `core/pipeline/archive_descent.py:121-123`
 (`archive_cycle`/`archive_budget_exhausted` — исчерпание видимо), цепочка 5000 архивов —
 `tests/pipeline/test_corpus_descent.py`.
@@ -544,8 +544,8 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:2060` (`render_battle_card`), `:1827:1930`
-(`render_nda_questions`), `:2414` (`render_preliminary_findings`); живой вывод —
+✅ сделано (проверено) — `core/pipeline/report.py:2109` (`render_battle_card`),
+`:2179` (`render_nda_questions`), `:2809` (`render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, 26.10) и
 `runs/ru-pg-dbms-c2e7b860ac17/outputs/` (**12** файлов, 06.11, включая `battle_card.xlsx`,
 `nda_questions.csv`, `cell_freshness.csv`, `publishability.yaml`).
@@ -558,7 +558,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
-✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2359` вызывает `_run_serp_contour`
+✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2363` вызывает `_run_serp_contour`
 (def — `core/pipeline/corpus.py:1347`; поиск → допуск → расширение seed-набора **до** дренажа,
 одна сборка), `core/pipeline/search_log.py` (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1553`)
@@ -713,7 +713,7 @@ P5), но строка помечена здесь как неактуальна
 - **Параллельная экстракция (P4, as-built).** Ось `crawl.extract_workers` (app < run < site,
   `CrawlLimits.extract_workers`, манифест-поле `crawl_extract_workers`) —
   пул экстракции — `ExtractionPool` (`core/pipeline/extraction_runtime.py:133`), фабрика
-  `new_extract_pool` в `core/pipeline/corpus_ingest.py:5250`, воркер
+  `new_extract_pool` в `core/pipeline/corpus_ingest.py:5394`, воркер
   от composition root. `local` — процессы (`ProcessPoolExecutor`/forkserver, экстрактор на
   воркер через `core/cli/wiring.py`), `split` — потоки поверх `RemoteExtractor`; шов
   (`/v1/*`, `SEAM_SCHEMA_VERSION`) **не** менялся. Воркер читает retained-`raw_path` (I19;
@@ -1022,7 +1022,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открыто **пять** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2486-2492`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2510-2516`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:349-385`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
@@ -1031,7 +1031,7 @@ DLP, набор IDS-правил) — design-требования зафикси
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
   (`core/pipeline/corpus_driver.py`); нит `limiter.wait` внутри/вне `try` снят `9a8440a` — оба
-  пути (пуловой и inline) зовут один помощник `core/pipeline/corpus_ingest.py:2756`
+  пути (пуловой и inline) зовут один помощник `core/pipeline/corpus_ingest.py:2887`
   (`_fetch_with_paced_retries`).
   ➖ **E2 follow-up закрыт 31.10.2026:** вестигиальное `Ports.registry`/`DEFAULT_REGISTRY_ID` и
   параметры `registry`/`registry_id` у `build_adapters` сняты (читателей не было — Ш3 берёт только
