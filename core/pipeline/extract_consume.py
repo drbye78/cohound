@@ -43,6 +43,7 @@ import contextlib
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -62,6 +63,7 @@ from core.domain import (
     FailureKind,
     PdfPipeline,
     ReuseKind,
+    WorkClass,
 )
 from core.pipeline.archive_descent import (
     SKIP_EXTRACT_FAILED,
@@ -81,6 +83,7 @@ from core.pipeline.corpus_ingest import (
     _state_url_key,
     artifact_is_terminal,
     new_extract_pool,
+    note_budget_accounting,
 )
 from core.pipeline.corpus_persist import DocReuse, _now_iso
 from core.pipeline.corpus_state import CorpusCounters
@@ -105,6 +108,14 @@ from core.pipeline.extraction_runtime import (
     _ExtractRequest,
 )
 from core.pipeline.incremental import doc_version_id
+from core.pipeline.resources import (
+    BUDGET_ACCOUNTED,
+    BUDGET_UNACCOUNTED,
+    PARENT_FLOOR_MB,
+    work_class_peak_mb,
+    workers_for_class,
+)
+from core.pipeline.work_class import work_class_for
 from core.ports.chunker import ChunkerPort
 from core.ports.container import ContainerPort
 from core.ports.extractor import ExtractorPort
@@ -608,6 +619,13 @@ class ConsumerScope:
     #: (план 19 §E.7). ``None`` — прогон без состояния: провенанс остаётся только в списках
     #: фазы, а проход без сети контейнер не воспроизведёт (видимая причина у него есть).
     state: ProductStatePort | None = None
+    #: F0: бюджет памяти прогона, MB — **явный вход** composition root
+    #: (:func:`core.pipeline.resources.resolve_mem_budget_mb`), а не чтение окружения:
+    #: чистый пайплайн не имеет права зависеть от памяти хоста. По нему выводится окно
+    #: **каждого класса работы** (:func:`_row_window`); ``None`` — бюджета нет, окна классов
+    #: не выводятся и причина публикуется. В ``run_id`` не входит: расписание — не условие
+    #: измерения (иначе ``run_id`` стал бы функцией хоста).
+    mem_budget_mb: int | None = None
 
 
 @dataclass(frozen=True)
@@ -631,8 +649,10 @@ class ConsumerOperations:
     ingest_member_doc: Callable[..., MemberOutcome]
     #: Durable-персистенция документов продукта (инкрементально, I19).
     persist_docs: Callable[..., None]
-    #: Наблюдение расписания экстракции (окно → строка продукта/метрики).
-    note_scheduling: Callable[[CrawlLimits], None]
+    #: Наблюдение расписания экстракции (окно → строка продукта/метрики). Ключевые
+    #: аргументы ``work_class``/``window`` обязательны: одно число больше не описывает
+    #: расписание — у каждой полосы своё окно, и наблюдаемость обязана это назвать.
+    note_scheduling: Callable[..., None]
 
 
 @dataclass(frozen=True)
@@ -685,8 +705,21 @@ class ConsumerReport:
     backlog: dict[str, Any] = field(default_factory=dict)
     #: Строк, оставшихся незакрытыми после вызова.
     pending: int = 0
-    #: Фактическое окно экстракции продукта (``None`` — экстракция inline).
+    #: Фактическое окно экстракции продукта — **максимум по классам** (``None`` — все
+    #: строки шли inline). Поле сохранено ради совместимости отчёта; разбивка — рядом.
     extract_window: int | None = None
+    #: Окно по классам работы (``{work_class: window}``) — фактическая ширина каждой полосы.
+    #: Класс, которого нет в словаре, либо не встречался, либо шёл inline (окна у него нет:
+    #: «не измеряли» ≠ «ноль», та же конвенция, что у ``extract_window``).
+    extract_window_by_class: dict[str, int] = field(default_factory=dict)
+    #: F0: наблюдённый максимум суммы пиков заданий «в полёте», MB (``None`` — учёт не
+    #: вёлся: бюджета нет). Сумма ограничена бюджетом **по построению**, поэтому пик,
+    #: упёршийся в бюджет при непустой очереди, — это ответ «узел загружен».
+    in_flight_mb_peak: int | None = None
+    #: F0: сколько **стартов** отложено из-за бюджета, по классам (события, не строки).
+    class_skipped_for_budget: dict[str, int] = field(default_factory=dict)
+    #: F0: ``accounted`` | ``class_budget_unaccounted`` | ``None`` (учёт не применялся).
+    budget_accounting: str | None = None
     #: Документов, дошедших до корпуса этим вызовом.
     docs: int = 0
     #: Отдельные факты прогона (не ошибки): напр. «строка уже закрыта».
@@ -803,34 +836,102 @@ def _reuse_kind_for(item: ExtractQueueItem) -> ReuseKind:
 # --------------------------------------------------------------------------- #
 
 
-def _row_window(limits: CrawlLimits, scope: ConsumerScope, label: str) -> int | None:
-    """Окно экстракции одной строки: ось ``extract_workers`` либо рециклинг.
+def _row_window(
+    limits: CrawlLimits,
+    scope: ConsumerScope,
+    label: str,
+    *,
+    work_class: WorkClass,
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline,
+) -> int | None:
+    """Окно экстракции строки **внутри её класса работы**: ось > бюджет класса > inline.
 
-    Ровно прежняя формула (``root_lifecycle`` до F5), но применённая к **строке**: окно —
-    свойство объявленных осей того URL, а не очереди. ``None`` — экстракция inline.
+    Три уровня, по убыванию силы входа:
 
-    Ось — провенанс, а не измерение: она не входит в ``CrawlLimits.as_dict()``, поэтому
-    её значение не может сдвинуть ``run_id``; публикуется она в
+    1. **объявленная** ось ``crawl.extract_workers`` (``> 1``) — воля оператора, сильнее
+       бюджета: она задана явно и её цена ему известна. Выведенная ось
+       (``extract_workers_derived``) сюда **не** входит: это не воля оператора, а прежняя
+       единая оценка из бюджета по пику **PDF-уровня**
+       (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits` →
+       :func:`core.pipeline.resources.workers_from_budget`). Принять её за окно класса
+       значило бы вернуть ровно тот дефект, ради которого полосы разделены: HTML получал бы
+       окно, посчитанное по цене docling (2 вместо 12 при бюджете 8000 MB);
+    2. окно **класса**, выведенное из бюджета памяти
+       (:func:`core.pipeline.resources.workers_for_class`): HTML-страница стоит 317 MB,
+       PDF ``layout_tables`` — 3679 MB, и одно окно на оба класса либо морило HTML в
+       очереди, либо обещало память, которой нет;
+    3. ``None`` — экстракция inline (пула нет либо окно не объявлено и не выводится).
+
+    **Рециклинг воркеров окно больше не задаёт.** До этого ``extract_max_tasks_per_child``
+    принудительно возвращал окно 1 — склейка, унаследованная от inline-пути, где «один
+    воркер» и «одно задание в полёте» были одним фактом. Это разные вещи: рециклинг — про
+    память процесса (после N заданий воркер штатно завершается), окно — про число
+    одновременных заданий. Склейка снята; рециклинг по-прежнему включает пул при окне 1
+    (иначе ось ``extract_max_tasks_per_child`` перестала бы действовать вовсе).
+
+    Ось и окно — провенанс, а не измерение: они не входят в ``CrawlLimits.as_dict()``,
+    поэтому их значения не могут сдвинуть ``run_id``; публикуются они в
     ``metrics.json.resources.scheduling`` (:func:`core.pipeline.corpus_ingest.
-    note_scheduling`).
+    note_scheduling`) и ``extract_workers_by_class``.
 
-    Несовпадение оси и пула — **не тихо** (:func:`_note_window_diagnostics`): раньше эту
-    проверку делал корень, а окно теперь резолвится здесь, на строке.
+    Несовпадение оси и пула — **не тихо** (:func:`_note_window_diagnostics`), как и
+    неизмеренный пик класса или его невместимость: причина называется один раз на класс.
     """
     axis = (
         int(limits.extract_workers)
-        if limits.extract_workers is not None and int(limits.extract_workers) > 1
+        if (
+            limits.extract_workers is not None
+            and int(limits.extract_workers) > 1
+            and not limits.extract_workers_derived
+        )
         else None
     )
     _note_window_diagnostics(limits, axis, scope, label)
     if axis is not None:
         return axis
+    if limits.extract_workers_derived and scope.extraction_pool is not None:
+        workers, reason = workers_for_class(
+            work_class,
+            level,
+            pdf_pipeline,
+            scope.mem_budget_mb,
+            pdf_device=limits.pdf_device,
+        )
+        if reason is not None:
+            # Пик класса не измерен либо бюджета нет: окно 1 и **видимая** причина.
+            # Молчаливая единица выглядела бы как замер, а ноль оставил бы строки
+            # класса без исхода вовсе.
+            _note_window_once(
+                scope,
+                f"{reason}:{work_class.value}",
+                f"{label}: класс {work_class.value}: {reason} — окно 1 "
+                f"(бюджет {scope.mem_budget_mb} MB, пик класса не измерен: "
+                "выдуманное число запрещено, A3)",
+            )
+            return 1
+        if workers > 1:
+            return workers
+        if workers == 0:
+            # Не помещается по бюджету: preflight отказывает такому прогону, но если он
+            # всё же идёт (ось выведена в обход), причина обязана быть названной, а окно —
+            # 1, как и сказано в сообщении: молчаливый ``None`` увёл бы класс в inline,
+            # то есть в родителя, где тот же пик тратится без изоляции процесса.
+            _note_window_once(
+                scope,
+                f"work_class_budget_zero:{work_class.value}",
+                f"{label}: класс {work_class.value} не помещается в бюджет "
+                f"{scope.mem_budget_mb} MB — окно 1",
+            )
+            return 1
     recycle = limits.extract_max_tasks_per_child
     if (
         recycle is not None
         and scope.extraction_pool is not None
         and scope.extraction_pool.supports_worker_recycling
     ):
+        # Рециклинг включает пул (иначе ось не действовала бы), но окно остаётся 1:
+        # он про память процесса, а не про число одновременных заданий.
         return 1
     return None
 
@@ -954,12 +1055,36 @@ class _RowJob:
     pdf_pipeline: PdfPipeline
     extractor: ExtractorPort
     reuse_kind: ReuseKind
+    #: Полоса расписания, в которой идёт строка (цена работы: пик RAM/VRAM, модели).
+    work_class: WorkClass
     #: Запрошенный краулом адрес: ``mark``/``url_state`` адресуются им, тогда как
     #: ``item.url``/``page.url`` — финальный адрес документа (редирект).
     work_url: str = ""
     reuse: DocReuse | None = None
     pool_key: _ExtractPoolKey | None = None
     future: Any = None
+    #: Готовый текст из ``extract_cache``: доводится **не** на старте строки, а в порядке
+    #: очереди (:meth:`_BandRun.settle`). Хит кэша — запись корпуса, поэтому он не имеет
+    #: права обгонять документы, которые очередь поставила раньше.
+    cached: Any = None
+    #: Строка уже закрыта: доведена (:meth:`_BandRun._settle`) либо снята как остаток
+    #: мёртвой полосы (:func:`_abort_pending`). Флаг нужен потому, что снятая строка
+    #: остаётся в глобальном порядке, и курсор доводки дошёл бы до неё повторно —
+    #: второй исход по той же строке очереди был бы двойным счётом и второй записью.
+    settled: bool = False
+    #: Сколько MB этот слот держит в общем счётчике памяти (``_BandRun.in_flight_mb``).
+    #: ``None`` — резерва нет: бюджет не объявлен, строка шла inline/из кэша либо это
+    #: контейнер (спуск потоковый, слот пула не занят). Ненулевое значение — резерв
+    #: возвращается **ровно один раз** (:meth:`_BandRun._release`), иначе бюджет «утечёт».
+    peak_mb: int | None = None
+    #: Класс с **неизмеренным** пиком держит не мегабайты, а право быть единственным:
+    #: выдумать его пик нельзя (A3), поэтому он идёт один на узел (окно 1 уже это
+    #: обещает, здесь — то же самое между классами).
+    hold_single: bool = False
+    #: Потолок задания (``started_at + extract_timeout``), секунды ``perf_counter``.
+    #: Считается **на старте**, а не в момент ожидания: иначе зависший воркер, чьё
+    #: завершение никто не ждёт (полоса занята другими), не истёк бы никогда.
+    deadline: float | None = None
     error: str | None = None
     error_kind: FailureKind | None = None
     done: bool = False
@@ -1378,6 +1503,7 @@ def _start_row(
     window: int | None,
     reuse_kind: ReuseKind,
     work_url: str,
+    work_class: WorkClass,
     claimed: bool = False,
 ) -> _RowJob:
     """Начать конверсию строки: зонд → спуск → переиспользование → отправка в пул.
@@ -1410,6 +1536,7 @@ def _start_row(
         pdf_pipeline=pdf_pipeline,
         extractor=extractor,
         reuse_kind=reuse_kind,
+        work_class=work_class,
         work_url=work_url,
         errors_before=len(scope.errors),
         claimed=claimed,
@@ -1482,10 +1609,11 @@ def _start_row(
             _as_text(level),
         )
         if cached is not None:
-            job.doc_id = _finish_extracted(
-                job, cached, scope=scope, operations=operations, product=product
-            )
-            job.done = True
+            # Хит кэша — **не** запись здесь: ``finish_one`` пишет документ и чанки в
+            # порядке вставки, а порядок вставки входит в ``vector_digest`` партиции.
+            # Старт строки идёт по полосе (то есть может обогнать очередь), поэтому текст
+            # отдаётся доводке (:meth:`_BandRun.settle`), а она идёт порядком очереди.
+            job.cached = cached
             return job
     try:
         executor = scope.pools.executor(job.pool_key, _new_pool_for(job, scope))
@@ -1495,6 +1623,10 @@ def _start_row(
         )
         _finish_inline_row(job, scope=scope, operations=operations, product=product)
         return job
+    # Потолок задания считается **на старте**: доводка может ждать очереди (полоса занята
+    # другим классом), и зависший воркер обязан истечь по часам, а не по моменту, когда
+    # до его строки дошла очередь.
+    job.deadline = time.perf_counter() + scope.extract_timeout
     try:
         job.future = executor.submit(
             scope.extraction_pool.worker,  # type: ignore[union-attr]
@@ -1693,7 +1825,14 @@ def _await_extraction(
     ``TimeoutError`` поднимается только когда истёк **общий** потолок документа
     (``extract_timeout``); таймаут среза — не исход, а повод продлить аренду.
     """
-    deadline = time.perf_counter() + scope.extract_timeout
+    # Потолок — от старта строки (:attr:`_RowJob.deadline`), а не от входа в ожидание:
+    # доводка идёт порядком очереди, поэтому между стартом и первым ``result`` может
+    # пройти всё окно другой полосы, и отсчёт «сейчас + timeout» простил бы зависание.
+    deadline = (
+        job.deadline
+        if job.deadline is not None
+        else time.perf_counter() + scope.extract_timeout
+    )
     slice_s = scope.heartbeat_s if scope.heartbeat_s > 0 else scope.extract_timeout
     while True:
         remaining = deadline - time.perf_counter()
@@ -1731,6 +1870,16 @@ def _settle_row(
     """
     if job.done:
         return job, job.doc_id, job.error, False
+    if job.cached is not None:
+        # Хит ``extract_cache``: экстракции не было, доводка обычная (нарезка + запись).
+        # Записывается **здесь**, а не на старте строки, потому что порядок вставки входит
+        # в ``vector_digest`` партиции, а старт полосы порядок очереди не гарантирует.
+        doc_id = _finish_extracted(
+            job, job.cached, scope=scope, operations=operations, product=product
+        )
+        return job, doc_id, _conversion_failure(
+            scope.errors[job.errors_before :], job.item.product_id, job.item.url
+        ), False
     if job.future is None:
         # Начатая строка без отправки: пул исчерпал пересборки. Inline запрещён.
         doc_id = _finish_extracted(
@@ -1820,6 +1969,518 @@ def _settle_row(
 
 
 # --------------------------------------------------------------------------- #
+# Полосы расписания: класс работы → свой курсор, своё окно, свой пул
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _RowSlot:
+    """Место строки в **глобальном** порядке очереди — порядке доводки.
+
+    Задание появляется в слоте, когда до строки дошла её полоса: аренда берётся на старте,
+    а не на планировании. Взять аренду заранее значило бы, что прерванный прогон оставит
+    после себя ``attempts`` по строкам, работы по которым не начиналось, и после
+    ``max_claim_attempts`` они стали бы терминальными без единой попытки.
+    """
+
+    index: int
+    item: ExtractQueueItem
+    job: _RowJob | None = None
+    #: Строка закрыта **без задания**: её забрал другой потребитель (``lost``). Курсор
+    #: доводки обязан пройти мимо — иначе голова очереди навсегда осталась бы пустой.
+    closed: bool = False
+
+
+@dataclass
+class _Band:
+    """Полоса расписания: один класс работы — свой курсор, своё окно, свой пул.
+
+    Пул адресуется ключом ``(уровень, механизм PDF, окно)`` (:class:`_ExtractPoolKey`),
+    поэтому разные окна **уже** дают разные пулы: ключ менять не нужно, и полосы не делят
+    исполнителя. Общий у них только процесс-родитель и бюджет памяти.
+    """
+
+    work_class: WorkClass
+    #: Индексы строк полосы в глобальном порядке (возрастают: порядок очереди внутри класса).
+    slots: list[int] = field(default_factory=list)
+    cursor: int = 0
+    #: Окно полосы — максимум разрешённого по её строкам; ``None`` — строки идут inline.
+    window: int | None = None
+    #: Задания «в полёте» этой полосы (только с future: доведённые на старте сюда не
+    #: попадают — они уже готовы, и держать их незачем).
+    pending: deque[_RowJob] = field(default_factory=deque)
+    #: Строка полосы пишет корпус **на старте** (спуск в контейнер либо inline-путь), то
+    #: есть способна обогнать порядок очереди. Такая полоса стартует только на голове
+    #: глобального порядка: ``corpus_chunks`` пишется в порядке вставки, и он входит в
+    #: ``vector_digest`` партиции (``core/util/index_partition.py``).
+    head_only: bool = False
+
+    @property
+    def capacity(self) -> int:
+        """Сколько заданий полосы держать в полёте (inline — одно: оно идёт на потоке)."""
+        return 1 if self.window is None else max(1, int(self.window))
+
+
+def _row_ready(job: _RowJob) -> bool:
+    """Готово ли задание к доводке — **неблокирующая** проверка.
+
+    ``future.done()`` вместо ``result()``: доводка головы не имеет права ждать хвост другой
+    полосы (иначе HTML снова встанет за PDF). Не-``concurrent.futures.Future`` (чужой или
+    тестовый исполнитель) готовности не сообщает — такая строка доводится прежним
+    блокирующим ``result`` (``_settle_row``), и поведение остаётся байт-в-байт прежним.
+
+    Истёкший потолок задания тоже считается готовностью: ``_await_extraction`` немедленно
+    поднимет ``TimeoutError``, и строка закроется ``extraction_timeout`` — без этого
+    зависший воркер, чьё завершение никто не ждёт, не истёк бы никогда.
+    """
+    if job.done or job.future is None or job.cached is not None:
+        return True
+    if not isinstance(job.future, Future):
+        return True
+    if job.future.done():
+        return True
+    return job.deadline is not None and time.perf_counter() >= job.deadline
+
+
+@dataclass
+class _BandRun:
+    """Один проход потребителя по продукту: полосы, глобальный порядок, счётчики.
+
+    **Почему глобальный порядок доводки, а не «кто первый ответил».** ``_content_digest``
+    партиции склеивает ``chunk_ids``/``content_hash`` **в порядке вставки**, поэтому запись
+    документов обязана идти порядком очереди при любой ширине полос — иначе два прогона
+    одного набора строк дали бы разный ``vector_digest`` при одинаковых ``doc_id`` (это
+    проверяется тестом ``test_window_one_and_window_n_give_the_same_corpus_identity``). Полосы
+    распараллеливают **извлечение**, а доводку (нарезка/запись) сериализуют в каноническом
+    порядке: работа дорогая, запись дешёвая.
+
+    Счётчики ``done``/``failed``/``lost``/``claimed`` — те же, что в :class:`ConsumerReport`;
+    ``windows`` — фактическое окно по классам (``{work_class: window}``).
+    """
+
+    queue: ExtractQueue
+    scope: ConsumerScope
+    operations: ConsumerOperations
+    product: ProductScope
+    product_id: str
+    worker: str
+    lease: _Lease
+    extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort] = field(
+        default_factory=dict
+    )
+    order: list[_RowSlot] = field(default_factory=list)
+    bands: dict[WorkClass, _Band] = field(default_factory=dict)
+    done: int = 0
+    failed: int = 0
+    lost: int = 0
+    claimed: int = 0
+    windows: dict[str, int] = field(default_factory=dict)
+    #: F0: сумма пиков **стартовавших** заданий, MB. Окно класса — верхняя граница
+    #: («сколько класс вправе держать»), а этот счётчик — фактическое ограничение: пики
+    #: складываются, и 11 HTML-страниц по 317 MB плюс PDF на 3679 MB не помещаются в бюджет
+    #: 4 GB, хотя каждое окно по отдельности «поместилось». Это **учёт**, а не потолок:
+    #: слагаемые — измеренные пики (:func:`work_class_peak_mb`) и объявленный бюджет
+    #: (:attr:`ConsumerScope.mem_budget_mb`), выдуманных чисел здесь нет.
+    in_flight_mb: int = 0
+    #: F0: заданий класса с неизмеренным пиком в полёте (0/1) — такой класс идёт один.
+    unmeasured_in_flight: int = 0
+    #: F0: наблюдённый максимум :attr:`in_flight_mb` за проход (публикуется в метриках).
+    in_flight_peak_mb: int = 0
+    #: F0: сколько **стартов** отложено из-за бюджета, по классам. Счётчик событий, а не
+    #: строк: одна строка может быть отложена несколько раз, пока сосед не освободит
+    #: память. Растёт при непустой очереди ⇒ упор в бюджет **узла**, а не в ширину полосы.
+    skipped_for_budget: dict[str, int] = field(default_factory=dict)
+    #: F0: ``accounted`` | ``class_budget_unaccounted`` | ``None`` (учёт не применялся).
+    budget_accounting: str | None = None
+
+    # -- планирование ------------------------------------------------------- #
+
+    def add(self, item: ExtractQueueItem) -> None:
+        """Поставить строку в глобальный порядок и в полосу её класса."""
+        slot = _RowSlot(index=len(self.order), item=item)
+        self.order.append(slot)
+        work_class = work_class_for(
+            content_type=item.content_type,
+            url=item.url,
+            level=_enum_or(DocumentLevel, item.level, DocumentLevel.FULL),
+            pdf_pipeline=_enum_or(
+                PdfPipeline, item.pdf_pipeline, PdfPipeline.STRUCTURED
+            ),
+        )
+        band = self.bands.get(work_class)
+        if band is None:
+            band = _Band(work_class=work_class)
+            self.bands[work_class] = band
+            if work_class is WorkClass.CONTAINER:
+                # Спуск в контейнер пишет членов на старте строки (``_descend_container``):
+                # его полоса обязана идти строго порядком очереди.
+                band.head_only = True
+        band.slots.append(slot.index)
+
+    def ordered_bands(self) -> list[_Band]:
+        """Полосы в каноническом порядке классов (детерминизм подачи, а не порядок словаря)."""
+        return [self.bands[c] for c in WorkClass if c in self.bands]
+
+    # -- цикл --------------------------------------------------------------- #
+
+    def run(self) -> None:
+        """Подавать, ждать и доводить, пока очередь продукта не закрыта.
+
+        Один общий цикл ожидания на все полосы: ``wait(..., FIRST_COMPLETED)`` возвращается
+        по первому завершению любого класса, поэтому готовая HTML-строка не ждёт PDF.
+        """
+        cursor = 0
+        bands = self.ordered_bands()
+        while cursor < len(self.order):
+            started = self._feed(cursor, bands)
+            advanced = self._commit(cursor)
+            if advanced != cursor:
+                cursor = advanced
+                continue
+            if started:
+                continue
+            if not self._in_flight(bands):
+                # Ни подать, ни довести нечего — этого не должно быть (голова очереди
+                # всегда стартуема), но молчаливое зависание недопустимо: называем и
+                # выходим, оставив строки незакрытыми (``pending > 0`` — видимый сигнал).
+                self.scope.errors.append(
+                    f"{self.product_id}: расписание конверсии не двигается на строке "
+                    f"{self.order[cursor].item.url} — полосы пусты, исхода нет"
+                )
+                break
+            self._await_ready(bands)
+
+    def _feed(self, cursor: int, bands: list[_Band]) -> bool:
+        """Подать строки в полосы, пока у каждой есть место в окне. ``True`` — подали хоть одну."""
+        started = False
+        for band in bands:
+            while band.cursor < len(band.slots) and len(band.pending) < band.capacity:
+                slot = self.order[band.slots[band.cursor]]
+                limits = self.scope.limits_for(slot.item.url)
+                level = _enum_or(DocumentLevel, slot.item.level, DocumentLevel.FULL)
+                pdf_pipeline = _enum_or(
+                    PdfPipeline, slot.item.pdf_pipeline, PdfPipeline.STRUCTURED
+                )
+                window = _row_window(
+                    limits,
+                    self.scope,
+                    f"{self.product_id}/{slot.item.url}",
+                    work_class=band.work_class,
+                    level=level,
+                    pdf_pipeline=pdf_pipeline,
+                )
+                if window is None or self.scope.extraction_pool is None:
+                    # Inline-строка пишет корпус **на старте** (``_start_row`` доводит её
+                    # сразу), поэтому полоса обязана стартовать её только на голове
+                    # глобального порядка: иначе запись обгонит очередь, а
+                    # ``vector_digest`` партиции склеивает чанки в порядке вставки.
+                    band.head_only = True
+                if band.head_only and (slot.index != cursor or band.pending):
+                    break
+                admitted, reserve_mb, hold_single = self._admit(
+                    band, level, pdf_pipeline
+                )
+                if not admitted:
+                    # Бюджет занят: строка ждёт, курсор полосы не двигается. Выходим из
+                    # **этой** полосы, а не из цикла подачи: у соседнего класса память
+                    # может быть свободна, и он обязан стартовать (иначе PDF ждал бы HTML
+                    # и наоборот — тот самый FIFO, ради которого полосы и разделены).
+                    self.skipped_for_budget[band.work_class.value] = (
+                        self.skipped_for_budget.get(band.work_class.value, 0) + 1
+                    )
+                    break
+                band.cursor += 1
+                self._begin(
+                    slot,
+                    band,
+                    limits=limits,
+                    window=window,
+                    level=level,
+                    pdf_pipeline=pdf_pipeline,
+                    reserve_mb=reserve_mb,
+                    hold_single=hold_single,
+                )
+                started = True
+        return started
+
+    def _begin(
+        self,
+        slot: _RowSlot,
+        band: _Band,
+        *,
+        limits: CrawlLimits,
+        window: int | None,
+        level: DocumentLevel,
+        pdf_pipeline: PdfPipeline,
+        reserve_mb: int | None = None,
+        hold_single: bool = False,
+    ) -> None:
+        """Взять аренду и начать строку (claim → окно → извлечение → отправка).
+
+        ``reserve_mb``/``hold_single`` — решение :meth:`_admit` о памяти. Резерв
+        засчитывается **после** :func:`_start_row` и только если строка действительно
+        заняла слот пула (``job.future is not None``): inline-строка и хит кэша память не
+        держат, и авансовый резерв «утёк» бы навсегда.
+        """
+        item = slot.item
+        was_claimed = False
+        if item.state is ExtractQueueState.PENDING:
+            if not self.queue.claim(item, self.worker):
+                self.lost += 1
+                slot.closed = True
+                return
+            self.claimed += 1
+            was_claimed = True
+        elif item.state is ExtractQueueState.CLAIMED and item.claimed_by != self.worker:
+            # Чужая живая аренда: не трогаем. Просроченную вернёт ``reclaim_stale``
+            # следующего прохода — видимо, а не по-тихому.
+            self.lost += 1
+            slot.closed = True
+            return
+        # Наблюдаемость расписания: ось объявлена, а окно — провенанс (не входит в
+        # ``CrawlLimits.as_dict()``), поэтому публикуется, а не входит в ``run_id``.
+        self.operations.note_scheduling(
+            limits, work_class=band.work_class, window=window
+        )
+        if window is not None:
+            band.window = window if band.window is None else max(band.window, window)
+            self.windows[band.work_class.value] = max(
+                self.windows.get(band.work_class.value, 0), window
+            )
+            self.scope.timings.note_extract_window(window, band.work_class)
+        extractor = _extractor_for(self.scope, level, pdf_pipeline, cache=self.extractors)
+        job = _start_row(
+            item,
+            scope=self.scope,
+            operations=self.operations,
+            product=self.product,
+            extractor=extractor,
+            window=window,
+            # Происхождение наблюдения — факт цикла от краула; строка даёт лишь запасное
+            # правило для остатка прошлого исполнения.
+            reuse_kind=(self.queue.cycle_reuse_kind(item) or _reuse_kind_for(item)),
+            work_url=self.queue.work_url(item),
+            work_class=band.work_class,
+            claimed=was_claimed,
+        )
+        slot.job = job
+        if job.future is not None:
+            job.peak_mb = reserve_mb
+            job.hold_single = hold_single
+            if reserve_mb is not None:
+                self.in_flight_mb += reserve_mb
+                self.in_flight_peak_mb = max(self.in_flight_peak_mb, self.in_flight_mb)
+            elif hold_single:
+                self.unmeasured_in_flight += 1
+            band.pending.append(job)
+
+    def _commit(self, cursor: int) -> int:
+        """Довести готовые строки **в порядке очереди**; вернуть новый курсор."""
+        while cursor < len(self.order):
+            slot = self.order[cursor]
+            if slot.closed:
+                # Строку забрал другой потребитель: работы нет, курсор идёт дальше.
+                cursor += 1
+                continue
+            job = slot.job
+            if job is None or not _row_ready(job):
+                break
+            if not job.settled:
+                self._settle(job)
+            cursor += 1
+        return cursor
+
+    def _settle(self, job: _RowJob) -> None:
+        """Довести одну строку: результат → запись → состояние строки очереди."""
+        job.settled = True
+        # Память возвращается **до** записи: задание уже завершилось (иначе доводка бы не
+        # дошла), и держать его пик в счётчике значило бы морить соседей на время нарезки
+        # и записи — работы, которая память воркера не занимает.
+        self._release(job)
+        band = self.bands[job.work_class]
+        settled, doc_id, error, dead_pool = _settle_row(
+            job,
+            scope=self.scope,
+            operations=self.operations,
+            product=self.product,
+            lease=self.lease,
+        )
+        self.done, self.failed, self.lost = _record_outcome(
+            self.queue,
+            settled,
+            doc_id,
+            error,
+            done=self.done,
+            failed=self.failed,
+            lost=self.lost,
+            worker=self.worker,
+        )
+        self._drop(band, job)
+        if dead_pool:
+            self._abort_band(band, error or "extraction pool terminated")
+
+    def _drop(self, band: _Band, job: _RowJob) -> None:
+        """Убрать задание из «в полёте» полосы (доводка идёт порядком старта внутри полосы)."""
+        if band.pending and band.pending[0] is job:
+            band.pending.popleft()
+            return
+        # Порядок внутри полосы — порядок её курсора, поэтому сюда попадать не должны;
+        # но потерять задание нельзя, иначе место в окне останется занятым навсегда.
+        band.pending = deque(item for item in band.pending if item is not job)
+
+    def _admit(
+        self, band: _Band, level: DocumentLevel, pdf_pipeline: PdfPipeline
+    ) -> tuple[bool, int | None, bool]:
+        """Допустить ли ещё одну единицу класса: ``(можно, резерв MB, «идёт один»)``.
+
+        **Почему учёт, а не потолок.** Окно класса (:func:`_row_window`) отвечает на вопрос
+        «сколько заданий класс вправе держать в полёте» и считается так, будто класс в
+        корпусе один. Пики же складываются: при бюджете 4500 MB ``model_free`` получает
+        12 × 317 = 3804 MB, а ``pdf_structured/layout_tables`` — 1 × 3679 MB, итого
+        **7483 MB** при доступных 4000 MB. Ни одно слагаемое здесь не выдумано: 317 и
+        3679 — измеренные пики (``docs/reports/measurements/2026-11-07-work-classes-peaks.md``,
+        ``2026-10-24-docling-peaks-real-corpus.md``), бюджет — ``MemAvailable −
+        PARENT_FLOOR_MB`` из ``run.yaml``/окружения. Поэтому ограничение — арифметика на
+        этих числах, а не «безопасный» лимит: **отказ** здесь означал бы, что стоимость не
+        измерена, а измерена она как раз и есть.
+
+        Правила, по убыванию силы:
+
+        1. бюджета нет (``ConsumerScope.mem_budget_mb is None``) — учёт невозможен, окна
+           классов работают как прежде, а факт публикуется токеном
+           :data:`~core.pipeline.resources.BUDGET_UNACCOUNTED`: «мы не считали» не имеет
+           права выглядеть как «всё поместилось»;
+        2. пик класса **не измерен** (``office``/``container``) — класс идёт один на узел:
+           подставить чужой пик значило бы выдать замер другого стека за свой (A3);
+        3. ``in_flight_mb + peak <= budget − PARENT_FLOOR_MB`` — можно;
+        4. иначе — **не стартуем**, даём шанс другой полосе; строка вернётся, когда сосед
+           освободит память (:meth:`_release`). Ничего не теряется: курсор полосы не
+           двигается, аренда не берётся;
+        5. исключение из (4): если **ничего** не в полёте, а единица не помещается и одна
+           (пик больше всего бюджета), старт разрешается. Иначе прогон встал бы намертво
+           на строке, которую preflight обязан был отвергнуть
+           (:func:`core.cli.wiring.preflight_extraction_budget`), — а «встать» хуже, чем
+           видимое превышение, названное в ``errors`` из :func:`_row_window`.
+
+        Класс с неизмеренным пиком (правило 2) не складывается с соседями ни в одну
+        сторону: пока он в полёте, не стартует никто, и наоборот — поэтому проверка
+        ``unmeasured_in_flight`` стоит и в правиле 3, а не только в правиле 2.
+
+        Резерв засчитывается не здесь, а в :meth:`_begin` **после** старта: строка может не
+        дойти до пула (inline, хит ``extract_cache``, исчерпанный пул), и авансовый резерв
+        утёк бы навсегда.
+        """
+        budget = self.scope.mem_budget_mb
+        if budget is None:
+            if self.budget_accounting is None:
+                self.budget_accounting = BUDGET_UNACCOUNTED
+            return True, None, False
+        self.budget_accounting = BUDGET_ACCOUNTED
+        peak, _reason = work_class_peak_mb(band.work_class, level, pdf_pipeline)
+        if peak is None:
+            if self.in_flight_mb == 0 and self.unmeasured_in_flight == 0:
+                return True, None, True
+            return False, None, False
+        room = int(budget) - PARENT_FLOOR_MB
+        if self.in_flight_mb + peak <= room and self.unmeasured_in_flight == 0:
+            return True, peak, False
+        if self.in_flight_mb == 0 and self.unmeasured_in_flight == 0:
+            return True, peak, False
+        return False, peak, False
+
+    def _release(self, job: _RowJob) -> None:
+        """Вернуть резерв строки в общий счётчик памяти — **ровно один раз**.
+
+        Идемпотентность держится на самом задании (``peak_mb``/``hold_single`` гасятся при
+        возврате), а не на дисциплине вызовов: путей закрытия строки три (успех, отказ
+        конверсии, остаток мёртвой полосы), и забытый возврат на любом из них превратил бы
+        бюджет в утекающий счётчик — прогон встал бы на середине, когда очередь ещё не
+        пуста, и выглядело бы это как зависание, а не как дефект учёта.
+        """
+        if job.peak_mb is not None:
+            self.in_flight_mb = max(0, self.in_flight_mb - job.peak_mb)
+            job.peak_mb = None
+        elif job.hold_single:
+            self.unmeasured_in_flight = max(0, self.unmeasured_in_flight - 1)
+            job.hold_single = False
+
+    def _abort_band(self, band: _Band, reason: str) -> None:
+        """Мёртвый пул **одной** полосы: её остаток — видимый отказ, остальные живут.
+
+        Отказ инструмента на этом прогоне — не «работа не начата»: строка, оставленная
+        ``pending``, не дала бы фазе объявить корпус собранным, и прогон остановился бы без
+        исхода по этим документам. Запись отказов обгоняет порядок очереди, и это безопасно:
+        ``finish_one`` при ``extract_error`` документа не пишет (только ``mark`` элемента
+        сеанса), поэтому состав и порядок корпуса не меняются.
+        """
+        pending = band.pending
+        band.pending = deque()
+        # Остаток полосы закрывается терминально — его резервы обязаны вернуться в общий
+        # счётчик, иначе бюджет «утечёт» и соседний класс встанет на середине прогона.
+        for job in pending:
+            self._release(job)
+        self.done, self.failed, self.lost = _abort_pending(
+            pending,
+            reason,
+            queue=self.queue,
+            scope=self.scope,
+            operations=self.operations,
+            product=self.product,
+            done=self.done,
+            failed=self.failed,
+            lost=self.lost,
+            worker=self.worker,
+        )
+
+    @staticmethod
+    def _in_flight(bands: list[_Band]) -> bool:
+        return any(job.future is not None for band in bands for job in band.pending)
+
+    def _await_ready(self, bands: list[_Band]) -> None:
+        """Ждать **первого** завершения по всем полосам, продлевая аренды между срезами.
+
+        ``wait(FIRST_COMPLETED)`` вместо ``result()`` одной строки: иначе полоса, чья голова
+        медленная, держала бы главный поток и готовая работа соседней полосы не забиралась
+        бы (ровно тот дефект, ради которого полосы и разделены). Срез не длиннее heartbeat:
+        молчание дольше порога аренды означало бы «потребитель мёртв» и повторную конвертацию
+        живого документа. Время ожидания идёт в ``extract_wait_s`` — это **ожидание**
+        главного потока, а не работа.
+        """
+        futures = [
+            job.future for band in bands for job in band.pending if job.future is not None
+        ]
+        real = [future for future in futures if isinstance(future, Future)]
+        started = time.perf_counter()
+        try:
+            if real:
+                wait(real, timeout=self._slice_s(bands), return_when=FIRST_COMPLETED)
+        finally:
+            self.scope.timings.extract_wait_s += time.perf_counter() - started
+        for band in bands:
+            for job in band.pending:
+                if job.claimed:
+                    self.lease.touch(job.item)
+
+    def _slice_s(self, bands: list[_Band]) -> float:
+        """Длина среза ожидания: не больше heartbeat и не больше ближайшего потолка."""
+        heartbeat = (
+            self.scope.heartbeat_s
+            if self.scope.heartbeat_s > 0
+            else self.scope.extract_timeout
+        )
+        now = time.perf_counter()
+        deadlines = [
+            job.deadline - now
+            for band in bands
+            for job in band.pending
+            if job.deadline is not None
+        ]
+        if not deadlines:
+            return heartbeat
+        return max(0.01, min(heartbeat, min(deadlines)))
+
+
+# --------------------------------------------------------------------------- #
 # Единственная точка входа потребителя
 # --------------------------------------------------------------------------- #
 
@@ -1854,10 +2515,18 @@ def consume(
     ``attempts += 1`` и видимой записью: «взял и умер» не теряет документ и не требует
     ручного вмешательства.
 
-    **Окно экстракции** резолвится по строке (:func:`_row_window`), а пул — фазовый по ключу
-    ``(уровень, механизм PDF, окно)``. Ожидание — FIFO: ``future.result`` вызывается в
-    порядке строк, поэтому порядок записи документов не зависит от того, какой воркер
-    ответил первым.
+    **Работа идёт полосами по классу** (:class:`_BandRun`): у каждого класса
+    (:class:`~core.domain.enums.WorkClass` — цена документа, а не методология) свой курсор,
+    своё окно (:func:`_row_window`) и свой пул — пул адресуется ключом ``(уровень, механизм
+    PDF, окно)``, поэтому разные окна уже дают разные пулы. Готовность заданий определяется
+    неблокирующе (``wait(FIRST_COMPLETED)`` по всем полосам сразу), поэтому HTML-страница не
+    ждёт PDF.
+
+    **Запись — порядком очереди, при любой ширине полос.** ``_content_digest`` партиции
+    склеивает ``chunk_ids``/``content_hash`` в порядке вставки, поэтому доводка идёт
+    глобальным курсором: полосы распараллеливают **извлечение**, а запись сериализуют
+    каноническим порядком. Состав корпуса (``doc_id``/``chunk_id``/``content_hash``) от
+    ширины не зависит — это пин, а не следствие.
     """
     reports: list[ConsumerReport] = []
     #: F6/§4.3: строки, по которым берётся объявленный предел бэклога (ось у них одна).
@@ -1886,13 +2555,17 @@ def consume(
             rows = list(queue.items(product_id))
         scope_items.extend(rows)
         docs_before = len(product.ingest.docs)
-        extractors: dict[tuple[DocumentLevel, PdfPipeline], ExtractorPort] = {}
-        #: Ожидающие доводки строки **этого** продукта в порядке постановки (FIFO).
-        pending: deque[_RowJob] = deque()
-        window_seen: int | None = None
-        dead_pool = False
         #: F6: аренда глазами этого прохода — продлевается между срезами ожидания.
         lease = _Lease(queue=queue, worker=worker)
+        run = _BandRun(
+            queue=queue,
+            scope=scope,
+            operations=operations,
+            product=product,
+            product_id=product_id,
+            worker=worker,
+            lease=lease,
+        )
         for item in rows:
             # Терминальное состояние строки — факт **прошлого** исполнения этой же
             # очереди (resume/``--reset`` того же ``run_id``), а не «уже сделано в этой
@@ -1909,116 +2582,11 @@ def consume(
                 # и resume обязан попробовать снова (09 §6.3).
                 already += 1
                 continue
-            # F6 (§4.2 п.4): claim — условный переход ``pending → claimed``. ``False``
-            # значит «строку уже взял/закрыл другой потребитель»: это **не** ошибка и не
-            # наша работа — идём дальше, документ не конвертируется дважды.
-            was_claimed = False
-            if item.state is ExtractQueueState.PENDING:
-                if not queue.claim(item, worker):
-                    lost += 1
-                    continue
-                claimed += 1
-                was_claimed = True
-            elif item.state is ExtractQueueState.CLAIMED:
-                if item.claimed_by != worker:
-                    # Чужая живая аренда: не трогаем. Если она просрочена, её вернёт
-                    # ``reclaim_stale`` следующего прохода — видимо, а не по-тихому.
-                    lost += 1
-                    continue
-            limits = scope.limits_for(item.url)
-            # Наблюдаемость расписания: ось объявлена, а окно — провенанс (не входит в
-            # ``CrawlLimits.as_dict()``), поэтому публикуется, а не входит в ``run_id``.
-            operations.note_scheduling(limits)
-            window = _row_window(limits, scope, f"{product_id}/{item.url}")
-            scope.timings.note_extract_window(window)
-            if window is not None and (window_seen is None or window > window_seen):
-                window_seen = window
-            level = _enum_or(DocumentLevel, item.level, DocumentLevel.FULL)
-            pdf_pipeline = _enum_or(
-                PdfPipeline, item.pdf_pipeline, PdfPipeline.STRUCTURED
-            )
-            extractor = _extractor_for(
-                scope, level, pdf_pipeline, cache=extractors
-            )
-            job = _start_row(
-                item,
-                scope=scope,
-                operations=operations,
-                product=product,
-                extractor=extractor,
-                window=window,
-                # Происхождение наблюдения — факт цикла от краула; строка даёт лишь
-                # запасное правило для остатка прошлого исполнения.
-                reuse_kind=(
-                    queue.cycle_reuse_kind(item) or _reuse_kind_for(item)
-                ),
-                work_url=queue.work_url(item),
-                claimed=was_claimed,
-            )
-            pending.append(job)
-            # Окно: не более ``W`` экстракций этого продукта «в полёте» (доводка FIFO).
-            while window is not None and len(pending) >= window:
-                settled, doc_id, error, dead_pool = _settle_row(
-                    pending.popleft(),
-                    scope=scope,
-                    operations=operations,
-                    product=product,
-                    lease=lease,
-                )
-                done, failed, lost = _record_outcome(
-                    queue,
-                    settled,
-                    doc_id,
-                    error,
-                    done=done,
-                    failed=failed,
-                    lost=lost,
-                    worker=worker,
-                )
-                if dead_pool:
-                    done, failed, lost = _abort_pending(
-                        pending,
-                        error or "extraction pool terminated",
-                        queue=queue,
-                        scope=scope,
-                        operations=operations,
-                        product=product,
-                        done=done,
-                        failed=failed,
-                        lost=lost,
-                        worker=worker,
-                    )
-        while pending:
-            settled, doc_id, error, dead_pool = _settle_row(
-                pending.popleft(),
-                scope=scope,
-                operations=operations,
-                product=product,
-                lease=lease,
-            )
-            done, failed, lost = _record_outcome(
-                queue,
-                settled,
-                doc_id,
-                error,
-                done=done,
-                failed=failed,
-                lost=lost,
-                worker=worker,
-            )
-            if dead_pool:
-                done, failed, lost = _abort_pending(
-                    pending,
-                    error or "extraction pool terminated",
-                    queue=queue,
-                    scope=scope,
-                    operations=operations,
-                    product=product,
-                    done=done,
-                    failed=failed,
-                    lost=lost,
-                    worker=worker,
-                )
+            run.add(item)
+        # Полосы по классу работы: HTML не ждёт PDF, у каждой своё окно и свой пул.
+        run.run()
+        done, failed, lost = run.done, run.failed, run.lost
+        claimed = run.claimed
         left = queue.pending(product_id)
         report = ConsumerReport(
             product_id=product_id,
@@ -2031,8 +2599,32 @@ def consume(
             heartbeats=lease.heartbeats,
             reclaim_records=list(stale),
             pending=left,
-            extract_window=window_seen,
+            # Поле совместимости: максимум по классам (прежний смысл «ширина, на которой
+            # шла работа»). Разбивка по классам — рядом и она же в провенансе.
+            extract_window=max(run.windows.values()) if run.windows else None,
+            extract_window_by_class=dict(run.windows),
+            # F0: учёт памяти «в полёте». Пик публикуется только когда учёт вёлся:
+            # ``0`` при необъявленном бюджете читалось бы как «ничего не занимали».
+            budget_accounting=run.budget_accounting,
+            in_flight_mb_peak=(
+                run.in_flight_peak_mb
+                if run.budget_accounting == BUDGET_ACCOUNTED
+                else None
+            ),
+            class_skipped_for_budget=dict(run.skipped_for_budget),
             docs=len(product.ingest.docs) - docs_before,
+        )
+        # Учёт агрегируется на счётчиках фазы сразу: пик — максимумом по продуктам,
+        # отложенные старты — суммой (оба факта относятся к бюджету **узла**).
+        note_budget_accounting(
+            scope.counters,
+            accounting=run.budget_accounting,
+            in_flight_mb_peak=(
+                run.in_flight_peak_mb
+                if run.budget_accounting == BUDGET_ACCOUNTED
+                else None
+            ),
+            skipped=run.skipped_for_budget,
         )
         if left:
             report.notes.append(
@@ -2139,6 +2731,10 @@ def _abort_pending(
     """
     while pending:
         job = pending.popleft()
+        # Строка закрыта здесь и навсегда: она остаётся в глобальном порядке доводки, и
+        # курсор дошёл бы до неё повторно (второй исход — двойной счёт и вторая запись).
+        job.settled = True
+        job.done = True
         doc_id = _finish_extracted(
             job,
             None,
@@ -2199,6 +2795,24 @@ def _merge_reports(reports: Sequence[ConsumerReport]) -> ConsumerReport:
             or report.extract_window > merged.extract_window
         ):
             merged.extract_window = report.extract_window
+        for work_class, window in report.extract_window_by_class.items():
+            merged.extract_window_by_class[work_class] = max(
+                merged.extract_window_by_class.get(work_class, 0), window
+            )
+        if report.in_flight_mb_peak is not None:
+            merged.in_flight_mb_peak = max(
+                merged.in_flight_mb_peak or 0, report.in_flight_mb_peak
+            )
+        for work_class, skipped in report.class_skipped_for_budget.items():
+            merged.class_skipped_for_budget[work_class] = (
+                merged.class_skipped_for_budget.get(work_class, 0) + skipped
+            )
+        if report.budget_accounting == BUDGET_UNACCOUNTED:
+            # Токен сильнее частичного учёта: продукт без бюджета не должен маскироваться
+            # соседом, у которого бюджет был.
+            merged.budget_accounting = BUDGET_UNACCOUNTED
+        elif report.budget_accounting is not None and merged.budget_accounting is None:
+            merged.budget_accounting = report.budget_accounting
         merged.notes.extend(report.notes)
     return merged
 

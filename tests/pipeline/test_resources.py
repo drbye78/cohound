@@ -600,6 +600,14 @@ def test_build_resources_block_without_observation_is_neutral() -> None:
         "phases": {},
         "scheduling": {
             "extract_workers": None,
+            # Полос нет (inline-путь): разбивка пуста, и это факт, а не ноль.
+            "extract_workers_by_class": {},
+            # Учёт памяти не вёлся (бюджета нет): пик ``None``, отложенных стартов нет,
+            # и это не «всё поместилось» — ``budget_accounting`` отсутствует по той же
+            # причине, по которой его не может быть у пустого наблюдения.
+            "in_flight_mb_peak": None,
+            "class_skipped_for_budget": {},
+            "budget_accounting": None,
             "extract_max_tasks_per_child": None,
             "source": "declared",
         },
@@ -619,6 +627,10 @@ def test_build_resources_block_keeps_observation_facts() -> None:
         documents=2,
         chunks=14,
         extract_workers=3,
+        extract_workers_by_class={"model_free": 3, "pdf_structured": 1},
+        in_flight_mb_peak=1234,
+        class_skipped_for_budget={"model_free": 7},
+        budget_accounting="accounted",
         extract_max_tasks_per_child=50,
         scheduling_source="derived",
         workers_peak_rss_mb=1234.44,
@@ -626,6 +638,13 @@ def test_build_resources_block_keeps_observation_facts() -> None:
     block = build_resources_block(observation=observation)
     assert block["scheduling"] == {
         "extract_workers": 3,
+        # Окно по классам — фактическая ширина полос: одно число больше не описывает
+        # расписание (HTML 317 MB против PDF 3679 MB).
+        "extract_workers_by_class": {"model_free": 3, "pdf_structured": 1},
+        # Учёт памяти «в полёте»: пик суммы и отложенные старты — факты бюджета узла.
+        "in_flight_mb_peak": 1234,
+        "class_skipped_for_budget": {"model_free": 7},
+        "budget_accounting": "accounted",
         "extract_max_tasks_per_child": 50,
         "source": "derived",
     }

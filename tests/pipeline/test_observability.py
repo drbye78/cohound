@@ -407,6 +407,10 @@ def test_write_run_metrics_carries_corpus_resources_observation(
         documents=2,
         chunks=7,
         extract_workers=2,
+        extract_workers_by_class={"model_free": 2, "pdf_structured": 1},
+        in_flight_mb_peak=951,
+        class_skipped_for_budget={"model_free": 3},
+        budget_accounting="accounted",
         extract_max_tasks_per_child=10,
         scheduling_source="derived",
         workers_peak_rss_mb=1953.4,
@@ -431,6 +435,12 @@ def test_write_run_metrics_carries_corpus_resources_observation(
     # Наблюдение фазы корпуса — как есть (расписание, чанки, пик воркера).
     assert resources["scheduling"] == {
         "extract_workers": 2,
+        # Разбивка по классам работы доезжает до метрики: ширина полос — факт прогона.
+        "extract_workers_by_class": {"model_free": 2, "pdf_structured": 1},
+        # Учёт памяти «в полёте» доезжает до метрики: пик суммы и отложенные старты.
+        "in_flight_mb_peak": 951,
+        "class_skipped_for_budget": {"model_free": 3},
+        "budget_accounting": "accounted",
         "extract_max_tasks_per_child": 10,
         "source": "derived",
     }
@@ -465,6 +475,10 @@ def test_write_run_metrics_resources_neutral_without_observation(
     assert resources["workers_peak_rss_mb"] is None
     assert resources["scheduling"] == {
         "extract_workers": None,
+        "extract_workers_by_class": {},
+        "in_flight_mb_peak": None,
+        "class_skipped_for_budget": {},
+        "budget_accounting": None,
         "extract_max_tasks_per_child": None,
         "source": "declared",
     }

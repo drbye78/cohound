@@ -41,8 +41,9 @@ try:  # pragma: no cover - на Windows модуля нет; обещание «
 except ImportError:  # pragma: no cover
     _resource = None
 
-from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline, WorkClass
 from core.util.document_formats import (
+    OFFICE_SUFFIXES,
     document_suffix,
     is_epub,
     textual_family,
@@ -51,6 +52,8 @@ from core.util.gpu import cuda_available as _cuda_available
 from core.util.gpu import cuda_total_vram_mb as _cuda_total_vram_mb
 
 __all__ = [
+    "BUDGET_ACCOUNTED",
+    "BUDGET_UNACCOUNTED",
     "DOCLING_PEAK_MB",
     "DOCLING_VRAM_PEAK_MB",
     "FAMILY_EPUB",
@@ -61,12 +64,14 @@ __all__ = [
     "FAMILY_TEXT",
     "MEM_BUDGET_ENV",
     "MEM_RESERVE_MB",
+    "MODEL_FREE_PEAK_MB",
     "PARENT_FLOOR_MB",
     "PDFIUM_TEXT_PEAK_MB",
     "VRAM_RESERVE_MB",
     "MemoryBudgetError",
     "ResourcesObservation",
     "build_resources_block",
+    "class_window_plan",
     "cpu_parallelism_cap",
     "cuda_available",
     "cuda_total_vram_mb",
@@ -80,6 +85,8 @@ __all__ = [
     "resolve_mem_budget_mb",
     "summarize_chunks_per_doc",
     "vram_peak_mb",
+    "work_class_peak_mb",
+    "workers_for_class",
     "workers_from_budget",
 ]
 
@@ -171,6 +178,27 @@ VRAM_RESERVE_MB = 512
 #: стоит максимум наблюдённого.
 PDFIUM_TEXT_PEAK_MB = 134
 
+#: Пик RSS класса ``model_free`` (html/text/markdown/epub) на **один** документ, MB —
+#: замер **07.11.2026**, а не доля от чужого стека.
+#:
+#: Источник: 32 реальные HTML-страницы ретенции стенда (``corpus_raw``, 2 189 страниц
+#: популяции, 5 хостов), выборка — 30 случайных (seed 20261107) + самая большая по байтам
+#: (55.9 МБ, 53.3 MiB) + самая большая по извлечённому тексту (653 764 символа). Один
+#: документ — один процесс, пик — ``resource.getrusage(RUSAGE_SELF).ru_maxrss``; экстрактор —
+#: композит воркер-процесса (:func:`core.cli.wiring.build_worker_extractor`, т.е. ровно то,
+#: что строит ``initializer`` пула), потому что бюджет делится на пик **процесса**, а не на
+#: пик одного читателя. Скрипт — ``/tmp/opencode/f0-work-class/measure.py``, отчёт —
+#: ``docs/reports/measurements/2026-11-07-work-class-peaks.md``.
+#:
+#: Числа двух популяций, а не одно «среднее»: композит на 6 страницах — медиана 123.4 MB,
+#: максимум **317.1 MB**; тот же замер только HTML-читателем на 32 страницах — медиана
+#: 89.5 MB. Разница ≈34 MB — постоянная цена композита (docling-импорты), а не свойство
+#: страницы, поэтому в окно идёт композит. В таблице стоит максимум: занижение пика даёт
+#: лишнего воркера и OOM-kill, завышение — на одного воркера меньше. Пик коррелирует с
+#: размером страницы (53.3 MiB → 317 MB, 99 KB → 60 MB), поэтому окно, посчитанное по
+#: медиане, было бы верным для типичной страницы и ложным для хвоста.
+MODEL_FREE_PEAK_MB = 317
+
 #: Базовый RSS родителя (ядро + импорты + краул), MB — «пол», который занимает процесс
 #: **до** воркеров экстракции. Источник: замер того же дерева (``05-dependency-stack.md``,
 #: ``2026-10-23-docling-level-peaks.md``: «родительский процесс без docling — ~500 MB»;
@@ -210,11 +238,6 @@ _FAMILY_ORDER: tuple[str, ...] = (
     FAMILY_OFFICE,
     FAMILY_OTHER,
 )
-
-#: Суффиксы Office Open XML, которые извлекает docling (зеркало
-#: :data:`core.util.document_formats.DOCUMENT_SUFFIXES` без PDF).
-_OFFICE_SUFFIXES: tuple[str, ...] = (".docx", ".pptx", ".xlsx")
-
 
 class MemoryBudgetError(RuntimeError):
     """Конфигурация экстракции не помещается в бюджет памяти.
@@ -598,9 +621,174 @@ def workers_from_budget(
 
 
 # --------------------------------------------------------------------------- #
-# Наблюдённые факты фазы корпуса
+# Окно полосы: класс работы → сколько заданий помещается
 # --------------------------------------------------------------------------- #
 
+#: Классы, чья экстракция грузит модели docling (VRAM-слагаемое применимо).
+_DOCLING_CLASSES: frozenset[WorkClass] = frozenset(
+    {WorkClass.PDF_STRUCTURED, WorkClass.OFFICE}
+)
+
+
+def work_class_peak_mb(
+    work_class: WorkClass,
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline = PdfPipeline.STRUCTURED,
+) -> tuple[int | None, str | None]:
+    """Пик RSS **класса работы** на один документ, MB, и причина, если он не измерен.
+
+    :returns: ``(peak, reason)``. ``reason is None`` — пик измерен; иначе машинный токен
+        ``work_class_peak_unmeasured`` и ``peak is None``: число не выдумывается (A3), а
+        вызывающий ставит окно 1 и **публикует** причину.
+
+    Что уже измерено (числа — из :data:`DOCLING_PEAK_MB`, :data:`PDFIUM_TEXT_PEAK_MB`,
+    :data:`MODEL_FREE_PEAK_MB`, не дублируются здесь):
+
+    * ``pdf_structured`` — ``DOCLING_PEAK_MB[level]`` (документ корпуса, 2763 стр. → 3679 MB);
+    * ``pdf_text_layer`` — ``PDFIUM_TEXT_PEAK_MB`` (240 документов / 15 929 страниц одним
+      процессом, пик 134 MB);
+    * ``model_free`` — ``MODEL_FREE_PEAK_MB`` (32 страницы ретенции, максимум 317 MB).
+
+    Чего **нет**: ``office`` и ``container``. Office идёт через docling, но уровень у него
+    свой (``docling-office-1``, без level/device), поэтому подставлять пик PDF-уровня
+    значило бы выдать чужой замер за свой — ровно тот дефект, ради которого F0 заведён.
+    Спуск в контейнер потоковый (член стримится в один временный файл), его пик не измерен
+    и для окна не нужен: полоса контейнера доводится по одной строке в порядке очереди.
+    """
+    if work_class is WorkClass.PDF_STRUCTURED:
+        return DOCLING_PEAK_MB.get(level), None
+    if work_class is WorkClass.PDF_TEXT_LAYER:
+        return PDFIUM_TEXT_PEAK_MB, None
+    if work_class is WorkClass.MODEL_FREE:
+        return MODEL_FREE_PEAK_MB, None
+    return None, "work_class_peak_unmeasured"
+
+
+def workers_for_class(
+    work_class: WorkClass,
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline,
+    budget_mb: int | None,
+    *,
+    usable_vram_mb: int | None = None,
+    pdf_device: PdfDevice = PdfDevice.CPU,
+    cpu_cap: int | None = None,
+) -> tuple[int, str | None]:
+    """Сколько заданий класса имеет смысл держать в полёте: ``(окно, причина)``.
+
+    Формула — та же, что у :func:`workers_from_budget`:
+    ``floor((budget − PARENT_FLOOR_MB) / peak(класс))``, сверху ``cpu_cap``. Для
+    ``pdf_structured`` она **делегируется** :func:`workers_from_budget` целиком, а не
+    переписывается: две копии одной арифметики разошлись бы молча, а пин
+    (``tests/pipeline/test_work_class.py``) требует, чтобы окно PDF-класса совпадало с
+    прежним числом до последней единицы.
+
+    :returns: ``(workers, reason)``. ``reason is None`` — окно посчитано по замеру.
+        ``reason = "work_class_peak_unmeasured"`` — пик класса не измерен: ``workers = 1``,
+        и вызывающий обязан опубликовать причину (окно 1 с видимой записью, а не
+        выдуманное число). ``reason = "work_class_budget_unknown"`` — бюджета нет
+        (``workers = 0``). ``reason = "work_class_budget_exhausted"`` — бюджет меньше пола
+        родителя (``workers = 0``: конфигурация не помещается).
+
+    ``0`` остаётся валидным ответом «не помещается» и здесь: превращать его в 1 значило бы
+    вернуть предвидение вместо замера. Вызывающий (потребитель) отличает 0 от 1 сам.
+
+    VRAM-слагаемое применяется только к docling-классам (``pdf_structured`` — внутри
+    делегирования; ``office`` — когда его пик хоста появится, вместе с ним). ``model_free``
+    и ``pdf_text_layer`` моделей не грузят вовсе, поэтому их VRAM-пик — измеренный 0, а не
+    «неизвестно»: нативный парсер не ходит на карту.
+    """
+    if work_class is WorkClass.PDF_STRUCTURED:
+        return (
+            workers_from_budget(
+                level,
+                budget_mb,
+                cpu_cap=cpu_cap,
+                pdf_pipeline=PdfPipeline.STRUCTURED,
+                pdf_device=pdf_device,
+                usable_vram_mb=usable_vram_mb,
+            ),
+            None,
+        )
+    peak, reason = work_class_peak_mb(work_class, level, pdf_pipeline)
+    if peak is None:
+        # Пик не измерен: окно 1 и названная причина. Меньше единицы окно не бывает —
+        # это было бы «класс не обслуживается вовсе», то есть тихая потеря документов.
+        return 1, reason
+    if budget_mb is None:
+        return 0, "work_class_budget_unknown"
+    room = int(budget_mb) - PARENT_FLOOR_MB
+    if room <= 0:
+        return 0, "work_class_budget_exhausted"
+    cap = cpu_parallelism_cap() if cpu_cap is None else max(1, int(cpu_cap))
+    workers = min(room // peak, cap)
+    if work_class in _DOCLING_CLASSES and PdfDevice(pdf_device) is PdfDevice.CUDA:
+        vram_peak = vram_peak_mb(level, pdf_pipeline)
+        if vram_peak and vram_peak > 0:
+            vram = usable_vram_mb if usable_vram_mb is not None else read_usable_vram_mb()
+            if vram is not None:
+                workers = min(workers, max(0, int(vram) // vram_peak))
+    return max(0, workers), None
+
+
+def class_window_plan(
+    budget_mb: int | None,
+    level: DocumentLevel,
+    pdf_pipeline: PdfPipeline,
+    *,
+    pdf_device: PdfDevice = PdfDevice.CPU,
+    usable_vram_mb: int | None = None,
+) -> dict[WorkClass, tuple[int, int | None]]:
+    """План окон по классам работы для **одного** корня: ``{класс: (окно, пик)}``.
+
+    Зачем это здесь, а не в preflight. Сумма окон — арифметика на измеренных пиках
+    (:func:`work_class_peak_mb`) и объявленном бюджете, то есть ровно то, что требует A3.
+    Считать её в preflight'е второй формулой значило бы завести копию, которая разойдётся
+    с потребителем молча; здесь она строится **теми же** :func:`workers_for_class`.
+
+    Набор классов — те, что могут встретиться в корпусе корня без объявления состава:
+    ``model_free`` (HTML — дефолтный путь корпуса), PDF по **объявленному** механизму
+    (``structured`` ‖ ``text_layer``) и ``office``. ``container`` не входит: спуск в архив
+    потоковый (член стримится в один временный файл), слота пула он не занимает.
+
+    :returns: окно (сколько заданий класс держит в полёте) и пик на задание, MB
+        (``None`` — пик класса не измерен; тогда окно 1 и учёт пускает его только одного).
+        Окно ``0`` — класс не помещается в бюджет вовсе.
+    """
+    pdf_class = (
+        WorkClass.PDF_TEXT_LAYER
+        if PdfPipeline(pdf_pipeline) is PdfPipeline.TEXT_LAYER
+        else WorkClass.PDF_STRUCTURED
+    )
+    plan: dict[WorkClass, tuple[int, int | None]] = {}
+    for work_class in (WorkClass.MODEL_FREE, pdf_class, WorkClass.OFFICE):
+        workers, _reason = workers_for_class(
+            work_class,
+            level,
+            pdf_pipeline,
+            budget_mb,
+            pdf_device=pdf_device,
+            usable_vram_mb=usable_vram_mb,
+        )
+        peak, _peak_reason = work_class_peak_mb(work_class, level, pdf_pipeline)
+        plan[work_class] = (workers, peak)
+    return plan
+
+
+#: Учёт памяти «в полёте» включён: бюджет объявлен, сумма пиков удерживается в потребителе
+#: (:class:`core.pipeline.extract_consume._BandRun`). Значение — машинный токен метрики
+#: ``resources.scheduling.budget_accounting``.
+BUDGET_ACCOUNTED = "accounted"
+
+#: Учёт **невозможен**: бюджет памяти не объявлен, окна классов работают как прежде, и
+#: сумма пиков не удерживается. Токен публикуется намеренно: отсутствие учёта — факт
+#: входа прогона, и он не имеет права выглядеть как «всё поместилось».
+BUDGET_UNACCOUNTED = "class_budget_unaccounted"
+
+
+# --------------------------------------------------------------------------- #
+# Наблюдённые факты фазы корпуса
+# --------------------------------------------------------------------------- #
 
 @dataclass(frozen=True)
 class ResourcesObservation:
@@ -614,7 +802,23 @@ class ResourcesObservation:
         (``{family: {count, p50, p90, max}}``).
     :param documents: документов, попавших в сборку (знаменатель распределения).
     :param chunks: чанков, попавших в сборку (числитель).
-    :param extract_workers: разрешённое окно экстракции (``None`` — экстракция inline).
+    :param extract_workers: разрешённое окно экстракции — **максимум по классам**
+        (``None`` — экстракция inline).
+    :param extract_workers_by_class: окно по классам работы (``{work_class: window}``).
+        Полосы потребителя имеют разные окна по построению (HTML 317 MB, PDF 3679 MB),
+        поэтому одно число перестало описывать расписание; максимум оставлен ради
+        совместимости отчёта. Класс, которого нет в словаре, либо не встречался, либо шёл
+        inline.
+    :param in_flight_mb_peak: наблюдённый максимум суммы пиков заданий «в полёте», MB
+        (``None`` — учёт не вёлся: бюджет не объявлен). Это ответ на вопрос «загружен ли
+        узел»: сумма ограничена бюджетом **по построению**, поэтому пик упирается в него,
+        когда очередь не пуста.
+    :param class_skipped_for_budget: сколько **стартов** отложено из-за бюджета, по классам
+        (события, не строки: одна строка может быть отложена несколько раз). Растущий
+        счётчик при непустой очереди означает «бюджет узла исчерпан», а не «полоса узкая».
+    :param budget_accounting: ``accounted`` — сумма пиков удерживалась;
+        ``class_budget_unaccounted`` — бюджета нет, учёт невозможен (видимый факт, а не
+        «всё поместилось»); ``None`` — потребитель не звал учёт (полос не было).
     :param extract_max_tasks_per_child: разрешённый рециклинг воркеров (``None`` — не задан).
     :param scheduling_source: ``"derived"`` — окно выведено из бюджета памяти;
         ``"declared"`` — взято из объявленной оси (или окна нет вовсе).
@@ -630,6 +834,10 @@ class ResourcesObservation:
     documents: int = 0
     chunks: int = 0
     extract_workers: int | None = None
+    extract_workers_by_class: dict[str, int] = field(default_factory=dict)
+    in_flight_mb_peak: int | None = None
+    class_skipped_for_budget: dict[str, int] = field(default_factory=dict)
+    budget_accounting: str | None = None
     extract_max_tasks_per_child: int | None = None
     scheduling_source: str = "declared"
     workers_peak_rss_mb: float | None = None
@@ -654,7 +862,7 @@ def document_family(url: str) -> str:
     suffix = document_suffix(url)
     if suffix == ".pdf":
         return FAMILY_PDF
-    if suffix in _OFFICE_SUFFIXES:
+    if suffix in OFFICE_SUFFIXES:
         return FAMILY_OFFICE
     if is_epub(url):
         return FAMILY_EPUB
@@ -762,6 +970,27 @@ def build_resources_block(
     scheduling: dict[str, Any] = {
         "extract_workers": (
             observation.extract_workers if observation is not None else None
+        ),
+        # Окно по классам работы (F0, полосы потребителя): фактическая ширина каждой
+        # полосы. Одно число рядом — максимум, для совместимости отчёта.
+        "extract_workers_by_class": (
+            dict(observation.extract_workers_by_class)
+            if observation is not None
+            else {}
+        ),
+        # Учёт памяти «в полёте» (F0): сумма пиков ограничена бюджетом по построению, а
+        # отложенные старты показывают, упирается ли флот в бюджет узла. ``None`` в пике —
+        # «не считали» (бюджета нет), а не «ноль мегабайт».
+        "in_flight_mb_peak": (
+            observation.in_flight_mb_peak if observation is not None else None
+        ),
+        "class_skipped_for_budget": (
+            dict(observation.class_skipped_for_budget)
+            if observation is not None
+            else {}
+        ),
+        "budget_accounting": (
+            observation.budget_accounting if observation is not None else None
         ),
         "extract_max_tasks_per_child": (
             observation.extract_max_tasks_per_child if observation is not None else None

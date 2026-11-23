@@ -93,6 +93,7 @@ from core.domain.enums import (
     UncertaintyProvenance,
     UnknownCause,
     UnknownPolicy,
+    WorkClass,
 )
 from core.domain.invariants import (
     ABSENCE_UNDATED_REASON,
@@ -278,6 +279,7 @@ __all__ = [  # noqa: RUF022
     "UnknownCause",
     "UncertaintyProvenance",
     "UnknownPolicy",
+    "WorkClass",
     # models
     "BaselineRow",
     "CatalogRow",

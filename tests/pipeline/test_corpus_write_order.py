@@ -184,7 +184,19 @@ _PACING_RATE = re.compile(
 #: прогон): ни один оператор не переставлен и не добавлен — 208 операторов / 170 записей,
 #: читаемый пин :data:`EXPECTED_SEQUENCE` не менялся. ``retries`` — детерминированный факт
 #: харнесса (0 повторов), поэтому он остаётся в пине, а не нормируется как часы.
-EXPECTED_WRITE_DIGEST = "d7f4f4b6819efc6d74cd8f83efc0a19a198fc9c4bc5eca4a51dd55ff3ded41a1"
+#:
+#: **Пересобран 2026-11-07 осознанно** (F0: полосы потребителя по классу работы,
+#: ``core/pipeline/extract_consume.py``), по одной причине: строка очереди закрывается
+#: ``state='done'`` **сразу за своей конверсией**, а не пачкой в конце продукта. Прежний
+#: FIFO доводил inline-строки одним дренажным циклом после старта всех строк, поэтому
+#: ``UPDATE extract_queue SET state='done'`` шли блоком; полосы доводят строку, как только
+#: она готова (``_BandRun._commit`` — глобальным порядком очереди), и при окне 1, и при
+#: окне N одинаково. Это не перестановка «двух писателей»: мультимножество операторов
+#: совпадает с прежним эталоном (209/170), сдвинулись только позиции четырёх ``done``-
+#: ``UPDATE`` — каждая встала сразу после ``crawl_session_items`` своей строки. Побочный
+#: эффект — расписание больше не влияет на durable-след: раньше inline закрывал строки
+#: пачкой, а пул — по мере дренажа окна, то есть порядок записи зависел от ширины окна.
+EXPECTED_WRITE_DIGEST = "03404b47236213a1e9cd2cf9bbd432e396f9ec555b9f3ab4d5111d082db6f983"
 
 #: Дайджест **полного** трассированного следа, включая ``SELECT``. Второй пин, а не первый:
 #: он видит то, чего пин записей не видит по построению, — появление нового чтения (N+1) и
@@ -229,7 +241,11 @@ EXPECTED_WRITE_DIGEST = "d7f4f4b6819efc6d74cd8f83efc0a19a198fc9c4bc5eca4a51dd55f
 #: :data:`EXPECTED_WRITE_DIGEST` не менялся (170 записей, тот же дайджест), а в читаемой
 #: последовательности выросло только число ``SELECT *`` — два прежних чтения корпуса плюс
 #: чтение членов.
-EXPECTED_TRACE_DIGEST = "8e49d83208ad5dd7993fb009d083a50106897ff9e6aa44d99574d54e39af2295"
+#:
+#: **Пересобран 2026-11-07** вместе с писательским пином и по той же причине (F0: полосы
+#: потребителя): ``done``-``UPDATE`` встал сразу за конверсией своей строки. Новых чтений
+#: нет, состав операторов прежний (209/170) — сдвинулся порядок записей, а не проекция.
+EXPECTED_TRACE_DIGEST = "d6061d590c6d2399fc07b2009918f993a04a33e7c6916f625aac8b4bdb87d3bc"
 
 #: Глаголы, меняющие данные или схему. Транзакционные границы входят в пин записей: без них
 #: «две записи в одной транзакции» и «две записи в разных» дали бы один дайджест.
@@ -330,15 +346,6 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
-    (1, 'INSERT corpus_docs'),
-    (1, 'INSERT corpus_doc_version'),
-    (1, 'COMMIT'),
-    (1, 'BEGIN'),
-    (1, 'INSERT crawl_session_items'),
-    (1, 'SELECT status,'),
-    (1, 'UPDATE crawl_sessions'),
-    (1, 'COMMIT'),
-    (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
@@ -352,15 +359,6 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),
-    (1, 'COMMIT'),
-    (1, 'BEGIN'),
-    (1, 'INSERT corpus_docs'),
-    (1, 'INSERT corpus_doc_version'),
-    (1, 'COMMIT'),
-    (1, 'BEGIN'),
-    (1, 'INSERT crawl_session_items'),
-    (1, 'SELECT status,'),
-    (1, 'UPDATE crawl_sessions'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),
@@ -381,10 +379,28 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
+    (1, 'INSERT corpus_docs'),
+    (1, 'INSERT corpus_doc_version'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT crawl_session_items'),
+    (1, 'SELECT status,'),
+    (1, 'UPDATE crawl_sessions'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT corpus_docs'),
+    (1, 'INSERT corpus_doc_version'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (1, 'INSERT crawl_session_items'),
+    (1, 'SELECT status,'),
+    (1, 'UPDATE crawl_sessions'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'UPDATE extract_queue'),

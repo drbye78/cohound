@@ -190,7 +190,7 @@ retained-байтов).
 `CorpusDoc(...)` собирается в `core/pipeline/corpus_ingest.py:1693`, рядом живут `reuse`
 (`:5197` `reused = active_reuse is not None`) и `page.status_code` (он же уже уходит в
 `url_state` как `last_http_status`, `:5217`; второй путь — `:5053`). Точка записи одна — `persist_docs`
-(`core/pipeline/corpus_ingest.py:1346`, докстринг сам это фиксирует).
+(`core/pipeline/corpus_ingest.py:1348`, докстринг сам это фиксирует).
 
 **Что спецификация обязана решить, а не оставить на ходу:** поле `CorpusDoc` или kwarg
 `upsert_corpus_doc`. Прецедент в коде — `origin` (`core/pipeline/corpus_index.py:139-141`): это kwarg, а не
@@ -557,7 +557,7 @@ per-site (`core/pipeline/crawl_frontier.py:636-641`) — два уровня о�
 - `docs/status-dictionary.yaml` — **✅ синхронизировано:** `pdf_device` (`:439`),
   `embed_device` (`:456`), `embed_precision` (`:472`), `reuse_kind` (`:761`), `run_scope`
   (`:790`), перечень статусов продукта прогона `run_product_status` (`:804`). Проверка —
-  `core/domain/dictionary.py:80` `assert_dictionary_integrity`, `required`-список
+  `core/domain/dictionary.py:81` `assert_dictionary_integrity`, `required`-список
   (`:121` `embed_device`, `:127` `run_product_status`), `checks`-таблица (`:202`, `:216`);
   словарь грузится selfcheck'ом.
 

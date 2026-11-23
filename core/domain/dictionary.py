@@ -65,6 +65,7 @@ from core.domain.enums import (
     UncertaintyProvenance,
     UnknownCause,
     UnknownPolicy,
+    WorkClass,
 )
 
 
@@ -117,6 +118,8 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "pdf_pipeline",
         # P9: устройство моделей извлечения PDF (crawl.pdf_device).
         "pdf_device",
+        # F0: класс работы конверсии (цена документа, расписание полос потребителя).
+        "work_class",
         # 16 §4.1: устройство эмбеддера (embed.device) — объявленная ось прогона.
         "embed_device",
         # 16 §4.1 (решение 06.11.2026): точность счёта вектора (embed.precision).
@@ -197,6 +200,10 @@ def assert_dictionary_integrity(path: str | Path) -> None:
         "document_level": {v.value for v in DocumentLevel},
         "pdf_pipeline": {v.value for v in PdfPipeline},
         "pdf_device": {v.value for v in PdfDevice},
+        # F0/расписание: класс работы конверсии. Сверка нужна потому, что значение
+        # публикуется в провенансе расписания и по нему выбирается окно полосы:
+        # расхождение словаря и enum'а молча меняло бы цену класса.
+        "work_class": {v.value for v in WorkClass},
         # 16 §4.1: ось устройства эмбеддера — сверяется с enum'ом, потому что производитель
         # у неё есть (резолвер ``resolve_embed_device`` + контракт ``embed_device``).
         "embed_device": {v.value for v in EmbedDevice},

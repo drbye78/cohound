@@ -654,7 +654,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     URL (`url_state` + `document_version` + chunk-set) переиспользуется: `reuse_kind=reused`,
     `http_status IS NULL`, `fetched_at IS NULL`, экстрактор и чанкер **не вызываются**.
     Исполнение — отдельный проход `offline_reuse_product`
-    (`core/pipeline/corpus_ingest.py:3347`), вызываемый **до** дренажа и вместо него
+    (`core/pipeline/corpus_ingest.py:3349`), вызываемый **до** дренажа и вместо него
     (`core/pipeline/corpus.py:2224`): в код, единственное назначение которого сеть, политика
     не заходит вовсе. Поэтому группировка ревалидации и дренаж корней под `offline` не
     исполняются, а SERP-контур не запускается (`rounds.not_executed_reason =
@@ -828,7 +828,7 @@ dataclass'ы порта, а не Pydantic-модели. Соответствие
 | **O1** | Каждый продукт когорты имеет ≥ 1 `enabled` seed **или** `onboarding_state=pending_seeds`; `run` с `pending_seeds` блокируется | onboarding-префлайт (`preflight`) + `lint` | as-built |
 | **O2** | Продукт с `mode in (new, full)` не может завершить corpus с `expected_sources = 0`; это `failed`, не пустой `ok`. Сильнее: `complete` требует `observed_sources > 0` — корпус без единого наблюдения не доказывает отсутствия (2.3.0) | `build_corpus` (`derive_corpus_coverage`) | as-built |
 | **O3** | Для каждого продукта плана в прогоне существует строка `corpus_coverage`; отсутствие — аномалия, не «неизвестно» | `corpus` (`_persist_corpus_coverage`) + `evaluate` (`_coverage_for`) | as-built |
-| **O4** | `doc_version_id` детерминирован от `(product_id, content_hash, extractor_version, level)`; durable `chunk_id` — от `(doc_version_id, chunker_version, chunk_no)`; run-level `chunk_id` — от `(product_id, doc_version_id, chunk_no)` | `corpus` | **as-built**: `doc_version_id` — да (`incremental.doc_version_id:271`); durable-строка чанка — да (`chunk_row_id:285`); run-level `chunk_id` — да, `f"{product_id}:{doc_version_id}:{chunk_no}"` (`corpus_index._chunk_id:181`, вызовы — `corpus_ingest.py:1437`, `extract_consume.py:433`). Пространств идентификаторов **три**, и run-level намеренно не несёт `chunker_version`: грамматика `source_id` отдаёт 4-й сегмент под `build_id` (`ids.py:57`), а в одной прогонной БД `chunker_version` — константа контракта (§14.6 п. 11) |
+| **O4** | `doc_version_id` детерминирован от `(product_id, content_hash, extractor_version, level)`; durable `chunk_id` — от `(doc_version_id, chunker_version, chunk_no)`; run-level `chunk_id` — от `(product_id, doc_version_id, chunk_no)` | `corpus` | **as-built**: `doc_version_id` — да (`incremental.doc_version_id:271`); durable-строка чанка — да (`chunk_row_id:285`); run-level `chunk_id` — да, `f"{product_id}:{doc_version_id}:{chunk_no}"` (`corpus_index._chunk_id:181`, вызовы — `corpus_ingest.py:1439`, `extract_consume.py:433`). Пространств идентификаторов **три**, и run-level намеренно не несёт `chunker_version`: грамматика `source_id` отдаёт 4-й сегмент под `build_id` (`ids.py:57`), а в одной прогонной БД `chunker_version` — константа контракта (§14.6 п. 11) |
 | **O5** | Любая evidence-строка несёт `doc_version_id`, и этот документ входит в doc-set продукта текущего прогона (I19/I17) | `evaluate` (`_with_doc_versions`) / `carry_forward` | **as-built**: колонка `cell_evidence.doc_version_id` есть (аддитивно, `_ensure_columns`), адрес выводится из `chunk_id` ретривнутого чанка (`evaluate._with_doc_versions:2384`, вызов — `:2620`, единый эшелон для живого ответа и хита `eval_cache`; разбор — `core/util/ids.py:98`), перенос проверяет адрес **дополнительно** к `content_hash` (`_evidence_chain_valid`, `carry_forward.py:370`). Остаток назван точно: `registry`- и `inheritance`-evidence идут с `doc_version_id = NULL` (у них нет чанка-версии — `core/pipeline/registry.py:123`, `core/pipeline/inheritance.py:170`), и `NULL` = «не записано», а не «любая версия» |
 | **O6** | `carried`-ячейка допустима только при совпадении `cell_reuse_key`, полном покрытии и неизменном **retrieved-наборе этой ячейки** (per-cell, 29.10.2026; не doc-set продукта) | `carry_forward_cell` (§10.2) | **as-built** (`core/pipeline/carry_forward.py`) |
 | **O7** | `❌` публикуется только при `coverage.complete` (или человеческой аттестации); `freshness != stale` — ➖ снято решением (поля нет) | `evaluate` (`_enforce_absence_coverage` → `check_absence_coverage`); класс отрицания решает, а не одна полнота (§11.2) | частично: `coverage.complete` + классы — as-built; `freshness` **не существует** (§11.1) |
@@ -2835,7 +2835,7 @@ class CompositionView:
 
 - записи идут **генератором** из `store.iter_chunks(partition_build_id, product_id=…)`
   прямо в `index.index(records, …)` — ни список записей, ни их текст не живут в памяти
-  (`core/cli/wiring.py:430-500`, докстринг `seed_lexical_index`);
+  (`core/cli/wiring.py:431-501`, докстринг `seed_lexical_index`);
 - при поиске текст догружается **из store пачкой** — `StorePort.get_chunks(chunk_ids)`
   (`core/store/sqlite_store.py`, `SqliteStore.get_chunks`, шаг `_CHUNK_ID_BATCH = 500`),
   передаётся адаптеру как провайдер гидртации, поэтому адаптер не знает ни SQL, ни
@@ -3392,7 +3392,7 @@ CREATE TABLE corpus_coverage (
 > (при 304 — `revalidated`/`304`, `last_changed_at=NULL`). Условный GET реально уходит:
 > `_validators` (`core/pipeline/corpus.py`, `partial` над планировщиком) отдаёт `If-None-Match`/`If-Modified-Since` из `url_state`,
 > 304 переиспользует версию документа **до** экстракции (`reuse_not_modified`,
-> `core/pipeline/corpus_ingest.py:727`), и в `state.db` живого прогона на снимке 29.10 09:20 таких
+> `core/pipeline/corpus_ingest.py:729`), и в `state.db` живого прогона на снимке 29.10 09:20 таких
 > строк **467** из 5979.
 >
 > В **прогонную** БД это не доезжало (дефект, который и закрыла граница A): у `corpus_docs`
@@ -4112,7 +4112,7 @@ class ProductStatePort(Protocol):
 | `iter_chunks` | `iter_doc_chunks` | `iter_chunks` в коде занято run-DB-методом (чанки сборки); durable-чанки версии — это `iter_doc_chunks` |
 | `set_onboarding_state`, `set_last_corpus_run_id`, `set_last_evaluated`, `set_last_completed` | нет сеттеров вовсе | Рубежи двигает **один** владелец — `state_sync.record_run_outcome` (O10), и он пишет их вместе со снимком в одной транзакции. Отдельные сеттеры позволили бы сдвинуть рубеж без снимка — то есть объявить baseline, которого не было |
 | `get_attestation` | нет | Таблица `attestation` без писателя по решению (§4.2): действующая аттестация охвата живёт в `packages/{case}/scope_attestation.yaml` + `cell_evidence.scope_acceptance` (§11.5), а durable-аттестация профиля — в `profile_attestation` (§6.9). Третий носитель аттестации не заводится |
-| `iter_chunks_by_composition` | не нужен | Композиция читается по членам: `iter_chunks(partition_build_id, product_id=…)` в цикле по `view.members` — так делает `seed_lexical_index` (`core/cli/wiring.py:430-500`) |
+| `iter_chunks_by_composition` | не нужен | Композиция читается по членам: `iter_chunks(partition_build_id, product_id=…)` в цикле по `view.members` — так делает `seed_lexical_index` (`core/cli/wiring.py:431-501`) |
 
 Методы пер-ячеечного измерения **есть в порте** (`core/ports/state.py`): пишет Ш6
 (`record_cell_measurements`, пачка на продукт), читает перенос (`get_cell_measurement`,
@@ -4276,7 +4276,7 @@ state/state.db                                 # durable-состояние па
    `CompositionViewPort` принимается как `view`, `build_id` композиции сверяется с
    `view.composition_id` и расхождение отвергается (`:219-226`), каждая партиция читается
    по своей карте.
-7. `seed_lexical_index` (`core/cli/wiring.py:430-500`) — ✅ **реализовано**: итерация по
+7. `seed_lexical_index` (`core/cli/wiring.py:431-501`) — ✅ **реализовано**: итерация по
    `view.members` через `store.iter_chunks(partition_build_id, product_id=…)`, потоково
    (генератор, без списка записей), с гидртацией текста из store через `get_chunks`.
 8. `--only-failed` — ✅ **сделано 30.10.2026, межпрогонный.** Резолвер
@@ -4296,7 +4296,7 @@ state/state.db                                 # durable-состояние па
     `cell_reuse_key` (`CELL_REUSE_SCHEMA = "cell-reuse-2"`, `core/pipeline/digests.py:507`,
     §10.1); прежняя редакция называла его несуществующим.
 11. `_chunk_id` (`core/pipeline/corpus_index.py:181`) — ✅ **сделано**: форма
-    `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `corpus_ingest.py:1437`,
+    `f"{product_id}:{doc_version_id}:{chunk_no}"` (вызовы — `corpus_ingest.py:1439`,
     `extract_consume.py:433`); это закрывало корень частичного O4 (§3.3). Решение 29.10.2026:
     `chunker_version` в `chunk_id` **не входит**, и это не упущение.
     - **Грамматика `source_id` не даёт места.** `source_id` —

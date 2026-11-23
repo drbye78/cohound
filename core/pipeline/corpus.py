@@ -1231,6 +1231,7 @@ def _stage_timings_aggregate(
     names = ("fetch_wait_s", "extract_wait_s", "chunk_s", "embed_s", "build_s")
     buckets = dict.fromkeys(names, 0.0)
     workers: int | None = None
+    workers_by_class: dict[str, int] = {}
     tail_total = 0.0
     for product_id, elapsed_s, timings in rows:
         elapsed_total += elapsed_s
@@ -1241,10 +1242,15 @@ def _stage_timings_aggregate(
             workers is None or timings.extract_workers > workers
         ):
             workers = timings.extract_workers
+        for work_class, window in timings.extract_workers_by_class.items():
+            workers_by_class[work_class] = max(workers_by_class.get(work_class, 0), window)
         products[product_id] = {
             "elapsed_seconds": round(elapsed_s, 3),
             **{name: round(getattr(timings, name), 3) for name in names},
             "extract_workers": timings.extract_workers,
+            # Ширина **каждой** полосы продукта: одно число рядом — максимум, а не ответ
+            # на вопрос «сколько шло одновременно» (классы не делят окно).
+            "extract_workers_by_class": dict(timings.extract_workers_by_class),
             # F9 плана 17: сколько главный поток провёл в хвосте продукта (выдача новых
             # волн на это время стояла). Публикуется **рядом**, а не бакетом: интервал
             # пересекается с Pass B, и включение в сумму сделало бы остаток окна ложным.
@@ -1255,6 +1261,7 @@ def _stage_timings_aggregate(
         "elapsed_seconds": round(elapsed_total, 3),
         **{name: round(buckets[name], 3) for name in names},
         "extract_workers": workers,
+        "extract_workers_by_class": dict(workers_by_class),
         "product_tail_s": round(tail_total, 3),
         "overhead_s": round(elapsed_total - sum(buckets.values()), 3),
     }
@@ -3040,6 +3047,10 @@ def _build_corpus(
         # План 19 §E.7: состояние продукта — для write-through наблюдения контейнера
         # (``container_state``). Без него ``frozen`` не найдёт байтов архива в состоянии.
         state=state,
+        # F0/полосы: бюджет памяти — по нему выводится окно **каждого класса работы**.
+        # Явный вход composition root, а не чтение окружения: чистый пайплайн не имеет
+        # права зависеть от памяти хоста (иначе окно стало бы функцией хоста).
+        mem_budget_mb=mem_budget_mb,
     )
     _consume_operations = extract_consume.ConsumerOperations(
         mark=_mark,
@@ -5637,6 +5648,13 @@ def _build_corpus(
             documents=len(observed_documents),
             chunks=counters.chunk_count,
             extract_workers=counters.observed_extract_workers,
+            extract_workers_by_class=dict(counters.observed_extract_workers_by_class),
+            # F0: учёт памяти «в полёте» — пик суммы и отложенные старты. Это ответ на
+            # вопрос «загружен ли узел»: сумма удерживается бюджетом по построению, поэтому
+            # пик, упёршийся в бюджет при непустой очереди, — факт, а не оценка.
+            in_flight_mb_peak=counters.observed_in_flight_mb_peak,
+            class_skipped_for_budget=dict(counters.observed_class_skipped_for_budget),
+            budget_accounting=counters.observed_budget_accounting,
             extract_max_tasks_per_child=counters.observed_extract_max_tasks,
             scheduling_source=(
                 "derived" if counters.observed_extract_derived else "declared"

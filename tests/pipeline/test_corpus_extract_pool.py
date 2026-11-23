@@ -1927,12 +1927,13 @@ def test_corpus_phase_observation_marks_derived_scheduling(
     ``workers_from_budget`` режет окно числом CPU, и на 2-ядерной машине тест падал
     (``assert 2 == 3``). Арифметика бюджета — предмет проверки, число ядер — нет.
     """
-    from core.domain.enums import DocumentLevel
+    from core.domain.enums import DocumentLevel, PdfPipeline, WorkClass
     from core.pipeline import resources
     from core.pipeline.resources import (
         DOCLING_PEAK_MB,
         PARENT_FLOOR_MB,
         ResourcesObservation,
+        workers_for_class,
     )
 
     monkeypatch.setattr(resources, "cpu_parallelism_cap", lambda: 8)
@@ -1965,8 +1966,17 @@ def test_corpus_phase_observation_marks_derived_scheduling(
     )
     assert observation.extract_workers == 3
     assert observation.scheduling_source == "derived"
+    # F0: окно **класса** — не та же величина, что ось: ось выведена по пику PDF-уровня
+    # (``text`` = 855 MB ⇒ 3), а HTML-полоса считается по своему пику (317 MB), поэтому
+    # получает 8. Пул создаётся под окно класса, и это число берётся из той же функции,
+    # что его считает: захардкоженное «3» проверяло бы прежнюю единую ширину.
+    model_free_window, _ = workers_for_class(
+        WorkClass.MODEL_FREE, level, PdfPipeline.STRUCTURED, budget
+    )
+    assert model_free_window > 3
+    assert observation.extract_workers_by_class == {"model_free": model_free_window}
     # Окно ушло в пул (резолв — тот же, что у фазы).
-    assert created and created[0].size == 3
+    assert created and created[0].size == model_free_window
     # В наблюдаемость не попадает ни ``pid``, ни путь стока: только измеренные факты.
     assert observation.workers_peak_rss_mb is None  # сток не задан у этого пула
 

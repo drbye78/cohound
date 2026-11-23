@@ -20,8 +20,8 @@ seed-root продукта, **узел** — процесс краула.
 ## 1. Границы подсистемы и контракт с соседями
 
 **Краул владеет:** scope и frontier (`Frontier.host_in_scope`, `core/pipeline/crawl_frontier.py:1259`),
-сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2686`), retention сырых байтов
-(`retain`, `core/pipeline/corpus_ingest.py:1037`), durable per-URL состоянием (`crawl_session_items`,
+сетевым фетчем (`local_fetch`, `core/pipeline/corpus_ingest.py:2688`), retention сырых байтов
+(`retain`, `core/pipeline/corpus_ingest.py:1039`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:357`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
 (`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:181`), а не из корпуса.
@@ -119,8 +119,8 @@ host'ами — линейно.
 `FETCH_RETRY_TIMES` (2) раз, и **каждая попытка берёт свой слот** лимитера со своей меткой
 (`core/util/fetch_retry.py:55`, одно правило на `local` и `split`; классификатор —
 `core/ports/crawl_errors.py`). Контракт «никакой мутации состояния сеанса здесь нет» уже записан у
-`local_fetch` (`core/pipeline/corpus_ingest.py:2686`), а pre-fetch — чистая фаза
-(`local_prefetch`, `core/pipeline/corpus_ingest.py:2482`). Потоки не получают ни `Frontier`, ни
+`local_fetch` (`core/pipeline/corpus_ingest.py:2688`), а pre-fetch — чистая фаза
+(`local_prefetch`, `core/pipeline/corpus_ingest.py:2484`). Потоки не получают ни `Frontier`, ни
 стор, ни `mark`: соединение SQLite привязано к потоку (`core/store/sqlite.py:823`), поэтому
 «состояние, размазанное по потокам» было бы не оптимизацией, а вторым писателем.
 
@@ -274,7 +274,7 @@ PDF, `docs/reports/measurements/2026-10-29-corpus-retention-footprint.md:37`). �
 
 ### 4.4 Что это меняет для памяти
 
-`ProductIngest` (`core/pipeline/corpus_ingest.py:573`) переезжает к потребителю: пик памяти становится
+`ProductIngest` (`core/pipeline/corpus_ingest.py:575`) переезжает к потребителю: пик памяти становится
 свойством конверсии, а не краула. Краул держит только in-flight страницы полос (ограничены пулом) и
 пишет байты на диск — это и есть «эффективен безотносительно конверсии».
 
@@ -646,7 +646,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   (`core/pipeline/corpus.py:3439`), а не отдельным дренажом в хвосте продукта: одиночный
   дренаж открыл бы второй реестр и пустил бы бакет на host, который уже держит сосед.
   **Хвост продукта — на главном потоке, при закрытии его последнего корня**
-  (`core/pipeline/corpus.py:3306`; сам вызов — `core/pipeline/corpus_driver.py:227`). Почему
+  (`core/pipeline/corpus.py:3310`; сам вызов — `core/pipeline/corpus_driver.py:227`). Почему
   там: run-DB — SQLite с **одним** писателем (§1), а драйвер — единственный мутатор состояния
   фазы (инвариант T5), значит конверсия, Pass B, покрытие и строка продукта обязаны исполняться
   там же, где коммитятся исходы корней, и не могут идти параллельно ни друг с другом, ни с

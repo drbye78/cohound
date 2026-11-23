@@ -31,13 +31,15 @@ from core.cli.wiring import (
     resolve_extraction_budget,
 )
 from core.config.deploy import CrawlConfig, DeployConfig
-from core.domain.enums import DocumentLevel, PdfDevice
+from core.domain.enums import DocumentLevel, PdfDevice, PdfPipeline, WorkClass
 from core.domain.models import CrawlRunConfig
 from core.pipeline.resources import (
     DOCLING_PEAK_MB,
     MEM_BUDGET_ENV,
+    MODEL_FREE_PEAK_MB,
     PARENT_FLOOR_MB,
     MemoryBudgetError,
+    workers_for_class,
     workers_from_budget,
 )
 
@@ -105,6 +107,11 @@ def test_preflight_uses_resolved_level_not_default() -> None:
 
     ``text`` помещается в 2000 MB (1 воркер), поэтому отказа нет; на 1000 MB — отказ,
     и сообщение называет именно ``text`` с его пиком, а не ``full``.
+
+    Отказа нет, но предупреждение о **сумме** окон классов есть, и оно тоже обязано
+    называть разрешённый уровень: ``text`` стоит 855 MB на PDF-документ, а не 4833
+    (``full``). Иначе проверка «взят разрешённый уровень» перестала бы ловить подмену
+    ровно там, где уровень впервые стал виден числом.
     """
     assert workers_from_budget(DocumentLevel.TEXT, 2000) == 1
     ok, warnings = _preflight(
@@ -112,7 +119,9 @@ def test_preflight_uses_resolved_level_not_default() -> None:
         mem_budget_mb=2000,
     )
     assert ok is None
-    assert warnings == ()
+    assert len(warnings) == 1, warnings
+    assert f"pdf_structured 1×{DOCLING_PEAK_MB[DocumentLevel.TEXT]}" in warnings[0]
+    assert f"1×{DOCLING_PEAK_MB[DocumentLevel.FULL]}" not in warnings[0]
 
     error, _ = _preflight(
         run_crawl=CrawlRunConfig(document_level=DocumentLevel.TEXT),
@@ -122,6 +131,46 @@ def test_preflight_uses_resolved_level_not_default() -> None:
     assert error.level is DocumentLevel.TEXT
     assert error.peak_mb == DOCLING_PEAK_MB[DocumentLevel.TEXT]
     assert f"level peak={DOCLING_PEAK_MB[DocumentLevel.TEXT]} MB" in error.describe()
+
+
+def test_preflight_warns_when_sum_of_class_windows_exceeds_budget() -> None:
+    """Сумма окон по классам — предупреждение с числами, а не отказ (A3).
+
+    Окно каждого класса считается так, будто класс в корпусе один, поэтому сумма
+    ``window × peak`` может превысить бюджет при том, что каждое окно по отдельности
+    помещается. Это не повод отказывать: потребитель ведёт общий счётчик памяти и
+    откладывает старты (``class_skipped_for_budget``), то есть сумма держится **по
+    построению**. Предупреждение нужно, чтобы упор в бюджет узла был виден до прогона:
+    иначе «полосы разошлись по памяти» читалось бы как «полосы узкие».
+
+    Числа в сообщении берутся из тех же :func:`workers_for_class`, что и у потребителя,
+    поэтому здесь проверяется их наличие и порядок величины, а не переписанная формула.
+    """
+    # Бюджет стенда 07.11.2026 ≈ 4.5 GB, уровень ``layout_tables``: PDF помещается
+    # (3679 ≤ 4000), значит отказа быть не должно — и ровно поэтому сумма видна.
+    budget = 4500
+    level = DocumentLevel.LAYOUT_TABLES
+    error, warnings = _preflight(
+        run_crawl=CrawlRunConfig(document_level=level), mem_budget_mb=budget
+    )
+    assert error is None
+    assert len(warnings) == 1, warnings
+    warning = warnings[0]
+    model_free, _ = workers_for_class(
+        WorkClass.MODEL_FREE, level, PdfPipeline.STRUCTURED, budget
+    )
+    pdf_peak = DOCLING_PEAK_MB[level]
+    # Имена классов и оба слагаемых — в тексте: без них предупреждение не проверяемо.
+    assert f"model_free {model_free}×{MODEL_FREE_PEAK_MB}" in warning
+    assert f"pdf_structured 1×{pdf_peak}" in warning
+    assert f"{budget - PARENT_FLOOR_MB} MB" in warning
+    # Сумма названа числом и она действительно больше доступного бюджета.
+    total = model_free * MODEL_FREE_PEAK_MB + pdf_peak
+    assert f"= {total} MB" in warning
+    assert total > budget - PARENT_FLOOR_MB
+    # Отказом это не является, и токен метрики назван — куда смотреть после прогона.
+    assert "class_skipped_for_budget" in warning
+    assert "отказом это не является" in warning
 
 
 def test_preflight_does_not_refuse_declared_extract_workers() -> None:
