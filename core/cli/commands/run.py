@@ -1263,6 +1263,8 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
         max_attempts = getattr(args, "max_attempts", None)
         max_depth = getattr(args, "max_depth", None)
         max_documents = getattr(args, "max_documents", None)
+        drain_roots = getattr(args, "drain_roots", None)
+        drain_max_depth = getattr(args, "drain_max_depth", None)
         exclude_paths = getattr(args, "exclude_paths", None)
         exclude_documents = getattr(args, "exclude_documents", None)
         document_level = getattr(args, "document_level", None)
@@ -1359,11 +1361,22 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                     profiles=inputs.domain_profiles or {},
                     mem_budget_mb=mem_budget_mb,
                     derive_extract_workers=derive_extract_workers,
-                    # Объявленный режим входит в проверку: при корпусе из чанков
-                    # (`--refresh offline`, `frozen` + `chunks`) документы не читаются, и
-                    # отказ «окно 0 воркеров» был бы отказом в несуществующей работе.
+                    # Объявленный режим входит в проверку, но сам по себе пропуска не
+                    # даёт: при корпусе из чанков (`--refresh offline`, `frozen` +
+                    # `chunks`) гейт смотрит **состояние** — сколько документов
+                    # пересобирается из сохранённых байтов (негодный chunk-set), потому
+                    # что экстрактор тогда работает. `state` — уже открытое состояние
+                    # прогона: один запрос на прогон, без нового соединения.
                     refresh_policy=refresh_policy,
                     frozen_source=getattr(args, "frozen_source", None),
+                    state=state_store,
+                    # Область счёта — та же, что у фазы корпуса: продукты ``url_map``,
+                    # а при пустом ``url_map`` — объявленные планом. Состояние пакета
+                    # шире прогона, и продукт вне области не должен решать, помещается
+                    # ли работа этого.
+                    products=(
+                        sorted(corpus_urls) if corpus_urls else list(run_plan.products)
+                    ),
                 )
                 config_notices.extend(budget_warnings)
                 if budget_error is not None:
@@ -1474,6 +1487,8 @@ def _run_body(args: argparse.Namespace, *, package_lock: Any = None) -> int:
                 max_attempts=max_attempts,
                 max_depth=max_depth,
                 max_documents=max_documents,
+                drain_roots=drain_roots,
+                drain_max_depth=drain_max_depth,
                 exclude_paths=exclude_paths,
                 exclude_documents=exclude_documents,
                 document_level=document_level,
@@ -2007,7 +2022,9 @@ def configure(sub: Any) -> None:
         "--refresh",
         choices=[policy.value for policy in RefreshPolicy],
         default=None,
-        help="политика обновления корпуса: auto|revalidate|refresh|offline|frozen (дефолт auto)",
+        help="политика обновления корпуса: auto|revalidate|refresh|offline|frozen|drain "
+        "(дефолт auto; drain — сеть только для неизвестных URL, известные страницы из "
+        "сохранённых байтов)",
     )
     p_run.add_argument(
         "--runs-dir",

@@ -2830,6 +2830,85 @@ def preflight_pdf_device(
     return device
 
 
+def _documents_needing_rebuild(
+    state: Any | None, *, products: Sequence[str] | None = None
+) -> tuple[int, int] | None:
+    """Сколько активных версий документов **не** переиспользуются как есть, из скольких.
+
+    Это факт, а не догадка по режиму прогона: ``offline`` переиспользует chunk-set, но
+    негодный набор (чужая версия чанкера, пустой набор) заставляет
+    :func:`core.pipeline.corpus_ingest.rebuild_from_stored_bytes` прочитать документ
+    **текущим** экстрактором и нарезать текущим чанкером — сети нет, а работа и пик
+    памяти те же, что у живого чтения.
+
+    Критерий — ровно тот, по которому решает
+    :func:`core.pipeline.corpus_persist.load_reused_chunks`:
+
+    * непустая версия чанкера версии документа расходится с объявленной
+      (:func:`core.adapters.chunker_family.composite_chunker_version`) — повторная нарезка;
+    * у версии нет ни одного ``chunk_meta`` — пустой набор.
+
+    Единица счёта — **текущий документ**, а не строка истории: работа берётся из
+    ``url_state`` (последняя версия URL), потому что именно этот набор обходит
+    ``offline``-проход. ``document_version`` хранит всю историю, и её старые активные
+    версии (замена по контенту не вытесняет прежнюю) пересборкой не являются — счёт по
+    ним назвал бы в разы больше работы, чем будет (измерено 23.11.2026 на стенде:
+    17 858 активных версий против **2 057** URL с негодным набором).
+
+    Пустой/``NULL`` штамп версии расхождением **не** считается: ``load_reused_chunks``
+    такой набор переиспользует (отсутствие факта не даёт права объявить пересборку, A3).
+    I19-расхождение текста здесь не проверяется (оно требует чтения всех текстов чанков),
+    поэтому счёт — **нижняя граница**; вызывающий обязан сказать это в тексте.
+
+    ``products`` — **область прогона**: счёт идёт только по продуктам, которые прогон
+    обходит (``None`` — весь пакет). Состояние пакета живёт дольше одного прогона, и
+    продукт вне области (срез ``--only-product``, выбывший продукт) не должен давать
+    числа, по которым гейт откажет в работе, которой не будет.
+
+    Один запрос на прогон по уже открытому соединению состояния: чтение, не запись.
+
+    :returns: ``(нужно пересобрать, всего URL с активной версией)`` либо ``None`` —
+        состояние недоступно (порт не передан, соединения нет, запрос не выполнился).
+    """
+    # Импорт локальный: модуль уже тянет из ``chunker_family`` тяжёлые адаптеры, а лишняя
+    # строка наверху сдвигала бы якоря ``path:line`` во всём файле.
+    from core.adapters.chunker_family import composite_chunker_version
+
+    conn = getattr(state, "conn", None)
+    if conn is None:
+        return None
+    scope_sql = ""
+    params: list[Any] = [composite_chunker_version()]
+    if products is not None:
+        if not products:
+            # Пустая область — не «весь пакет»: прогон не обходит ни одного продукта.
+            return 0, 0
+        placeholders = ",".join("?" for _ in products)
+        scope_sql = f" AND u.product_id IN ({placeholders})"
+        params.extend(products)
+    try:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN
+                       (dv.chunker_version IS NOT NULL AND dv.chunker_version <> ''
+                        AND dv.chunker_version <> ?)
+                       OR NOT EXISTS (SELECT 1 FROM chunk_meta cm
+                                      WHERE cm.doc_version_id = dv.doc_version_id)
+                   THEN 1 ELSE 0 END), 0) AS needs
+            FROM url_state u
+            JOIN document_version dv ON dv.doc_version_id = u.doc_version_id
+            WHERE dv.status = 'active'{scope_sql}
+            """,  # noqa: S608 - вставка — только «?»-заглушки, значения — bind
+            params,
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — чужое состояние/битая схема: счёт неизвестен
+        return None
+    if row is None:
+        return None
+    return int(row[1]), int(row[0])
+
+
 def preflight_extraction_budget(
     *,
     roots: Iterable[str],
@@ -2840,6 +2919,8 @@ def preflight_extraction_budget(
     derive_extract_workers: bool,
     refresh_policy: RefreshPolicy | str | None = None,
     frozen_source: FrozenSourceArg = None,
+    state: Any | None = None,
+    products: Sequence[str] | None = None,
 ) -> tuple[MemoryBudgetError | None, tuple[str, ...]]:
     """Preflight §3.3: отказ начинать заведомо невозможную конфигурацию экстракции.
 
@@ -2856,31 +2937,54 @@ def preflight_extraction_budget(
     явно объявленная ось ``crawl.extract_workers`` на любом слое сильнее бюджета — тогда
     возвращается предупреждение с числами, а не отказ (воля оператора).
 
+    **Корпус из чанков — не доказательство, что документы не читаются.** При ``offline``
+    (и ``frozen`` с ``frozen_source=chunks``) проход переиспользует chunk-set, но негодный
+    набор (чужая версия чанкера, пустой набор, I19-расхождение) пересобирает документ из
+    сохранённых байтов текущим конвейером — сети нет, а экстрактор и чанкер работают.
+    Поэтому пропуск гейта разрешает **факт** (:func:`_documents_needing_rebuild`), а не
+    слово режима: ``0`` документов к пересборке — пропуск назван числом; больше нуля —
+    гейт применяется и печатает уровень/пик/бюджет/окно; состояние недоступно — числа
+    формулы печатаются предупреждением с явной фразой, что счёт не проверен (отказ без
+    факта был бы ложным предохранителем).
+
+    :param state: открытое состояние пакета (``ProductStatePort``, читается только
+        ``.conn``) — источник счёта документов к пересборке. ``None`` — состояние
+        недоступно: это видимое предупреждение, не отказ.
+    :param products: область прогона для этого счёта (продукты, которые прогон обходит);
+        ``None`` — весь пакет. Состояние живёт дольше прогона, и продукт вне области не
+        должен давать числа, по которым гейт откажет в несуществующей работе.
     :returns: ``(error | None, warnings)`` — ``error`` несёт числа
         (:meth:`MemoryBudgetError.describe`), ``warnings`` — тексты для ``errors``/логов.
     """
-    # Извлечения не будет — проверять нечего. Гейт считает окно под **документную**
-    # экстракцию, а при ``offline`` (и ``frozen`` с ``frozen_source=chunks``) корпус
-    # собирается из durable-чанков (`dispatch_refresh(...).corpus_source is CHUNKS`),
-    # то есть ни один документ не читается. Прежде отказ срабатывал и здесь: на этом хосте
-    # `run --refresh offline` падал с «budget=3229 MB … workers=0» (измерено 22.11.2026),
-    # хотя единственная работа прогона — оценка по уже нарезанному корпусу. Отказ в
-    # конфигурации, которая не будет исполняться, — не предохранитель, а помеха: он
-    # вынуждал бы завышать `COHOUND_MEM_BUDGET_MB` (то есть объявлять ложь о бюджете) или
-    # понижать уровень, меняя ось измерения ради обхода гейта. Соседний
-    # :func:`preflight_network` политику уже учитывает — это та же граница, а не новое
-    # исключение.
+    # Пропуск при корпусе из чанков — только по факту состояния. Прежде здесь стояло
+    # «документы не читаются» — ложная посылка: негодный chunk-set пересобирается из
+    # сохранённых байтов (`rebuild_from_stored_bytes`), и работа есть. Измерено
+    # 22–23.11.2026 на стенде: прогон дошёл до `VmHWM` 4313 MB при `MemAvailable`
+    # ~1.6 GB, а гейт не назвал ни числа, ни отказа.
+    from core.adapters.chunker_family import composite_chunker_version
+
+    chunks_reuse = False
+    refresh_label = ""
+    rebuild: tuple[int, int] | None = None
     if refresh_policy is not None:
         execution = dispatch_refresh(refresh_policy, frozen_source=frozen_source)
+        refresh_label = RefreshPolicy(refresh_policy).value
         if execution.corpus_source is CrawlCorpusSource.CHUNKS:
-            return None, (
-                "memory: бюджет извлечения не проверялся — корпус берётся из чанков "
-                f"(refresh={RefreshPolicy(refresh_policy).value}), документы не читаются",
-            )
+            chunks_reuse = True
+            rebuild = _documents_needing_rebuild(state, products=products)
+            if rebuild is not None and rebuild[0] == 0:
+                return None, (
+                    "memory: бюджет извлечения не проверялся — корпус берётся из чанков "
+                    f"(refresh={refresh_label}); пересборка не требуется: 0 из "
+                    f"{rebuild[1]} URL с текущей версией документа переиспользуются как "
+                    f"есть (chunker_version={composite_chunker_version()})",
+                )
     error: MemoryBudgetError | None = None
     warnings: list[str] = []
+    windows: list[str] = []
     seen: set[tuple[int, str]] = set()
     seen_vram: set[tuple[str, str]] = set()
+    seen_window: set[tuple[str, str]] = set()
     for root in roots:
         try:
             limits = resolve_crawl_limits(
@@ -2927,6 +3031,20 @@ def preflight_extraction_budget(
                 f"({pdf_pipeline.value}) не измерен — окно ограничено памятью хоста и "
                 f"CPU; VRAM-слагаемое не применяется (замер, а не предвидение: A3)"
             )
+        # Корпус из чанков, но пересборка неизбежна: числа формулы окна публикуются один
+        # раз на условие (уровень + механизм) — и когда отказ есть, и когда его нет.
+        # Бюджета нет — окно не выводится вовсе (значение не выдумывается).
+        if (
+            chunks_reuse
+            and mem_budget_mb is not None
+            and (level.value, pdf_pipeline.value) not in seen_window
+        ):
+            seen_window.add((level.value, pdf_pipeline.value))
+            windows.append(
+                f"memory: level={level.value} ({pdf_pipeline.value}): "
+                f"пик={pdf_peak_mb(level, pdf_pipeline)} MB, бюджет {mem_budget_mb} MB, "
+                f"окно {capacity}"
+            )
         if limits.extract_workers_derived:
             if limits.extract_workers == 0 and error is None:
                 error = MemoryBudgetError(
@@ -2953,6 +3071,32 @@ def preflight_extraction_budget(
             f"parent floor={PARENT_FLOOR_MB} MB) — "
             f"исполнение по воле оператора, бюджет ({MEM_BUDGET_ENV}) не учитывается"
         )
+    if chunks_reuse:
+        if rebuild is not None and rebuild[0] > 0:
+            warnings.insert(
+                0,
+                f"memory: {rebuild[0]} из {rebuild[1]} URL с текущей версией документа "
+                f"будут пересобраны из сохранённых байтов (refresh={refresh_label}): "
+                "chunk-set негоден или версия чанкера не та — сети нет, но экстрактор и "
+                "чанкер работают, поэтому гейт бюджета применяется (счёт — нижняя "
+                "граница: I19-расхождение текста здесь не проверялось)",
+            )
+            warnings.extend(windows)
+        elif rebuild is None:
+            # Состояние недоступно — числа документов нет, но и отказ без факта был бы
+            # ложным предохранителем: отказ в работе, которой может не быть, вынуждает
+            # завышать бюджет (объявлять ложь) или менять ось измерения ради обхода.
+            head = (
+                f"memory: корпус берётся из чанков (refresh={refresh_label}), но число "
+                "документов к пересборке НЕ проверено — состояние пакета недоступно; "
+                "пересборка из сохранённых байтов возможна, поэтому отказ по бюджету "
+                "не выносится"
+            )
+            if error is not None:
+                head += f". Формула окна: {error.describe()}"
+                error = None
+            warnings.insert(0, head)
+            warnings.extend(windows)
     return error, tuple(warnings)
 
 

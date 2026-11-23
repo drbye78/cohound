@@ -65,6 +65,8 @@ def _preflight(
     roots: list[str] | None = None,
     refresh_policy: RefreshPolicy | str | None = None,
     frozen_source: FrozenSource | None = None,
+    state: object | None = None,
+    products: list[str] | None = None,
 ) -> tuple[MemoryBudgetError | None, tuple[str, ...]]:
     return preflight_extraction_budget(
         roots=roots if roots is not None else [ROOT],
@@ -75,6 +77,83 @@ def _preflight(
         derive_extract_workers=derive,
         refresh_policy=refresh_policy,
         frozen_source=frozen_source,
+        state=state,
+        products=products,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Состояние пакета для счёта документов к пересборке
+# --------------------------------------------------------------------------- #
+
+
+def _state_store(tmp_path: Path) -> object:
+    """Пустое durable-состояние пакета (``state.db``) для счёта пересборки."""
+    from core.store.state_store import SqliteStateStore
+
+    return SqliteStateStore(tmp_path / "state.db")
+
+
+def _doc_version(
+    state: object,
+    product_id: str,
+    *,
+    no: int,
+    chunker_version: str | None,
+    with_chunks: bool = True,
+    current: bool = True,
+) -> None:
+    """Кладёт активную версию документа; ``with_chunks`` — есть ли у неё chunk-set.
+
+    ``current=True`` — версия является текущей для URL (``url_state``), то есть именно её
+    увидит проход без сети; ``False`` — историческая версия того же документа, которую
+    прогон не читает.
+    """
+    from core.ports.state import ChunkRow, DocumentVersionRow, UrlStateRow
+
+    dv_id = f"dv_{product_id}_{no}"
+    state.upsert_document_version(  # type: ignore[attr-defined]
+        DocumentVersionRow(
+            doc_version_id=dv_id,
+            doc_id=f"{product_id}:h{no}",
+            product_id=product_id,
+            url=f"https://{product_id}.test/{no}",
+            content_hash=f"h{no}",
+            extractor_version="extract-1",
+            level="full",
+            raw_path=f"/raw/{no}.bin",
+            chunker_version=chunker_version,
+            first_seen_run_id="run-1",
+            last_seen_run_id="run-1",
+            first_seen_at="2026-01-01T00:00:00Z",
+            last_seen_at="2026-01-01T00:00:00Z",
+            status="active",
+        )
+    )
+    if current:
+        state.upsert_url_state(  # type: ignore[attr-defined]
+            UrlStateRow(
+                product_id=product_id,
+                url=f"https://{product_id}.test/{no}",
+                normalized_url=f"https://{product_id}.test/{no}",
+                doc_version_id=dv_id,
+            )
+        )
+    if not with_chunks:
+        return
+    state.put_chunk_text(f"c{no}", f"текст {no}")  # type: ignore[attr-defined]
+    state.replace_doc_chunks(  # type: ignore[attr-defined]
+        dv_id,
+        [
+            ChunkRow(
+                chunk_id=f"{dv_id}:0",
+                doc_version_id=dv_id,
+                product_id=product_id,
+                chunk_no=0,
+                content_hash=f"c{no}",
+                chunker_version=chunker_version or "unknown",
+            )
+        ],
     )
 
 
@@ -168,25 +247,104 @@ def test_preflight_without_budget_does_not_refuse() -> None:
     assert warnings == ()
 
 
-def test_preflight_does_not_refuse_offline_reuse() -> None:
-    """``offline`` — корпус из чанков, документы не читаются: отказывать не в чем.
+def test_preflight_skips_offline_reuse_only_on_a_measured_zero(
+    tmp_path: Path,
+) -> None:
+    """``offline`` + все chunk-set годны → пропуск **с числом**, а не по слову режима.
 
-    Измерено 22.11.2026: на этом хосте ``run --refresh offline`` падал с
-    «budget=3229 MB … workers=0», хотя единственная работа прогона — оценка по уже
-    нарезанному корпусу. Отказ в несуществующей работе вынуждал бы завышать
-    ``COHOUND_MEM_BUDGET_MB`` (объявлять ложь о бюджете) или понижать уровень — то есть
-    менять ось измерения ради обхода гейта.
+    Пропуск законен ровно тогда, когда пересобирать нечего: счёт по состоянию — «0 из M».
+    Прежняя посылка «при ``offline`` документы не читаются» ложна (негодный chunk-set
+    пересобирается из сохранённых байтов), поэтому пропуск теперь опирается на факт.
     """
-    error, warnings = _preflight(refresh_policy=RefreshPolicy.OFFLINE)
+    from core.adapters.chunker_family import composite_chunker_version
+
+    state = _state_store(tmp_path)
+    current = composite_chunker_version()
+    for no in range(3):
+        _doc_version(state, "p1", no=no, chunker_version=current)
+
+    error, warnings = _preflight(refresh_policy=RefreshPolicy.OFFLINE, state=state)
     assert error is None
     # Не молчание: «не проверял» названо, иначе отсутствие отказа неотличимо от проверки.
-    assert len(warnings) == 1
+    assert len(warnings) == 1, warnings
     assert "из чанков" in warnings[0]
     assert "offline" in warnings[0]
+    assert "0 из 3" in warnings[0], warnings[0]
+
+
+def test_preflight_applies_when_offline_rebuild_is_unavoidable(
+    tmp_path: Path,
+) -> None:
+    """``offline`` + N негодных наборов → гейт применяется и называет N, уровень и пик.
+
+    Измерено 22–23.11.2026 на стенде: прогон дошёл до ``VmHWM`` 4313 MB при
+    ``MemAvailable`` ~1.6 GB, а гейт молчал — верил ``refresh``.
+    """
+    from core.adapters.chunker_family import composite_chunker_version
+
+    state = _state_store(tmp_path)
+    current = composite_chunker_version()
+    _doc_version(state, "p1", no=0, chunker_version=current)
+    _doc_version(state, "p1", no=1, chunker_version="md-heading-4+text-para-2")
+    _doc_version(state, "p1", no=2, chunker_version=current, with_chunks=False)
+
+    error, warnings = _preflight(refresh_policy=RefreshPolicy.OFFLINE, state=state)
+    assert isinstance(error, MemoryBudgetError)
+    assert "2 из 3" in warnings[0], warnings[0]
+    assert "пересобраны из сохранённых байтов" in warnings[0]
+    assert "offline" in warnings[0]
+    window = " ".join(warnings)
+    assert f"level={DocumentLevel.FULL.value}" in window, window
+    assert f"пик={DOCLING_PEAK_MB[DocumentLevel.FULL]} MB" in window, window
+    assert f"бюджет {UNFITTABLE_BUDGET} MB" in window, window
+    assert "окно 0" in window, window
+    # Отказ остаётся отказом и несёт те же числа (describe), а не «не помещается».
+    assert f"budget={UNFITTABLE_BUDGET} MB" in error.describe()
+
+
+def test_preflight_offline_rebuild_passes_when_window_fits(
+    tmp_path: Path,
+) -> None:
+    """Пересборка есть, но окно помещается → гейт применён и **не** отказывает.
+
+    Гейт — не потолок: если документы помещаются, работа идёт, а факт пересборки и числа
+    окна видны предупреждением.
+    """
+    state = _state_store(tmp_path)
+    _doc_version(state, "p1", no=0, chunker_version="md-heading-4+text-para-2")
+
+    # full = 4833 MB + пол 500 MB: 6000 MB помещает ровно одного воркера.
+    error, warnings = _preflight(
+        refresh_policy=RefreshPolicy.OFFLINE,
+        mem_budget_mb=6000,
+        state=state,
+    )
+    assert error is None
+    assert "1 из 1" in warnings[0], warnings
+    assert "окно 1" in " ".join(warnings)
+
+
+def test_preflight_offline_without_state_warns_with_numbers_and_does_not_refuse() -> None:
+    """Состояние недоступно → предупреждение с числами формулы, **не** отказ.
+
+    Отказ без факта был бы ложным предохранителем: он запрещал бы работу, которой может
+    не быть, и вынуждал бы завышать бюджет (объявлять ложь) или менять ось измерения.
+    """
+    error, warnings = _preflight(refresh_policy=RefreshPolicy.OFFLINE, state=None)
+    assert error is None
+    text = " ".join(warnings)
+    assert "из чанков" in text
+    assert "offline" in text
+    assert "НЕ проверено" in text, text
+    assert "недоступно" in text, text
+    assert f"level={DocumentLevel.FULL.value}" in text, text
+    assert f"пик={DOCLING_PEAK_MB[DocumentLevel.FULL]} MB" in text, text
+    assert f"бюджет {UNFITTABLE_BUDGET} MB" in text, text
+    assert "окно 0" in text, text
 
 
 def test_preflight_does_not_refuse_frozen_chunks() -> None:
-    """``frozen`` + ``frozen_source=chunks`` — тот же переиспользованный корпус."""
+    """``frozen`` + ``frozen_source=chunks`` — тот же корпус из чанков, тот же счёт."""
     error, _ = _preflight(
         refresh_policy=RefreshPolicy.FROZEN, frozen_source=FrozenSource.CHUNKS
     )
@@ -203,6 +361,92 @@ def test_preflight_still_refuses_frozen_bytes() -> None:
         refresh_policy=RefreshPolicy.FROZEN, frozen_source=FrozenSource.BYTES
     )
     assert error is not None
+
+
+def test_preflight_counts_current_documents_not_version_history(tmp_path: Path) -> None:
+    """Единица счёта — текущая версия URL, а не строка истории ``document_version``.
+
+    Замена документа по контенту не вытесняет прежнюю версию (она остаётся ``active``),
+    поэтому счёт по ``document_version`` назвал бы работой то, что прогон не читает.
+    Измерено 23.11.2026 на стенде: 17 858 активных версий против **2 057** URL с негодным
+    набором — разница в 8.7×, и это была бы ложь в тексте гейта.
+    """
+    from core.adapters.chunker_family import composite_chunker_version
+
+    state = _state_store(tmp_path)
+    current = composite_chunker_version()
+    _doc_version(state, "p1", no=0, chunker_version=current)
+    # Прежняя версия того же документа: статус ``active``, но URL на неё не указывает.
+    _doc_version(
+        state, "p1", no=1, chunker_version="md-heading-4+text-para-2", current=False
+    )
+
+    error, warnings = _preflight(refresh_policy=RefreshPolicy.OFFLINE, state=state)
+    assert error is None
+    assert "0 из 1" in warnings[0], warnings[0]
+
+
+def test_preflight_offline_without_budget_names_count_and_no_window(
+    tmp_path: Path,
+) -> None:
+    """Бюджета нет — окно не выводится (число не выдумывается), но пересборка названа.
+
+    ``mem_budget_mb=None`` — «бюджет неизвестен», а не «окно 0»: печатать окно здесь
+    значило бы выдать отсутствие факта за измерение (A3).
+    """
+    state = _state_store(tmp_path)
+    _doc_version(state, "p1", no=0, chunker_version="md-heading-4+text-para-2")
+
+    error, warnings = _preflight(
+        refresh_policy=RefreshPolicy.OFFLINE, mem_budget_mb=None, state=state
+    )
+    assert error is None
+    assert "1 из 1" in warnings[0], warnings
+    assert not any("окно" in warning for warning in warnings), warnings
+
+
+def test_preflight_rebuild_count_is_scoped_to_run_products(tmp_path: Path) -> None:
+    """Счёт пересборки — только по продуктам прогона: состояние живёт дольше прогона.
+
+    Негодные наборы продукта вне области (срез ``--only-product``, выбывший продукт) не
+    должны давать число, по которому гейт откажет в работе, которой не будет.
+    """
+    from core.adapters.chunker_family import composite_chunker_version
+
+    state = _state_store(tmp_path)
+    current = composite_chunker_version()
+    _doc_version(state, "p1", no=0, chunker_version=current)
+    _doc_version(state, "other", no=1, chunker_version="md-heading-4+text-para-2")
+
+    error, warnings = _preflight(
+        refresh_policy=RefreshPolicy.OFFLINE, state=state, products=["p1"]
+    )
+    assert error is None
+    assert "0 из 1" in warnings[0], warnings[0]
+
+    # Тот же прогон без сужения области видит негодный набор и применяет гейт.
+    error_wide, warnings_wide = _preflight(
+        refresh_policy=RefreshPolicy.OFFLINE, state=state
+    )
+    assert isinstance(error_wide, MemoryBudgetError)
+    assert "1 из 2" in warnings_wide[0], warnings_wide[0]
+
+
+def test_preflight_refresh_is_unchanged_by_state(tmp_path: Path) -> None:
+    """``refresh``/``auto`` — прежний отказ независимо от содержимого состояния.
+
+    Регрессия: счёт пересборки относится только к корпусу из чанков; при сетевом
+    проходе документы читаются по построению, и состояние на решение не влияет.
+    """
+    from core.adapters.chunker_family import composite_chunker_version
+
+    state = _state_store(tmp_path)
+    _doc_version(state, "p1", no=0, chunker_version=composite_chunker_version())
+
+    for policy in (RefreshPolicy.REFRESH, RefreshPolicy.AUTO):
+        error, warnings = _preflight(refresh_policy=policy, state=state)
+        assert isinstance(error, MemoryBudgetError), policy
+        assert warnings == (), policy
 
 
 # --------------------------------------------------------------------------- #
@@ -316,6 +560,28 @@ def test_run_proceeds_when_extract_workers_is_declared(
     payload = capsys.readouterr().out
     assert "crawl.extract_workers: 2" in payload
     assert f"{UNFITTABLE_BUDGET} MB" in payload
+
+
+def test_run_offline_with_empty_state_counts_zero_and_does_not_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Сквозь ``run``: ``--refresh offline`` на пустом состоянии — «0 из 0», не отказ.
+
+    Проверяется проводка ``state``/``products`` из composition root: счёт идёт по
+    открытому состоянию прогона, и пустое состояние — это измеренный ноль («пересборка не
+    требуется»), а не повод отказать в заведомо не помещающемся бюджете.
+    """
+    monkeypatch.setenv(MEM_BUDGET_ENV, str(UNFITTABLE_BUDGET))
+    runs_dir = tmp_path / "runs"
+    argv = _argv(runs_dir, "f0-offline-empty-state", E2E_FIXTURES, _urls_file(tmp_path))
+    argv.extend(["--refresh", "offline"])
+    code = main(argv)
+    # G1/G4 остаются человеческими: дальше preflight'а бюджета прогон дошёл — отказа по
+    # памяти нет, несмотря на заведомо не помещающийся бюджет.
+    assert code == EXIT_BLOCKED
+    payload = capsys.readouterr().out
+    assert "из чанков" in payload, payload
+    assert "0 из 0" in payload, payload
 
 
 # --------------------------------------------------------------------------- #
