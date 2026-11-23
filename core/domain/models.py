@@ -915,6 +915,16 @@ class CrawlRunConfig(BaseModel):
     max_depth: int | None = Field(default=None, ge=0)
 
     max_documents: int | None = Field(default=None, gt=0)
+    #: Операторские оси **дренажа корня**: для перечисленных корней (``host`` либо
+    #: ``host/path``, форма ключа ``domain_profiles.yaml``) потолок ``max_documents``
+    #: снимается, а ``max_depth`` заменяется на ``drain_max_depth`` — корень докачивается
+    #: до исчерпания источников. Ось объявлена, потому что меняет **состав корпуса**
+    #: (``execution_change``, §13): без неё «усечённый» корень и «докачанный» жили бы под
+    #: одним ``run_id``. Ключи входят в ``CrawlLimits.as_dict()``/``crawl_config_digest``
+    #: только у корня, который действительно дренируется (иначе ``run_id`` прежних
+    #: прогонов сдвинулся бы без изменения измерения).
+    drain_roots: list[str] | None = None
+    drain_max_depth: int | None = Field(default=None, ge=0)
     #: Ops «не ограничивать, а измерять»: максимум известных URL ревалидации **на продукт**
     #: за цикл. ``None`` — ось не задана (все известные URL; поведение байт-в-байт).
     #: Заданное значение откладывает хвост с ``stale`` в ``url_state`` и видимым

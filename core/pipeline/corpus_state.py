@@ -48,6 +48,12 @@ class CorpusCounters:
     #: от discovery: смешение двух чисел скрыло бы, что бюджет ушёл на переобход известного.
     revalidation_fetched_total: int = 0
 
+    #: Страниц, прочитанных из сохранённых байтов политикой ``drain`` (сети не было).
+    #: Отдельно и от ``pages_fetched``, и от ``revalidation_fetched``: это ни живой
+    #: фетч, ни переобход известного — переигровка durable-субстрата. Уходит в
+    #: ``crawl_sessions.provenance_json:pages_replayed``.
+    replayed_total: int = 0
+
     #: 09 §6.3: сколько известных URL продукта оказалось **вне scope** всех авторских
     #: корней (author-scope drift). Фазовый накопитель, а не продуктовый: строка отчёта
     #: одна на фазу.

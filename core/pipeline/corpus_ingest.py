@@ -449,6 +449,9 @@ def resume_retained(
     не совпадает, файл считается непригодным (повреждён/подменён) → ``None``: резюм не
     должен молча давать другой ``index_build_id`` и самопротиворечивую аудит-строку.
     I19: retained raw — источник; экстракция детерминирована.
+
+    Собственно построение :class:`RetainedRaw` из файла — :func:`_retained_from_path`
+    (тот же код читает и переигровку байтов политики ``drain``).
     """
     if item is None:
         return None
@@ -459,7 +462,42 @@ def resume_retained(
     path = Path(item.raw_path)
     if not path.is_file():
         return None
-    artifact = artifact_is_terminal(item.url, item.content_type, attachment_formats)
+    return _retained_from_path(
+        path,
+        url=item.url,
+        content_type=item.content_type,
+        content_hash=item.content_hash,
+        max_bytes=max_bytes,
+        artifact_max_bytes=artifact_max_bytes,
+        attachment_formats=attachment_formats,
+    )
+
+
+def _retained_from_path(
+    path: Path,
+    *,
+    url: str | None,
+    content_type: str | None,
+    content_hash: str | None = None,
+    max_bytes: int | None = None,
+    artifact_max_bytes: int | None = None,
+    attachment_formats: Sequence[str] | None = None,
+) -> RetainedRaw | RetainedReject | None:
+    """Строит :class:`RetainedRaw` из **файла** (общий код resume и переигровки ``drain``).
+
+    Вынесено из :func:`resume_retained`, чтобы второй потребитель сохранённых байтов
+    (``stored_bytes_for``: известный URL при ``--refresh drain``) не завёл вторую копию
+    правил — потолок по классу артефакта, ``stat`` до чтения, потоковый sha256,
+    ``head`` и сверка с ожидаемым ``content_hash``. Расхождение двух копий молча дало бы
+    разный допуск у resume и у переигровки.
+
+    ``None`` — файл непригоден без определённого класса отказа (нет файла, сбой чтения,
+    хеш не совпал): вызывающий идёт обычным путём. :class:`RetainedReject` — терминальный
+    отказ по границе исполнения (``payload_too_large``/``unsupported_binary``).
+    """
+    if not path.is_file():
+        return None
+    artifact = artifact_is_terminal(url, content_type, attachment_formats)
     cap = artifact_max_bytes if artifact and artifact_max_bytes is not None else max_bytes
     try:
         size = path.stat().st_size
@@ -498,14 +536,14 @@ def resume_retained(
     except OSError:
         return None
     digest = hasher.hexdigest()
-    if item.content_hash and digest != item.content_hash:
+    if content_hash and digest != content_hash:
         return None
     snapshot = bytes(head)
     buffered = None if buffer is None else bytes(buffer)
     binary_reason = unsupported_binary_reason(
         buffered if buffered is not None else snapshot,
-        url=item.url,
-        content_type=item.content_type,
+        url=url,
+        content_type=content_type,
         attachment_formats=attachment_formats,
     )
     if binary_reason is not None:
@@ -523,8 +561,72 @@ def resume_retained(
     )
 
 
+def _is_sha256_hex(text: str) -> bool:
+    """Похоже ли имя файла retention на ``sha256`` (64 hex) — тогда оно и есть хеш байтов."""
+    return len(text) == 64 and all(ch in "0123456789abcdef" for ch in text)
+
+
+def stored_bytes_for(
+    state: ProductStatePort | None,
+    product_id: str,
+    url: str,
+    *,
+    max_bytes: int | None = None,
+    artifact_max_bytes: int | None = None,
+    attachment_formats: Sequence[str] | None = None,
+) -> RetainedRaw | RetainedReject | None:
+    """Сохранённые байты известного URL — переигровка без сети (политика ``drain``).
+
+    Адрес байтов — durable-состояние, а не сеанс краула: ``url_state`` по
+    нормализованному URL → ``document_version`` → ``raw_path``. Поэтому известная
+    страница переигрывается и тогда, когда её нет в элементах **этого** сеанса
+    (``resume`` прошлого сеанса отвечает только за свой сеанс).
+
+    ``None`` — байтов нет (URL не наблюдался, у версии нет ``raw_path``, файл удалён
+    retention'ом) либо состояние недоступно: вызывающий идёт живым фетчем. Сбой чтения
+    состояния наружу **не** поднимается: деградация до живого фетча — не ошибка
+    измерения (сеть для неизвестного URL разрешена), а исключение уронило бы фазу.
+
+    Потолки и класс артефакта — те же, что у живой попытки и у resume
+    (:func:`_retained_from_path`): второй формулы допуска нет.
+    """
+    if state is None:
+        return None
+    key = _state_url_key(url)
+    if key is None:
+        return None
+    try:
+        row = state.get_url_state(product_id, key)
+        if row is None or not row.doc_version_id:
+            return None
+        version = state.get_document_version(row.doc_version_id)
+    except Exception:  # noqa: BLE001 — деградация до живого фетча, а не сбой фазы
+        return None
+    if version is None or not version.raw_path:
+        return None
+    path = Path(version.raw_path)
+    # ``document_version.content_hash`` — хеш **извлечённого текста** (ключ дедупа), а не
+    # сохранённых байтов: сверять с ним файл нельзя, иначе переигровка отказывала бы
+    # всегда. Ожидаемый хеш байтов несёт **имя** файла retention
+    # (``corpus_raw/{pid}/{raw_hash}.bin``, :func:`retain`), поэтому целостность
+    # проверяется по нему — и только когда имя действительно является sha256.
+    retained = _retained_from_path(
+        path,
+        url=row.url or url,
+        content_type=None,
+        max_bytes=max_bytes,
+        artifact_max_bytes=artifact_max_bytes,
+        attachment_formats=attachment_formats,
+    )
+    if isinstance(retained, RetainedRaw):
+        stem = path.stem.lower()
+        if _is_sha256_hex(stem) and retained.content_hash != stem:
+            return None
+    return retained
+
+
 def resume_page(
-    item: CrawlSessionItem,
+    item: CrawlSessionItem | None,
     url: str,
     retained: RetainedRaw,
     fetch_plan: FetchPlan,
@@ -542,13 +644,18 @@ def resume_page(
     ``status_code`` — из провенанса записи (``lang`` персистится, иначе свежий и
     возобновлённый прогоны расходились бы по ``corpus_docs.lang``/``corpus_chunks.lang``).
 
+    ``item is None`` — байты пришли **не** из сеанса, а из durable-состояния (переигровка
+    политики ``drain``, :func:`stored_bytes_for`): провенанса ответа нет, поэтому
+    ``lang``/``status_code``/``content_type`` — ``None`` («не наблюдалось»), а не
+    выдуманное значение; ``fetched_at`` — mtime файла.
+
     **Валидаторы (09 §6.3).** ``CrawlSessionItem`` не хранит ``ETag``/``Last-Modified``
     (колонок нет — сеанс трекает краул, а не условную валидацию), поэтому валидаторы
     приходят аргументом из ``url_state`` (durable-источник) и переносятся в ``RawPage``,
     чтобы запись состояния после resume не потеряла их. ``not_modified`` всегда ``False``:
     resume перечитывает retained-байты, серверного подтверждения ``304`` не было.
     """
-    fetched_at = item.last_attempt
+    fetched_at = item.last_attempt if item is not None else None
     if not fetched_at:
         try:
             fetched_at = _dt.datetime.fromtimestamp(
@@ -557,7 +664,7 @@ def resume_page(
         except OSError:
             fetched_at = ""
     fetch_mode = fetch_plan.fetch
-    if item.fetch_mode:
+    if item is not None and item.fetch_mode:
         try:
             fetch_mode = FetchMode(item.fetch_mode)
         except ValueError:
@@ -569,9 +676,9 @@ def resume_page(
         content=retained.data or b"",
         fetched_at=fetched_at or "",
         fetch_mode=fetch_mode,
-        lang=item.lang,
-        status_code=item.http_status,
-        content_type=item.content_type,
+        lang=None if item is None else item.lang,
+        status_code=None if item is None else item.http_status,
+        content_type=None if item is None else item.content_type,
         etag=etag,
         last_modified=last_modified,
         staged_path=None if buffered else str(retained.path),
@@ -692,6 +799,21 @@ class LocalFetch:
     #: URL нельзя (один URL может принадлежать разным корням разных прогонов).
     #: ``None`` — прогона нет либо корень не снимается (synthetic-бакет).
     capture_id: str | None = None
+    #: ``True`` — ``resume`` взят **не** из сеанса прошлого прогона, а из сохранённых
+    #: байтов по durable-состоянию (политика ``drain``). Нужен, чтобы отличить
+    #: переигровку от resume: у переигровки нет ``prior_item`` (этого URL в сеансе не
+    #: было), и коммит обязан учесть её как ``note_replayed``, а не как живой фетч.
+    from_stored_bytes: bool = False
+
+
+#: Исход локального пути: ``(page, raw_path, fetch_plan, freshly_fetched, from_stored_bytes)``.
+#:
+#: ``freshly_fetched`` — живой сетевой фетч (``True``) либо перечитывание уже сохранённых
+#: байтов (``False``). ``from_stored_bytes`` — второй признак, который отличает
+#: **переигровку** политики ``drain`` (байты из durable-состояния, не из сеанса) от
+#: resume прошлого сеанса: у переигровки нет ``prior_item``, и коммит учитывает её как
+#: ``note_replayed``, а не как живой фетч.
+LocalOutcome = tuple[RawPage, Path, FetchPlan, bool, bool]
 
 
 @dataclass(frozen=True)
@@ -2727,6 +2849,7 @@ def local_prefetch(
     artifact_max_bytes: int | None = None,
     attachment_formats: Sequence[str] | None = None,
     capture_id: str | None = None,
+    stored_bytes: Callable[[str, str], RetainedRaw | RetainedReject | None] | None = None,
 ) -> LocalFetch:
     """D4 pre-fetch (главный поток): resume/browser-guard/решение о пейсинге.
 
@@ -2745,6 +2868,14 @@ def local_prefetch(
     ``url_state`` переносятся в ``FetchPlan`` (``dataclasses.replace`` — план не
     мутируется): ``304`` экономит трафик, а трафик-нейтральный ``None`` сохраняет
     прежний безусловный GET байт-в-байт.
+
+    **Переигровка сохранённых байтов (политика ``drain``).** ``stored_bytes`` — второй
+    источник ``resume``, спрошенный **только** когда сеанс прошлого прогона ничего не дал
+    (``prior_item`` нет/непригоден). Замыкание возвращает :class:`RetainedRaw` по
+    durable-состоянию (``url_state`` → ``document_version.raw_path``) — это известная
+    страница, и её не нужно пере-запрашивать. ``None`` — байтов нет, идёт живой фетч
+    неизвестного остатка. При любой другой политике ``stored_bytes is None``, и путь
+    прежний байт-в-байт.
     """
     fetch_plan = (
         wtarget.plan
@@ -2785,6 +2916,13 @@ def local_prefetch(
         if prior_item is not None
         else None
     )
+    # Переигровка сохранённых байтов (политика ``drain``) — **второй** источник resume:
+    # спрашивается только когда сеанс прошлого прогона ничего не дал. Известная страница
+    # не пере-запрашивается; ``None`` — байтов нет, идёт живой фетч неизвестного остатка.
+    from_stored_bytes = False
+    if resume_source is None and stored_bytes is not None:
+        resume_source = stored_bytes(pid, wu)
+        from_stored_bytes = isinstance(resume_source, RetainedRaw)
     reject = (
         resume_source
         if isinstance(resume_source, RetainedReject)
@@ -2844,6 +2982,7 @@ def local_prefetch(
         # План 20 §3: снятие корня едет с дескриптором до писателя ``url_state`` —
         # другой точки, где известны и корень, и исход этого URL, нет.
         capture_id=capture_id,
+        from_stored_bytes=from_stored_bytes,
     )
 
 
@@ -2949,9 +3088,9 @@ def fetch_and_commit(
     desc: LocalFetch,
     *,
     limiter: RateLimiter,
-    commit_local: Callable[..., tuple[RawPage, Path, FetchPlan, bool] | None],
+    commit_local: Callable[..., LocalOutcome | None],
     pacing: CrawlPacing | None = None,
-) -> tuple[RawPage, Path, FetchPlan, bool] | None:
+) -> LocalOutcome | None:
     """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
 
     Используется, когда фетч **не** уходит в пул: ``max_workers in (None, 1)`` либо
@@ -2976,13 +3115,16 @@ def commit_local(
     applied_engines: dict[tuple[str, str], str | None],
     page: RawPage | None = None,
     exc: Exception | None = None,
-) -> tuple[RawPage, Path, FetchPlan, bool] | None:
+) -> LocalOutcome | None:
     """D4 post-fetch (главный поток): мутации исхода в FIFO-порядке отправки.
 
-    Возвращает ``(page, raw_path, fetch_plan, freshly_fetched)`` для последующей
-    ``ingest_one``; ``None`` — исход пропущен/сбой (терминальный ``FAILED`` уже
-    проставлен ``mark``), вызывающий делает ``continue``. ``freshly_fetched=False`` —
-    resume из retained raw (живого фетча не было; ``max_documents`` его не считает).
+    Возвращает :data:`LocalOutcome` (``page``, ``raw_path``, ``fetch_plan``,
+    ``freshly_fetched``, ``from_stored_bytes``) для последующей ``ingest_one``; ``None`` —
+    исход пропущен/сбой (терминальный ``FAILED`` уже проставлен ``mark``), вызывающий
+    делает ``continue``. ``freshly_fetched=False`` — resume из retained raw (живого фетча
+    не было; ``max_documents`` его не считает). ``from_stored_bytes=True`` — байты взяты
+    из durable-состояния политикой ``drain`` (не из сеанса этого прогона): коммит учтёт
+    это как переигровку, а не как живой фетч.
 
     ``depth`` — глубина URL в BFS-frontier (персистится в элементе сеанса). ``scope_host``
     — host seed-root, ``enforce_redirect_scope`` — включён ли жёсткий redirect-scope
@@ -3054,9 +3196,11 @@ def commit_local(
         return None
 
     if desc.resume is not None:
-        if desc.prior_item is None:
+        if desc.prior_item is None and not desc.from_stored_bytes:
             # Инвариант сборки ``LocalFetch``: resume существует только у элемента,
-            # который уже был в сеансе (иначе возобновлять нечего).
+            # который уже был в сеансе (иначе возобновлять нечего). Исключение —
+            # переигровка сохранённых байтов политики ``drain``: она адресуется
+            # durable-состоянием, а не сеансом, и ``prior_item`` у неё нет по построению.
             raise AssertionError(
                 f"{pid}/{wu}: resume без prior_item — LocalFetch собран неверно"
             )
@@ -3073,7 +3217,7 @@ def commit_local(
         # Счётчик отражает статус возобновляемого элемента (FETCHED — retryable,
         # FAILED — re-extract), а не ``pending``: он уже персистится в сеансе, и при
         # последующем сбое chunker'а URL будет посчитан как ``fetched``, а не потерян.
-        return page, raw_path, fetch_plan, False
+        return page, raw_path, fetch_plan, False, desc.from_stored_bytes
 
     # D2: браузерный рендер требует поддерживающего краулера. Проверка URL-скоупедирована
     # (а не на сборке композиции): фаза не падает, пропускается только этот URL.
@@ -3245,7 +3389,7 @@ def commit_local(
     )
     if retained_path is None:
         return None
-    return page, retained_path, fetch_plan, True
+    return page, retained_path, fetch_plan, True, False
 
 
 def process_local(
@@ -3254,8 +3398,8 @@ def process_local(
     wtarget: Any,
     *,
     local_prefetch: Callable[..., LocalFetch],
-    commit_local: Callable[..., tuple[RawPage, Path, FetchPlan, bool] | None],
-    fetch_and_commit: Callable[..., tuple[RawPage, Path, FetchPlan, bool] | None],
+    commit_local: Callable[..., LocalOutcome | None],
+    fetch_and_commit: Callable[..., LocalOutcome | None],
     depth: int | None = None,
     scope_host: str | None = None,
     enforce_redirect_scope: bool = False,
@@ -3264,7 +3408,7 @@ def process_local(
     artifact_max_bytes: int | None = None,
     attachment_formats: Sequence[str] | None = None,
     capture_id: str | None = None,
-) -> tuple[RawPage, Path, FetchPlan, bool] | None:
+) -> LocalOutcome | None:
     """Локальный per-URL путь (последовательный): pre-fetch → fetch → post-fetch (D4).
 
     Точка входа для ``max_workers in (None, 1)`` — прежний однопоточный путь (пул не

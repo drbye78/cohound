@@ -1052,6 +1052,8 @@ def build_phases(
     on_product: Callable[[str, str], None] | None = None,
     max_depth: int | None = None,
     max_documents: int | None = None,
+    drain_roots: Sequence[str] | None = None,
+    drain_max_depth: int | None = None,
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
     crawl_app: CrawlConfig | None = None,
@@ -1329,6 +1331,13 @@ def build_phases(
             override["max_depth"] = max_depth
         if max_documents is not None:
             override["max_documents"] = max_documents
+        # Дренаж корня: ``max_documents`` снимается, ``max_depth`` заменяется на
+        # ``drain_max_depth`` у названных корней (ось объявлена — состав корпуса другой,
+        # значит ``execution_change``). ``if drain_roots`` — пустой список не объявляет ось.
+        if drain_roots:
+            override["drain_roots"] = list(drain_roots)
+        if drain_max_depth is not None:
+            override["drain_max_depth"] = drain_max_depth
         if exclude_paths:
             override["exclude_paths"] = list(exclude_paths)
         if exclude_documents:

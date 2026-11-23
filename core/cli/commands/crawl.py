@@ -340,7 +340,7 @@ def _print_crawl_run(payload: dict[str, Any]) -> None:
 
 def _execute_crawl(
     args: argparse.Namespace, *, mode: str, clear_first: bool, from_scratch: bool = False
-) -> int:
+) -> tuple[int, dict[str, Any]]:
     """``crawl run|resume|restart`` под файловым локом пакета (09 §4.4).
 
     Лок берётся на всю операцию и до открытия БД прогона: две одновременные операции над
@@ -351,12 +351,25 @@ def _execute_crawl(
 
     F2 (17 §4): ``--crawl-only`` проверяется **до** лока и до открытия БД — это отказ во
     входе (несовместимый ``--until``), а не операция над пакетом.
+
+    Возвращает ``(код возврата, payload)``: печать — у вызывающего
+    (:func:`_emit_crawl_payload`). Это нужно ``hound crawl drain``: ему мало кода, он
+    адресует тот же прогон по ``payload["run_id"]``. Вторая формула ``run_id`` ради
+    этого не заводится.
     """
     _reject_crawl_only_beyond_corpus(args)
     with _package_lock(args, command=f"crawl {mode}"):
         return _execute_crawl_locked(
             args, mode=mode, clear_first=clear_first, from_scratch=from_scratch
         )
+
+
+def _emit_crawl_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    """Печать payload'а ``crawl run|resume|restart`` в выбранной форме (``--json`` ‖ текст)."""
+    if getattr(args, "json", False):
+        _print_json(payload)
+    else:
+        _print_crawl_run(payload)
 
 
 def _reject_crawl_only_beyond_corpus(args: argparse.Namespace) -> None:
@@ -386,7 +399,7 @@ def _reject_crawl_only_beyond_corpus(args: argparse.Namespace) -> None:
 
 def _execute_crawl_locked(
     args: argparse.Namespace, *, mode: str, clear_first: bool, from_scratch: bool = False
-) -> int:
+) -> tuple[int, dict[str, Any]]:
     """Общий путь ``run``/``resume``/``restart``: резолв прогона → фаза корпуса Ш5.
 
     Сеанс открывается/восстанавливается/финализируется самим ``build_corpus``; здесь
@@ -765,12 +778,8 @@ def _execute_crawl_locked(
             f"ревалидация={truncation.get('revalidation_fetched')}"
         )
         payload_notes.append(warning)
-    if args.json:
-        _print_json(payload)
-    else:
-        _print_crawl_run(payload)
     if phase_status not in ("ok", "skipped"):
-        return EXIT_ERROR
+        return EXIT_ERROR, payload
     # Phase 4: ``partial``/``failed`` сеанс (исчерпание попыток, back-pressure, любые
     # ``source_unavailable``) → :data:`EXIT_ERROR`; полный краул/без сеанса → :data:`EXIT_OK`.
     # N4: PARTIAL исключительно из-за политического усечения (сбоев фетча нет) — честно
@@ -783,39 +792,45 @@ def _execute_crawl_locked(
         CrawlSessionStatus.INTERRUPTED.value,
     ):
         if truncation_only and final_status == CrawlSessionStatus.PARTIAL.value:
-            return EXIT_OK
-        return EXIT_ERROR
-    return EXIT_OK
+            return EXIT_OK, payload
+        return EXIT_ERROR, payload
+    return EXIT_OK, payload
 
 
 def run(args: argparse.Namespace) -> int:
     """``crawl run``: запустить сеанс краула (``--reset`` очищает сеанс до старта)."""
-    return _execute_crawl(
+    code, payload = _execute_crawl(
         args,
         mode="run",
         clear_first=bool(getattr(args, "reset", False)),
         from_scratch=bool(getattr(args, "from_scratch", False)),
     )
+    _emit_crawl_payload(args, payload)
+    return code
 
 
 def resume(args: argparse.Namespace) -> int:
     """``crawl resume``: продолжить сеанс (идемпотентно; ``FETCHED`` не пере-фетчатся)."""
-    return _execute_crawl(
+    code, payload = _execute_crawl(
         args,
         mode="resume",
         clear_first=False,
         from_scratch=bool(getattr(args, "from_scratch", False)),
     )
+    _emit_crawl_payload(args, payload)
+    return code
 
 
 def restart(args: argparse.Namespace) -> int:
     """``crawl restart``: очистить сеанс и запустить заново (``--from-scratch`` — Phase 4)."""
-    return _execute_crawl(
+    code, payload = _execute_crawl(
         args,
         mode="restart",
         clear_first=True,
         from_scratch=bool(getattr(args, "from_scratch", False)),
     )
+    _emit_crawl_payload(args, payload)
+    return code
 
 
 # ---------------------------------------------------------------------------
@@ -2106,5 +2121,12 @@ def configure(sub: Any) -> None:
     p_pol_clear.set_defaults(handler=policy_clear)
 
     p_policy.set_defaults(handler=_no_policy_subcommand)
+
+    # drain: докачка усечённых корней до исчерпания + правка объявленных пределов
+    # профиля. Импорт локальный: модуль команды сам импортирует ``_execute_crawl``
+    # отсюда (иначе циклический импорт на уровне модулей).
+    from core.cli.commands.crawl_drain import configure as _configure_drain
+
+    _configure_drain(crawl)
 
     p_crawl.set_defaults(handler=_no_subcommand)

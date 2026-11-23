@@ -114,6 +114,7 @@ def finalize_session(
     effective_limits: Mapping[str, Any] | None = None,
     pages_fetched: int | None = None,
     revalidation_fetched: int | None = None,
+    pages_replayed: int | None = None,
     truncated_products: Sequence[str] | None = None,
     shard: Mapping[str, Any] | None = None,
     pacing: Mapping[str, Any] | None = None,
@@ -131,7 +132,7 @@ def finalize_session(
 
     Phase 2: в ``CrawlSession.provenance_json`` пишется компактный JSON-провенанс
     ``{engines, kinds, crawl_sources_digest, status, truncated, effective_limits,
-    pages_fetched, revalidation_fetched, pacing}``. Персистенция — через
+    pages_fetched, revalidation_fetched, pages_replayed, pacing}``. Персистенция — через
     :meth:`StorePort.set_crawl_session_provenance`
     (targeted ``UPDATE``). ``pacing`` — наблюдённый темп обхода по origin
     (:mod:`core.pipeline.crawl_pacing`); это провенанс исполнения, а не условие
@@ -168,6 +169,10 @@ def finalize_session(
         "pages_fetched": pages_fetched,
         # S1: ревалидационный трафик виден отдельно; ``pages_fetched`` остаётся discovery.
         "revalidation_fetched": revalidation_fetched,
+        # Политика ``drain``: страницы, прочитанные из сохранённых байтов (сети не было).
+        # Отдельный счётчик, потому что это ни discovery, ни ревалидация: провенанс
+        # обязан отличать «сходили» от «переиграли байты».
+        "pages_replayed": pages_replayed,
         # D1/G: продукты, чей краул усечён (для аномалии exhaustive-absence в отчёте).
         "truncated_products": sorted({str(p) for p in (truncated_products or []) if p}),
     }
@@ -265,5 +270,6 @@ def truncation_summary(provenance: Mapping[str, Any] | None) -> dict[str, Any]:
         ),
         "pages_fetched": prov.get("pages_fetched"),
         "revalidation_fetched": prov.get("revalidation_fetched"),
+        "pages_replayed": prov.get("pages_replayed"),
         "effective_limits": dict(prov.get("effective_limits") or {}),
     }

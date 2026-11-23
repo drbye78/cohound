@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import pytest
 
-from core.domain.enums import CrawlCorpusSource, FrozenSource, RefreshPolicy
+from core.domain.enums import (
+    CrawlCorpusSource,
+    FrozenSource,
+    IncrementalKind,
+    RefreshPolicy,
+)
 from core.pipeline.digests import EXECUTION_CONTRACT_FIELDS, execution_contract_digest
 from core.pipeline.refresh_modes import (
     _FROZEN_SOURCE_TO_CORPUS,
@@ -120,3 +125,32 @@ def test_contract_digest_changes_for_frozen_but_not_for_inactive_axis() -> None:
     frozen_chunks = contract(canonical_frozen_source(RefreshPolicy.FROZEN, "chunks"))
     assert execution_contract_digest(frozen_bytes) != execution_contract_digest(base)
     assert execution_contract_digest(frozen_chunks) != execution_contract_digest(frozen_bytes)
+
+
+def test_drain_allows_network_but_reuses_known_pages_from_bytes() -> None:
+    """``drain``: сеть разрешена, известная страница переигрывается из байтов.
+
+    Три факта, каждый из которых отличает ``drain`` от соседей:
+
+    * ``network``/``discovery`` — ``True``: неизвестный остаток докачивается живьём
+      (иначе это ``offline``/``frozen``, где сети нет вовсе);
+    * ``known_kind = reuse`` — известный URL не пере-запрашивается (иначе это
+      ``revalidate``, где каждый известный URL стоит запроса);
+    * ``validators = False`` — условный GET сам является запросом к известному URL,
+      поэтому при переигровке из байтов он не отправляется;
+    * ``corpus_source = bytes`` — носитель известных страниц это ``corpus_raw``, а не
+      чанки (иначе смена чанкера на старом корпусе была бы неизмерима, как у ``offline``).
+    """
+    execution = dispatch_refresh(RefreshPolicy.DRAIN)
+    assert execution.network is True
+    assert execution.discovery is True
+    assert execution.known_kind is IncrementalKind.REUSE
+    assert execution.validators is False
+    assert execution.corpus_source is CrawlCorpusSource.BYTES
+
+    # ``frozen`` — тот же носитель, но сети нет: различие названо, а не подразумевается.
+    frozen = dispatch_refresh(RefreshPolicy.FROZEN)
+    assert frozen.corpus_source is execution.corpus_source
+    assert frozen.network is False
+    # ``revalidate`` — та же сеть, но известные URL пере-запрашиваются.
+    assert dispatch_refresh(RefreshPolicy.REVALIDATE).known_kind is not IncrementalKind.REUSE

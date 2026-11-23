@@ -61,6 +61,7 @@ from core.pipeline.corpus_index import (
 from core.pipeline.corpus_ingest import (
     _SUBMIT_MAX_ATTEMPTS,
     _work_set_idempotency_key,
+    stored_bytes_for,
 )
 from core.pipeline.crawl_frontier import CrawlLimits
 from core.pipeline.crawl_session import default_session_id, truncation_summary
@@ -1834,6 +1835,141 @@ def test_resume_from_retained_raw_skips_refetch(tmp_path: Path) -> None:
         assert session is not None and session.status is CrawlSessionStatus.COMPLETED
     finally:
         store.close()
+
+
+def test_stored_bytes_for_without_state_or_known_url_is_none() -> None:
+    """``stored_bytes_for`` деградирует до живого фетча, а не падает (политика ``drain``).
+
+    Три «нет байтов» — отсутствие состояния, неизвестный URL и (в интеграционном тесте
+    ниже) удалённый файл. Все три обязаны вернуть ``None``: вызывающий идёт обычным
+    путём, и это не ошибка измерения — сеть для неизвестного URL разрешена.
+    """
+    assert stored_bytes_for(None, "p1", URL_P1_A) is None
+    with SqliteStateStore(":memory:") as state:
+        assert stored_bytes_for(state, "p1", URL_P1_A) is None
+
+
+def test_drain_replays_known_page_from_stored_bytes(tmp_path: Path) -> None:
+    """``--refresh drain``: известная страница переигрывается из байтов, сети нет.
+
+    Отличие от resume (``test_resume_from_retained_raw_skips_refetch``) в адресе:
+    элемента сеанса **этого** прогона нет (новый ``run_id`` → новая БД прогона и новый
+    сеанс), а байты находятся по durable-состоянию
+    (``url_state`` → ``document_version.raw_path``). Поэтому ``_BombCrawler`` обязан
+    не вызываться, документ — появиться, а провенанс сеанса — назвать переигровку
+    отдельным счётчиком (``pages_replayed``), а не живым ``pages_fetched``.
+    """
+    with SqliteStateStore(":memory:") as state:
+        first_store = SqliteStore(":memory:")
+        _make_run(first_store)
+        try:
+            first = _build(
+                tmp_path,
+                pages={URL_P1_A: b"replayed bytes"},
+                urls={"p1": [URL_P1_A]},
+                store=first_store,
+                run_id=RUN_ID,
+                state=state,
+            )
+            assert _build_of(first).chunk_count == 1
+        finally:
+            first_store.close()
+
+        drain_run = "run-drain"
+        second_store = SqliteStore(":memory:")
+        _make_run(second_store, run_id=drain_run)
+        try:
+            second = _build(
+                tmp_path,
+                pages={},
+                urls={"p1": [URL_P1_A]},
+                crawler=_BombCrawler({}),
+                store=second_store,
+                run_id=drain_run,
+                state=state,
+                refresh_policy="drain",
+                crawl_defaults=CrawlRunConfig(drain_roots=["docs.test"]),
+            )
+            build = _build_of(second)
+            assert second.errors == []
+            assert build.chunk_count == 1
+            assert next(iter(second_store.iter_corpus_docs(drain_run))).content_hash == (
+                content_hash(b"replayed bytes")
+            )
+            # Провенанс: страница переиграна из байтов, живым фетчем не считается.
+            session = second_store.get_crawl_session(default_session_id(drain_run))
+            assert session is not None
+            provenance = json.loads(session.provenance_json or "{}")
+            assert provenance["pages_replayed"] == 1
+            assert provenance["pages_fetched"] == 0
+            roots = provenance["effective_limits"]["roots"]
+            assert [record["replayed"] for record in roots] == [1]
+            # I2d: переигранный корень наблюдал пространство (байты те же) — снятие
+            # обязано удостоверить исчерпание, иначе ``bounded``-отсутствие стало бы
+            # недоказуемым из-за отсутствия сети в этом прогоне.
+            coverage = second_store.read_corpus_coverage(drain_run, "p1")
+            assert coverage is not None and coverage.complete is True
+        finally:
+            second_store.close()
+
+
+def test_drain_falls_back_to_live_fetch_when_bytes_are_gone(tmp_path: Path) -> None:
+    """``drain`` без сохранённых байтов идёт живым фетчем, а не отказывает.
+
+    Байты могли быть удалены retention'ом — это не ошибка измерения: политика
+    разрешает сеть для **неизвестного** остатка, а «файла нет» делает страницу
+    неизвестной. Тихого пропуска быть не должно: документ обязан появиться, и он
+    обязан быть **свежим** (``pages_fetched``, не ``pages_replayed``).
+    """
+    with SqliteStateStore(":memory:") as state:
+        first_store = SqliteStore(":memory:")
+        _make_run(first_store)
+        try:
+            first = _build(
+                tmp_path,
+                pages={URL_P1_A: b"old bytes"},
+                urls={"p1": [URL_P1_A]},
+                store=first_store,
+                run_id=RUN_ID,
+                state=state,
+            )
+            assert _build_of(first).chunk_count == 1
+        finally:
+            first_store.close()
+        # Retention удалил байты: адрес есть, файла нет.
+        removed = list(Path(tmp_path).rglob("*.bin"))
+        assert removed
+        for path in removed:
+            path.unlink()
+
+        drain_run = "run-drain-missing"
+        second_store = SqliteStore(":memory:")
+        _make_run(second_store, run_id=drain_run)
+        crawler = _Crawler({URL_P1_A: b"fresh bytes"})
+        try:
+            second = _build(
+                tmp_path,
+                pages={URL_P1_A: b"fresh bytes"},
+                urls={"p1": [URL_P1_A]},
+                crawler=crawler,
+                store=second_store,
+                run_id=drain_run,
+                state=state,
+                refresh_policy="drain",
+                crawl_defaults=CrawlRunConfig(drain_roots=["docs.test"]),
+            )
+            assert second.errors == []
+            assert [url for url, _plan in crawler.calls] == [URL_P1_A]
+            assert next(iter(second_store.iter_corpus_docs(drain_run))).content_hash == (
+                content_hash(b"fresh bytes")
+            )
+            session = second_store.get_crawl_session(default_session_id(drain_run))
+            assert session is not None
+            provenance = json.loads(session.provenance_json or "{}")
+            assert provenance["pages_fetched"] == 1
+            assert provenance["pages_replayed"] == 0
+        finally:
+            second_store.close()
 
 
 def test_crawl_failure_records_failed_source_unavailable(tmp_path: Path) -> None:

@@ -2648,6 +2648,8 @@ def _resolve_phases(
     on_product: Callable[[str, str], None] | None = None,
     max_depth: int | None = None,
     max_documents: int | None = None,
+    drain_roots: Sequence[str] | None = None,
+    drain_max_depth: int | None = None,
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
     document_level: DocumentLevel | None = None,
@@ -2880,6 +2882,20 @@ def _resolve_phases(
         # run-слой CrawlRunConfig) и application-слой (deploy.yaml:crawl).
         "max_depth": max_depth,
         "max_documents": max_documents,
+        # Оси дренажа корня. Читаются из ``args``, если вызывающий их не передал: ``crawl
+        # run`` строит фазы этой же функцией и объявляет те же флаги (``_add_phase4_flags``),
+        # поэтому «объявлено в ``run_id``, но не исполнено» было бы ровно тем дефектом, от
+        # которого защищает инвентарь осей. ``run`` передаёт их явно (как ``max_depth``).
+        "drain_roots": (
+            list(drain_roots)
+            if drain_roots is not None
+            else getattr(args, "drain_roots", None)
+        ),
+        "drain_max_depth": (
+            drain_max_depth
+            if drain_max_depth is not None
+            else getattr(args, "drain_max_depth", None)
+        ),
         "exclude_paths": list(exclude_paths) if exclude_paths else None,
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
         # F1/F6 (17 §4, §4.3): оси краула, объявленные оператором, обязаны доезжать до Ш5
@@ -3626,6 +3642,32 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
             "предел бэклога конверсии в МБ retained-файлов очереди: при достижении "
             "приём приостанавливается и публикуется crawl_backpressure (дефолт: предел "
             "не объявлен; ось входит в run_id при объявлении)"
+        ),
+    )
+    # Дренаж корня (та же форма, что у ``plan``: ``add_crawl_axis_flags``):
+    # ``max_documents`` снимается, ``max_depth`` заменяется на ``drain_max_depth``,
+    # известные страницы читаются из сохранённых байтов (``--refresh drain``).
+    parser.add_argument(
+        "--drain-root",
+        dest="drain_roots",
+        action="append",
+        default=None,
+        metavar="HOST[/PATH]",
+        help=(
+            "корень докачивается до исчерпания: max_documents снимается, известные "
+            "страницы читаются из сохранённых байтов (--refresh drain); host или "
+            "host/path, повторяемый (ось входит в run_id при объявлении)"
+        ),
+    )
+    parser.add_argument(
+        "--drain-max-depth",
+        dest="drain_max_depth",
+        type=_non_negative_int,
+        default=None,
+        metavar="D",
+        help=(
+            "глубина BFS для корней --drain-root (дефолт: объявленная --max-depth; "
+            "ось входит в run_id при объявлении)"
         ),
     )
     # План 19 §5/P2: ручной запрос обновления — тот же регистратор, что у ``plan``:

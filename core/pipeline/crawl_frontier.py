@@ -381,6 +381,15 @@ class CrawlLimits:
     #: ``deploy.yaml:crawl.robots``); ``None`` на всех слоях = автодетект — robots включён
     #: ровно при обходе ссылок (``max_depth > 0``) или наличии per-site ``sitemap``.
     robots: bool = False
+    #: Операторская ось **дренажа корня**: этот корень докачивается до исчерпания
+    #: источников — ``max_documents`` снят, ``max_depth`` заменён на
+    #: :attr:`drain_max_depth`. ``True`` только у корня, названного
+    #: ``run.yaml:crawl.drain_roots`` (или флагом ``--drain-root``); у остальных корней
+    #: поля остаются дефолтными, и ``as_dict`` их **не** публикует.
+    drain: bool = False
+    #: Эффективная глубина дренажа (``None`` — ось ``drain_max_depth`` не объявлена:
+    #: остаётся объявленная ``max_depth``). Публикуется только вместе с ``drain``.
+    drain_max_depth: int | None = None
 
     def pdf_limits(self) -> PdfLimits | None:
         """Лимиты PDF в форме, которую принимает извлечение (D9, план 26).
@@ -537,6 +546,14 @@ class CrawlLimits:
             )
         if self.archive_descent_explicit:
             payload["archive_descent"] = self.archive_descent.value
+        # Ось дренажа корня — **только когда она действует** у этого корня. Иначе ключ
+        # появился бы у каждого прогона, объявившего ``drain_roots`` для чужого корня, и
+        # ``crawl_config_digest``/``run_id`` сдвинулись бы без изменения измерения (§13).
+        # Значение пишется как ``True`` (не как список корней): ``CrawlLimits`` — оси
+        # **одного** корня, а перечисление корней уже описало бы второй вход.
+        if self.drain:
+            payload["drain"] = True
+            payload["drain_max_depth"] = self.drain_max_depth
         return payload
 
 
@@ -999,6 +1016,22 @@ def resolve_crawl_limits(
     )
     max_depth = _pick(app.max_depth, run_max_depth, site_max_depth)
     effective_max_depth = 0 if max_depth is None else int(max_depth)
+    # Ось **дренажа корня** (``run.yaml:crawl.drain_roots`` / ``--drain-root``): у
+    # названного корня потолок ``max_documents`` снимается, а ``max_depth`` заменяется на
+    # ``drain_max_depth``. App-слоя у оси нет (это операторское решение о конкретном
+    # корне, а не свойство машины), поэтому цепочка — ``run`` с ``None`` на месте app.
+    # Порядок важен: ``robots`` ниже выводится из **эффективной** глубины, и дренаж с
+    # ``drain_max_depth > 0`` обязан включить гейт ``robots.txt`` — иначе обход пошёл бы
+    # по ссылкам без объявленной границы сайта.
+    run_drain_roots = getattr(run, "drain_roots", None) if run is not None else None
+    run_drain_max_depth = (
+        getattr(run, "drain_max_depth", None) if run is not None else None
+    )
+    drain_roots = run_drain_roots
+    drain_max_depth = run_drain_max_depth
+    drain = _matches_drain_root(url, drain_roots)
+    if drain and drain_max_depth is not None:
+        effective_max_depth = int(drain_max_depth)
     # D1/§10: egress-политика ``robots.txt``. Поле несёт только app-слой
     # (``deploy.yaml:crawl.robots``), поэтому цепочка app < run < site сводится к app;
     # ``getattr`` с дефолтом оставляет место для будущих слоёв без второй формулы.
@@ -1018,6 +1051,10 @@ def resolve_crawl_limits(
     max_documents = _pick(
         app.max_documents, run_max_documents, site_max_documents
     )
+    if drain:
+        # Дренаж корня — «докачать до исчерпания источников»: объявленный потолок
+        # ``max_documents`` у этого корня не действует (он и был причиной усечения).
+        max_documents = None
     revalidate_max_documents = _pick(
         getattr(app, "revalidate_max_documents", None),
         run_revalidate_max_documents,
@@ -1235,6 +1272,10 @@ def resolve_crawl_limits(
         ),
         max_depth=effective_max_depth,
         robots=robots,
+        # Ось дренажа — только у названного корня; у остальных дефолты (``as_dict``
+        # их не публикует, поэтому ``run_id`` прежних прогонов не сдвигается).
+        drain=drain,
+        drain_max_depth=drain_max_depth if drain else None,
         max_documents=(
             None if max_documents is None else int(max_documents)
         ),
@@ -1324,6 +1365,50 @@ def _path_within(url_path: str, prefix: str) -> bool:
     if not prefix:
         return True
     return url_path == prefix or url_path.startswith(prefix + "/")
+
+
+def _matches_drain_root(url: str, entries: Sequence[str] | None) -> bool:
+    """Назван ли ``url`` одним из корней дренажа (``drain_roots``).
+
+    Форма записи — ключ ``domain_profiles.yaml``: ``host`` либо ``host/path``.
+
+    * пусто/``None`` → ``False`` (ось не объявлена — поведение байт-в-байт);
+    * запись без пути — **host-wide**: под неё попадает любой URL этого host'а;
+    * host сравнивается с ``www.``-эквивалентностью (:func:`normalize_scope_host`):
+      оператор пишет ``example.org``, а ссылки ведут на ``www.example.org``;
+    * путь — префикс **на границе сегмента** (``/docs`` не матчит ``/docs-old``);
+    * поддомен **не наследует** запись: ``docs.example.org`` не входит в
+      ``example.org`` — это ровно та семантика, которую имеет ключ профиля, и
+      расширять её значило бы дать одной записи право на чужой хост.
+
+    Запись разбирается как URL без схемы (``urlsplit("//" + entry)``): так ``host:port``
+    и ``host/path`` читаются одной функцией, а не регуляркой.
+    """
+    if not entries:
+        return False
+    parsed_url = urlsplit(url)
+    host = normalize_scope_host(parsed_url.hostname or "")
+    if not host:
+        return False
+    url_path = decoded_scope_path(parsed_url.path or "/")
+    if url_path is None:
+        return False
+    for raw in entries:
+        entry = str(raw or "").strip()
+        if not entry:
+            continue
+        # Схему в записи не ждём, но и не ломаемся, если оператор её написал.
+        candidate = entry if "//" in entry else f"//{entry}"
+        parsed_entry = urlsplit(candidate)
+        entry_host = normalize_scope_host(parsed_entry.hostname or "")
+        if not entry_host or entry_host != host:
+            continue
+        prefix = (parsed_entry.path or "").rstrip("/")
+        if not prefix:
+            return True
+        if _path_within(url_path, prefix):
+            return True
+    return False
 
 
 def decoded_scope_path(path: str) -> str | None:
@@ -1442,6 +1527,11 @@ class Frontier:
         #: Фактически добытые ревалидационные страницы (не 304/reuse): отдельный
         #: счётчик, потому что ``fetched``/``pages_fetched`` остаются discovery-only.
         self.revalidation_fetched = 0
+        #: Страницы, прочитанные **из сохранённых байтов** (политика ``drain``): сети не
+        #: было, но пространство корня они наблюдали — прошлым циклом, байты те же.
+        #: Поэтому ``replayed`` входит в ``observed`` снятия (``_record_capture``), но
+        #: **не** в ``fetched``: ``max_documents`` он не расходует.
+        self.replayed = 0
         self.truncated = False
         self.truncated_reason: str | None = None
         #: План 20 §3: начало дренажа этого корня (ставит ``root_lifecycle``; ``None`` —
@@ -1682,6 +1772,15 @@ class Frontier:
     def note_fetched(self) -> None:
         """Учесть успешно добытую (retained) страницу этого корня."""
         self.fetched += 1
+
+    def note_replayed(self) -> None:
+        """Учесть страницу, прочитанную из сохранённых байтов (политика ``drain``).
+
+        Пространство корня она **наблюдала** — прошлым циклом, но байты те же, поэтому
+        в ``observed`` снятия (``_record_capture``) входит. Сети при этом не было:
+        ``fetched``/``revalidation_fetched`` не растут, ``max_documents`` не расходуется.
+        """
+        self.replayed += 1
 
     def note_robots_refusal(self, url: str) -> None:
         """План 20 §3: учесть отказ ``robots.txt`` в этом корне (провенанс, не неполнота).

@@ -181,6 +181,9 @@ def record_root_outcome(
     """
     counters.pages_fetched_total += frontier.fetched
     counters.revalidation_fetched_total += frontier.revalidation_fetched
+    # Политика ``drain``: переигранные из сохранённых байтов страницы — отдельный итог
+    # сеанса (``pages_replayed``). В ``pages_fetched`` они не входят: сети не было.
+    counters.replayed_total += frontier.replayed
     if frontier.truncated:
         truncated_products.add(product_id)
     # P5: пропуск документов «прореживает» корпус продукта по построению — он
@@ -193,6 +196,10 @@ def record_root_outcome(
         "product_id": product_id,
         "root": root_url,
         "pages_fetched": frontier.fetched,
+        # Политика ``drain``: сколько страниц корня прочитано из сохранённых байтов (сети
+        # не было). Ключ безусловный: это провенанс корня, а не ось, и ноль здесь —
+        # объявленный факт («переигровки не было»), а не отсутствие поля.
+        "replayed": frontier.replayed,
         "truncated": frontier.truncated,
         "truncated_reason": frontier.truncated_reason,
         "limits": frontier.limits.as_dict(),
@@ -380,6 +387,10 @@ def finalize_crawl_session(
             effective_limits={"roots": truncation_records},
             pages_fetched=counters.pages_fetched_total,
             revalidation_fetched=counters.revalidation_fetched_total,
+            # Политика ``drain``: страницы, прочитанные из сохранённых байтов (сети не
+            # было). Отдельно от ``pages_fetched`` — иначе переигровка выглядела бы
+            # живым обходом, а «ноль сети» нельзя было бы прочитать из провенанса.
+            pages_replayed=counters.replayed_total,
             truncated_products=sorted(truncated_products),
             # Прибор темпа: провенанс исполнения, не условие измерения.
             pacing=pacing_block,

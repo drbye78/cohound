@@ -25,6 +25,7 @@ from core.pipeline.crawl_frontier import (
     DUPLICATE_FORM_EXAMPLES_MAX,
     CrawlLimits,
     Frontier,
+    _matches_drain_root,
     blacklist_match,
     is_blacklisted,
     resolve_crawl_limits,
@@ -1251,3 +1252,163 @@ def test_pdf_limits_reject_non_positive_values() -> None:
         CrawlRunConfig(pdf_max_pages=0)
     with pytest.raises(ValidationError):
         ProductCrawlAxes(pdf_max_extracted_chars=0)
+
+
+# --------------------------------------------------------------------------- #
+# (g3) Ось дренажа корня: ``drain_roots``/``drain_max_depth``
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("url", "entries", "expected"),
+    [
+        # host-wide: запись без пути покрывает весь host
+        ("https://docs.example.org/a/b", ["docs.example.org"], True),
+        ("https://docs.example.org/", ["docs.example.org"], True),
+        # ``www.`` эквивалентен базовому host'у — в обе стороны
+        ("https://www.docs.example.org/a", ["docs.example.org"], True),
+        ("https://docs.example.org/a", ["www.docs.example.org"], True),
+        # path-префикс — на границе сегмента: ``/docs`` не матчит ``/docs-old``
+        ("https://docs.example.org/docs/a", ["docs.example.org/docs"], True),
+        ("https://docs.example.org/docs", ["docs.example.org/docs"], True),
+        ("https://docs.example.org/docs-old/a", ["docs.example.org/docs"], False),
+        # чужой host и поддомен — **не** наследуют запись (только точный host)
+        ("https://other.example.org/docs/a", ["docs.example.org"], False),
+        ("https://sub.docs.example.org/docs/a", ["docs.example.org"], False),
+        # пусто/``None`` — ось не объявлена
+        ("https://docs.example.org/a", None, False),
+        ("https://docs.example.org/a", [], False),
+        ("https://docs.example.org/a", ["", "  "], False),
+    ],
+)
+def test_matches_drain_root(
+    url: str, entries: list[str] | None, expected: bool
+) -> None:
+    """Сопоставление записи ``drain_roots`` с адресом: host-wide, путь по границе, ``www.``.
+
+    Семантика — форма ключа ``domain_profiles.yaml``: ``host`` покрывает весь host,
+    ``host/path`` — префикс **на границе сегмента**. Поддомен запись не наследует: это
+    ровно та семантика, которую имеет ключ профиля, и расширять её значило бы дать одной
+    записи право на чужой хост.
+    """
+    assert _matches_drain_root(url, entries) is expected
+
+
+def test_drain_root_removes_document_cap_and_replaces_depth() -> None:
+    """Для названного корня: ``max_documents`` снят, ``max_depth`` заменён.
+
+    Проверяется **поведение резолвера**, а не флаг: у дренируемого корня потолок,
+    который и был причиной усечения, не действует; глубина берётся из
+    ``drain_max_depth``. Соседний корень остаётся под прежними осями — иначе ось
+    «докачать этот корень» молча переписала бы измерение всей когорты.
+    """
+    run = CrawlRunConfig(
+        max_depth=1,
+        max_documents=50,
+        drain_roots=["docs.example.org/docs"],
+        drain_max_depth=4,
+    )
+    drained = resolve_crawl_limits(
+        "https://docs.example.org/docs/a", app=APP, run=run
+    )
+    assert drained.drain is True
+    assert drained.max_documents is None
+    assert drained.max_depth == 4
+    # ``robots`` выводится из **эффективной** глубины: обход по ссылкам обязан
+    # уважать объявленную границу сайта.
+    assert drained.robots is True
+
+    neighbour = resolve_crawl_limits(
+        "https://docs.example.org/other/a", app=APP, run=run
+    )
+    assert neighbour.drain is False
+    assert neighbour.max_documents == 50
+    assert neighbour.max_depth == 1
+
+
+def test_drain_depth_zero_keeps_robots_gate_off() -> None:
+    """Дренаж на глубину 0 не включает ``robots``: обхода ссылок нет, границы нет.
+
+    Обратная сторона предыдущей проверки: ``robots`` выводится из **эффективной**
+    глубины, поэтому ``drain_max_depth=0`` обязан дать тот же автодетект, что и обычный
+    ``max_depth=0`` — иначе дренаж менял бы ещё одну ось измерения «попутно».
+    """
+    run = CrawlRunConfig(max_depth=0, drain_roots=["docs.example.org"], drain_max_depth=0)
+    limits = resolve_crawl_limits("https://docs.example.org/a", app=APP, run=run)
+    assert limits.drain is True
+    assert limits.max_depth == 0
+    assert limits.robots is False
+
+
+def test_drain_without_declared_depth_keeps_declared_max_depth() -> None:
+    """``drain_max_depth`` не объявлен ⇒ глубина остаётся объявленной ``max_depth``.
+
+    Иначе «снять потолок документов» молча меняло бы ещё и глубину — два изменения
+    измерения одним флагом.
+    """
+    run = CrawlRunConfig(max_depth=2, drain_roots=["docs.example.org"])
+    limits = resolve_crawl_limits("https://docs.example.org/a", app=APP, run=run)
+    assert limits.drain is True
+    assert limits.max_depth == 2
+    assert limits.max_documents is None
+    assert limits.drain_max_depth is None
+
+
+def test_drain_keys_enter_as_dict_only_for_the_drained_root() -> None:
+    """``as_dict`` публикует ось **только у дренируемого корня** (§13).
+
+    Ключ у каждого прогона сдвинул бы ``crawl_config_digest``/``run_id`` прогонов, чьё
+    измерение не изменилось; отсутствие ключа у дренируемого скрыло бы смену состава
+    корпуса.
+    """
+    run = CrawlRunConfig(drain_roots=["docs.example.org"], drain_max_depth=3)
+    drained = resolve_crawl_limits("https://docs.example.org/a", app=APP, run=run)
+    assert drained.as_dict()["drain"] is True
+    assert drained.as_dict()["drain_max_depth"] == 3
+
+    plain = resolve_crawl_limits("https://other.example.org/a", app=APP, run=run)
+    assert "drain" not in plain.as_dict()
+    assert "drain_max_depth" not in plain.as_dict()
+
+    # Прогон без объявленной оси — словарь байт-в-байт прежний.
+    legacy = resolve_crawl_limits("https://docs.example.org/a", app=APP)
+    assert "drain" not in legacy.as_dict()
+
+
+def test_drain_axis_is_declared_input_not_a_tuning_knob() -> None:
+    """Объявленная ось меняет ``crawl_config_digest``; её отсутствие — не меняет.
+
+    Дренаж меняет **состав корпуса** (потолок документов и глубина), то есть условие
+    измерения: два разных корпуса не имеют права жить под одним ``run_id``.
+    """
+    from core.pipeline.report import crawl_control_digest
+
+    base = crawl_control_digest(run_crawl=CrawlRunConfig(), app=APP, profiles=None)
+    declared = crawl_control_digest(
+        run_crawl=CrawlRunConfig(drain_roots=["docs.example.org"]),
+        app=APP,
+        profiles=None,
+    )
+    assert declared != base
+    # Порядок записей — не идентичность: сортировка в дайджесте.
+    reordered = crawl_control_digest(
+        run_crawl=CrawlRunConfig(
+            drain_roots=["b.example.org", "a.example.org"]
+        ),
+        app=APP,
+        profiles=None,
+    )
+    same_set = crawl_control_digest(
+        run_crawl=CrawlRunConfig(
+            drain_roots=["a.example.org", "b.example.org"]
+        ),
+        app=APP,
+        profiles=None,
+    )
+    assert reordered == same_set
+    # Глубина без корней дренировать нечего — состав корпуса не меняется, значит и
+    # идентичность: пустая правка не даёт ``execution_change`` (§6.1).
+    depth_only = crawl_control_digest(
+        run_crawl=CrawlRunConfig(drain_max_depth=6), app=APP, profiles=None
+    )
+    assert depth_only == base

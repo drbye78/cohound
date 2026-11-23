@@ -726,6 +726,9 @@ refresh_policy:
   # План 19 §P3: ноль запросов, корпус из corpus_raw (bytes — пере-извлечение текущим
   # стеком, chunks — поведение offline). Операционное перечисление.
   - frozen
+  # Сеть только для неизвестных URL: известные страницы читаются из сохранённых байтов
+  # (corpus_raw через state.db), BFS идёт обычным путём от seed. Операционное.
+  - drain
 product_scope:
   - full
   - product_only

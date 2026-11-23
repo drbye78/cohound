@@ -58,6 +58,10 @@ class RefreshExecution:
         кроме сети, и план не должен обещать фетч.
     :param known_kind: что делается с **известными** URL (``url_state``):
         ``revalidate`` — условный GET, ``reuse`` — переиспользование durable-субстрата.
+        ``reuse`` у ``offline``/``frozen`` означает «сеть не трогается вовсе», а у
+        ``drain`` — «сеть трогается только для URL **без** сохранённых байтов»: известная
+        страница переигрывается из ``corpus_raw``, живьём фетчится лишь неизвестный
+        остаток.
     :param validators: отправлять ли ``ETag``/``Last-Modified``. ``refresh`` обязан
         получить свежий ответ, поэтому валидаторы не отправляются даже при известном URL;
         ``offline``/``frozen`` не отправляют ничего, потому что сети нет.
@@ -113,6 +117,16 @@ _REFRESH_DISPATCH: Mapping[RefreshPolicy, RefreshExecution] = {
     RefreshPolicy.FROZEN: RefreshExecution(
         network=False,
         discovery=False,
+        known_kind=IncrementalKind.REUSE,
+        validators=False,
+        corpus_source=CrawlCorpusSource.BYTES,
+    ),
+    # ``drain``: сеть разрешена, но известные страницы не пере-запрашиваются — они
+    # читаются из сохранённых байтов (:func:`core.pipeline.corpus_ingest.stored_bytes_for`),
+    # поэтому ``validators`` не нужны: условный GET — это запрос к известному URL.
+    RefreshPolicy.DRAIN: RefreshExecution(
+        network=True,
+        discovery=True,
         known_kind=IncrementalKind.REUSE,
         validators=False,
         corpus_source=CrawlCorpusSource.BYTES,

@@ -2257,6 +2257,10 @@ def _build_corpus(
     execution = dispatch_refresh(policy, frozen_source=frozen_source)
     offline = policy is RefreshPolicy.OFFLINE
     frozen = policy is RefreshPolicy.FROZEN
+    #: Политика ``drain``: сеть разрешена, но известные страницы читаются из сохранённых
+    #: байтов. Группы ревалидации под неё **не** строятся (см. ниже): известные URL
+    #: приходят обычным BFS от seed — с верной глубиной, а не depth-0 листьями.
+    drain = policy is RefreshPolicy.DRAIN
     #: Ни одного сетевого вызова: и `offline`, и `frozen`. Имя говорит **факт**, а не
     #: значение политики: от него зависят SERP-контур, авторские корни и покрытие.
     no_network = not execution.network
@@ -2691,6 +2695,17 @@ def _build_corpus(
         crawlers=crawlers,
         items=items,
         raw_root_path=raw_root_path,
+    )
+    #: Политика ``drain``: известная страница переигрывается из сохранённых байтов
+    #: (``url_state`` → ``document_version.raw_path``) вместо запроса в сеть. Фабрика
+    #: связывается с durable-состоянием здесь, а потолки корня добавляет
+    #: ``corpus_drain.root_lifecycle`` (они резолвятся per-root, а не на фазу).
+    #: ``None`` при любой другой политике **и** без состояния: тогда
+    #: ``local_prefetch`` не получает второго источника resume, и путь байт-в-байт прежний.
+    _stored_bytes_factory = (
+        partial(corpus_ingest.stored_bytes_for, state)
+        if drain and state is not None
+        else None
     )
     _process_local = partial(
         corpus_ingest.process_local,
@@ -3151,6 +3166,11 @@ def _build_corpus(
         # применяется там, где документ извлекается: у продуктового потребителя очереди
         # (:func:`_limits_for` на границе продукта) и у проходов без сети.
         limits_for=_limits_for_url,
+        # Политика ``drain``: переигровка известных страниц из сохранённых байтов.
+        # Фабрика связана с durable-состоянием; потолки корня добавляет
+        # ``root_lifecycle`` (они резолвятся per-root). При любой другой политике —
+        # ``None``: путь прежний байт-в-байт.
+        stored_bytes_for=_stored_bytes_factory,
     )
     #: F5: фазовый носитель потребителя очереди. Пул/кэш/экстрактор — те же объекты, что
     #: у фазы: второй экземпляр конвертера означал бы второй ``extractor_version``.
@@ -3291,6 +3311,7 @@ def _build_corpus(
             kind = plan.synthetic_kind or "synthetic"
             ctx.synthetic[(kind, plan.root_url)] = outcome.frontier
             counters.revalidation_fetched_total += outcome.frontier.revalidation_fetched
+            counters.replayed_total += outcome.frontier.replayed
             return
         corpus_commit.finalize_root(
             ctx.product_id,
@@ -3351,9 +3372,13 @@ def _build_corpus(
         # Наблюдалось ли пространство корня: прочитанная страница (discovery или
         # ревалидация) либо отказ по объявленной границе сайта. Ноль и того, и другого —
         # корень не читался, и ``complete=1`` удостоверил бы исчерпание того, чего не
-        # видели (``_root_capture_complete``).
+        # видели (``_root_capture_complete``). ``replayed`` — страница политики ``drain``,
+        # прочитанная из сохранённых байтов: сети в этом прогоне не было, но пространство
+        # корня она наблюдала (прошлым циклом, байты те же), поэтому входит в
+        # ``observed`` — иначе целиком переигранный корень перестал бы удостоверять
+        # отсутствие по I2d.
         observed = (
-            frontier.fetched + frontier.revalidation_fetched > 0
+            frontier.fetched + frontier.revalidation_fetched + frontier.replayed > 0
             or bool(frontier.robots_refused_urls)
         )
         capture = CaptureRow(
@@ -3843,7 +3868,11 @@ def _build_corpus(
         #: не-incremental/``offline`` ⇒ пусто: grouping — no-op (байт-в-байт). Под
         #: ``offline`` группировка не нужна: она адресует ревалидационные бакеты дренажа,
         #: а дренажа в этой политике нет — известные URL уже разрешены выше.
-        if incremental_items and not no_network:
+        #: Под ``drain`` группы тоже не строятся: известные URL поехали бы отдельными
+        #: depth-0 элементами и исказили бы глубину. Там известная страница приходит
+        #: обычным BFS от seed и переигрывается из сохранённых байтов
+        #: (``corpus_ingest.stored_bytes_for``), а не пере-запрашивается.
+        if incremental_items and not no_network and not drain:
             all_revalidation_groups, all_orphan_buckets = (
                 _group_revalidation_items(
                     product_id, product_roots, incremental_items
@@ -3865,11 +3894,14 @@ def _build_corpus(
         # План 19 §P5: под политикой без сети ревалидации нет вовсе — потолок нечего
         # ограничивать, а его применение усекло бы work-set переиспользования и
         # записало бы defer хвоста, которого не было.
+        # Под ``drain`` — по той же причине: бакетов ревалидации нет (известные URL идут
+        # обычным BFS и переигрываются из байтов), поэтому потолку нечего ограничивать.
         cap_applies = bool(
             revalidate_cap is not None
             and incremental_items
             and len(incremental_items) > revalidate_cap
             and not no_network
+            and not drain
         )
         # S3: split-ошибка — только когда потолку действительно есть что ограничивать.
         if cap_applies and executor is not None:

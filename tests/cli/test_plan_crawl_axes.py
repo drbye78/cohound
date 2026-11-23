@@ -271,6 +271,11 @@ def test_serp_rounds_flag_matches_run() -> None:
         ["--document-level", "text"],
         ["--pdf-pipeline", "text_layer"],
         ["--host-concurrency", "3"],
+        # Ось дренажа корня: три входа к одной идентичности. Пара флагов проверяется
+        # вместе — дренаж без глубины и с глубиной это разные условия измерения.
+        ["--drain-root", "docs.example.org"],
+        ["--drain-max-depth", "4"],
+        ["--drain-root", "docs.example.org", "--drain-max-depth", "4"],
     ],
 )
 def test_plan_run_id_matches_run(

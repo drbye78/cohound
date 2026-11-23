@@ -214,6 +214,10 @@ CRAWL_AXIS_DESTS: tuple[str, ...] = (
     "document_timeout_s",
     "host_concurrency",
     "extract_backlog_mb",
+    # Дренаж корня: у названных корней ``max_documents`` снимается, ``max_depth``
+    # заменяется на ``drain_max_depth``. Ось меняет состав корпуса ⇒ ``execution_change``.
+    "drain_roots",
+    "drain_max_depth",
 )
 
 
@@ -423,6 +427,32 @@ def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:
             "предел бэклога конверсии в МБ retained-файлов очереди: при достижении "
             "приём приостанавливается и публикуется crawl_backpressure (дефолт: предел "
             "не объявлен; ось входит в run_id при объявлении)"
+        ),
+    )
+    # Дренаж корня: ``max_documents`` снимается, ``max_depth`` заменяется на
+    # ``drain_max_depth``; известные страницы читаются из сохранённых байтов
+    # (``--refresh drain``). Повторяемый ``--drain-root`` — по одному корню на запись.
+    parser.add_argument(
+        "--drain-root",
+        dest="drain_roots",
+        action="append",
+        default=None,
+        metavar="HOST[/PATH]",
+        help=(
+            "корень докачивается до исчерпания: max_documents снимается, известные "
+            "страницы читаются из сохранённых байтов (--refresh drain); host или "
+            "host/path, повторяемый (ось входит в run_id при объявлении)"
+        ),
+    )
+    parser.add_argument(
+        "--drain-max-depth",
+        dest="drain_max_depth",
+        type=_non_negative_int,
+        default=None,
+        metavar="D",
+        help=(
+            "глубина BFS для корней --drain-root (дефолт: объявленная --max-depth; "
+            "ось входит в run_id при объявлении)"
         ),
     )
 
@@ -638,7 +668,9 @@ CONTRACT_FLAGS: tuple[ContractFlag, ...] = (
         flag="--refresh",
         material=MATERIAL_REFRESH,
         choices=tuple(policy.value for policy in RefreshPolicy),
-        help="политика обновления корпуса: auto|revalidate|refresh|offline|frozen (дефолт auto)",
+        help="политика обновления корпуса: auto|revalidate|refresh|offline|frozen|drain "
+        "(дефолт auto; drain — сеть только для неизвестных URL, известные страницы из "
+        "сохранённых байтов)",
     ),
 )
 

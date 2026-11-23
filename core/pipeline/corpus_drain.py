@@ -46,6 +46,7 @@ import time
 from collections.abc import Callable, Generator, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -65,6 +66,7 @@ from core.domain.models import RateLimitSpec
 from core.pipeline.corpus_index import _CorpusStageTimings
 from core.pipeline.corpus_ingest import (
     LocalFetch,
+    LocalOutcome,
     ProductIngest,
     RetainedRaw,
     RetainedReject,
@@ -1320,6 +1322,14 @@ class PhaseDrainOperations:
     fresh_sitemap_seeds: Callable[..., SitemapSeeds]
     #: Оси краула корня (``app < run < site``) — единственная формула резолва.
     limits_for: Callable[[str], CrawlLimits]
+    #: Переигровка сохранённых байтов (политика ``drain``): фабрика, связанная с
+    #: durable-состоянием фазы. Принимает потолки **корня** (``max_bytes``/
+    #: ``artifact_max_bytes``/``attachment_formats``) и адрес, отдаёт
+    #: :class:`~core.pipeline.corpus_ingest.RetainedRaw`/``RetainedReject``/``None``.
+    #: ``None`` — политика не ``drain`` (или состояния нет): переигровки нет, путь
+    #: байт-в-байт прежний. Потолки связываются у корня (``root_lifecycle``), потому что
+    #: они резолвятся per-root, а не на фазу.
+    stored_bytes_for: Callable[..., Any] | None = None
 
 
 def root_lifecycle(
@@ -1401,6 +1411,31 @@ def root_lifecycle(
     serp_seeds = root.serp_seeds
     seed = root.seed
     limits = operations.limits_for(root_url)
+    # Переигровка сохранённых байтов (политика ``drain``): потолки — **этого** корня, а не
+    # фазы (``max_response_bytes``/``max_artifact_bytes`` резолвятся per-root). Фабрика
+    # ``operations.stored_bytes_for`` связана с durable-состоянием; здесь к ней
+    # добавляется класс-потолок корня, поэтому ``local_prefetch`` получает адрес и сам
+    # решает, идти ли живым фетчем (``None`` — байтов нет).
+    stored_bytes = (
+        None
+        if operations.stored_bytes_for is None
+        else partial(
+            operations.stored_bytes_for,
+            max_bytes=limits.max_response_bytes,
+            artifact_max_bytes=limits.max_artifact_bytes,
+            attachment_formats=limits.attachment_formats,
+        )
+    )
+    # ``process_local`` (последовательный путь) строит дескриптор своим ``local_prefetch``;
+    # поэтому переигровка доезжает и до него — тем же связанным замыканием, а не вторым
+    # параметром. При ``stored_bytes is None`` — ровно прежние операции байт-в-байт.
+    local_prefetch = operations.local_prefetch
+    process_local = operations.process_local
+    if stored_bytes is not None:
+        local_prefetch = partial(
+            operations.local_prefetch, stored_bytes=stored_bytes
+        )
+        process_local = partial(operations.process_local, local_prefetch=local_prefetch)
     frontier = Frontier(
         root_url,
         limits,
@@ -1793,7 +1828,7 @@ def root_lifecycle(
         pid: str,
         work_url: str,
         depth: int,
-        outcome: tuple[RawPage, Path, FetchPlan, bool] | None,
+        outcome: LocalOutcome | None,
     ) -> None:
         """Пост-фетч коммит дренажа: retention-счётчики, пропуск, очередь, BFS.
 
@@ -1826,12 +1861,19 @@ def root_lifecycle(
             ):
                 frontier.note_robots_refusal(work_url)
             return
-        page, _raw_path, fetch_plan, freshly_fetched = outcome
+        page, _raw_path, fetch_plan, freshly_fetched, from_stored_bytes = outcome
         # 09 §6.3: ревалидация известного URL — depth-0 лист и **вне** бюджета
         # discovery. ``pages_fetched``/``truncated`` продолжают означать ровно
         # «документы, которые добавил обход этого корня».
         is_revalidation = frontier.is_revalidation(work_url)
-        if freshly_fetched:
+        if from_stored_bytes:
+            # Политика ``drain``: страница прочитана из **сохранённых байтов**, сети не
+            # было. Живым фетчем это не считается — ``revalidation_fetched``/``fetched``
+            # не растут, ``max_documents`` не расходуется. Но пространство корня она
+            # наблюдала (прошлым циклом, байты те же), поэтому ``note_replayed`` —
+            # иначе целиком переигранный корень получил бы ``complete=0`` по I2d.
+            frontier.note_replayed()
+        elif freshly_fetched:
             if is_revalidation:
                 # S1: ревалидационный трафик не смешивается с discovery-счётчиком
                 # ``fetched``/``pages_fetched``, но обязан быть видимым.
@@ -1956,8 +1998,8 @@ def root_lifecycle(
         emit=operations.emit,
         mark=operations.mark,
         commit_local=operations.commit_local,
-        local_prefetch=operations.local_prefetch,
-        process_local=operations.process_local,
+        local_prefetch=local_prefetch,
+        process_local=process_local,
         submit_collect=operations.submit_collect,
         work_item=operations.work_item,
         resolve_target=operations.resolve_target,
