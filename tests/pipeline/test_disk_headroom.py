@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 import tests.pipeline.test_extract_consumer as base
-from core.domain import CrawlRunConfig, CrawlSessionStatus
+from core.domain import CrawlItemStatus, CrawlRunConfig, CrawlSessionStatus
 from core.pipeline import corpus_drain
 from core.pipeline.corpus import IndexBuild, build_corpus
 from core.pipeline.crawl_session import default_session_id
@@ -300,6 +300,13 @@ def test_several_blocked_waves_give_one_line_with_counter(
 
     Повторного «проверим и пошлём» нет: каждая следующая волна отказана тем же сторожем,
     поэтому число волн растёт в счётчике, а не в числе строк.
+
+    «Ноль добычи» проверяется **по факту получения**, а не по пустоте сеанса. С 24.11.2026
+    (R1a) поставленный в очередь URL персистится строкой ``pending`` **до** попытки взять
+    его, поэтому отказ сторожа оставляет в сеансе ровно намерение: две строки ``pending``
+    с ``attempts=0``, без ``content_hash`` и без ``last_attempt``. Прежнее утверждение
+    «сеанс пуст» выражало ту же мысль лишь потому, что очередь не персистилась вовсе — и
+    вместе с ним терялись сами URL (после падения обход начинался заново).
     """
     carrier(1)
     store = SqliteStore(":memory:")
@@ -311,7 +318,14 @@ def test_several_blocked_waves_give_one_line_with_counter(
         assert "waves_blocked=2" in lines[0]
         # Приём остановлен: после первой блокировки не добыто ни одного элемента.
         assert crawler.calls == []
-        assert list(store.iter_crawl_session_items(SESSION_ID)) == []
+        rows = list(store.iter_crawl_session_items(SESSION_ID))
+        # Намерение зафиксировано (durable очередь): ровно два корня, глубина 0.
+        assert sorted(row.url for row in rows) == sorted([ROOT, PAGE])
+        assert {row.status for row in rows} == {CrawlItemStatus.PENDING}
+        # Добычи нет: попыток не было, байтов и адреса документа тоже.
+        assert [row.attempts for row in rows] == [0, 0]
+        assert [row.content_hash for row in rows] == [None, None]
+        assert [row.last_attempt for row in rows] == [None, None]
     finally:
         store.close()
 

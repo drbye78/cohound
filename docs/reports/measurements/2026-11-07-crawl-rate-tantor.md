@@ -43,7 +43,7 @@ Location: https://tantorlabs.ru/docs/
 Корень объявленного корпуса (`sources/corpus_urls.yaml:tantor: https://docs.tantorlabs.ru/`)
 отдаёт 301 **на другой хост** — маркетинговую страницу `tantorlabs.ru/docs/`. При
 объявленном профиле этого хоста (`max_depth: 8` ⇒ `enforce_redirect_scope=True`,
-`core/pipeline/corpus_ingest.py:3083`) такой сид получил бы `redirect_out_of_scope` и **ноль** документов:
+`core/pipeline/corpus_ingest.py:3321`) такой сид получил бы `redirect_out_of_scope` и **ноль** документов:
 обходить было бы нечего. Проверять это живым краулом я не стал намеренно — переход по
 `Location` увёл бы запрос на `tantorlabs.ru`, то есть **за объявленный scope**; это
 следствие кода, а не второй замер.

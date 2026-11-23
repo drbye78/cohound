@@ -13,7 +13,7 @@
 > | `STATE_SCHEMA_VERSION` (`state/{package_id}/state.db`) | **`"14"`** | `core/store/state_sqlite.py:99` |
 > | `SEAM_SCHEMA_VERSION` (контракт `/v1/*`) | **`"1"`** | `core/edge/seam_schema.py:68` |
 > | `EDGE_JOBS_SCHEMA_VERSION` (`edge_jobs.db`) | **`"1"`** | `core/edge/scheduler.py:198` |
-> | `EXECUTION_CONTRACT_FIELDS` | **36** полей | `core/pipeline/digests.py:105` |
+> | `EXECUTION_CONTRACT_FIELDS` | **36** полей | `core/pipeline/digests.py:119` |
 >
 > **Решение владельца 29.10.2026:** всё, что меняет материал `run_id` или состав прогонной
 > БД, делается **одной** границей. Две отдельные границы (`embed_device` отдельно, схема
@@ -226,15 +226,15 @@ CREATE TABLE IF NOT EXISTS run_product (
 
 Пишется на границе продукта (там же, где `corpus_docs`, `09` §4.7) и переписывается в конце
 фазы — так же, как `corpus_coverage`. Прецедент записи — `store.save_corpus_coverage(run_id,
-coverage)` (`core/pipeline/corpus_coverage.py:700`): одна функция на продукт, вызывается на границе,
+coverage)` (`core/pipeline/corpus_coverage.py:772`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
-(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3529`).
+(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3619`).
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — величины того же класса, что `product_end` пишет в `results[].notes` прогона
-(`_product_notes`, `core/pipeline/corpus_coverage.py:437-517`; сама строка —
-`core/pipeline/corpus_coverage.py:508-539`).
+(`_product_notes`, `core/pipeline/corpus_coverage.py:508-588`; сама строка —
+`core/pipeline/corpus_coverage.py:580-611`).
 **Сверено 08.11.2026: счётчики ячеек в заметку не входят** — она называет корни, seed'ы,
 элементы сеанса, документы и время; ячейки живут только в `run_product` и в отчёте. То есть
 второго носителя этих трёх величин сегодня нет, и расхождение возможно только между
@@ -283,7 +283,7 @@ retained-байтов).
 обязаны читаться — `hound diff` строит дельту документов по `corpus_docs`
 (`core/cli/commands/diff.py:106`), а правило `❌`-допустимости (I2c) обязано спрашивать
 происхождение наблюдения там же. Решение границы: **поля
-`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:2787`, явные
+`CorpusDoc`** + чтение в `iter_corpus_docs` (`core/store/sqlite_store.py:3090`, явные
 kwargs) + `_has_column`-терпимость к необязательным колонкам
 (`core/store/sqlite_rows.py:78`). ✅ As-built — так и сделано.
 
@@ -355,29 +355,29 @@ per-site (`core/pipeline/crawl_frontier.py:843`) — два уровня одн�
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
   **явным параметром**: `core/pipeline/phases.py:1373-1374` → `core/pipeline/corpus.py:1688`
-  (объявление оси) и `core/pipeline/corpus.py:4726`/`core/pipeline/corpus.py:4801`
+  (объявление оси) и `core/pipeline/corpus.py:4735`/`core/pipeline/corpus.py:4810`
   (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
   (`core/pipeline/corpus.py:2293` — единственный источник этого значения).
 
 ### 4.2. Контракт (**✅ as-built**)
 
-`EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:96-236`):
+`EXECUTION_CONTRACT_FIELDS` — 28 → **29** полей (`core/pipeline/digests.py:110-250`):
 добавляется `embed_device` рядом с `extractor_stack` (та же природа: устройство как условие
 измерения). «29» — размер **на момент границы**; на 08.11.2026 полей **32**
-(`core/pipeline/digests.py:96`), остальные добавлены осями планов 19–23 (`embed_precision`,
+(`core/pipeline/digests.py:110`), остальные добавлены осями планов 19–23 (`embed_precision`,
 `crawl_policy_digest` и др.); на 15.11.2026 — **33**: `embed_spec` (`model_id@revision`,
 O6) рядом с `embed_precision`, той же природой, что `extractor_stack` при
 `extractor_version`: объявленный вход — стек/веса, наблюдаемая строка `embed_model_id` —
 провенанс. Значение кладёт `build_execution_contract` (`core/pipeline/run_identity.py:315`)
 из `DeclaredExecutionAxes` — там же, где `extractor_stack`
-(`core/cli/execution_axes.py:725-732`).
+(`core/cli/execution_axes.py:727-734`).
 
 **Совместимость чтения проверена:** `execution_contract_digest(values)`
-(`core/pipeline/digests.py:630-652`) требует точного набора ключей, но вызывается ровно из
+(`core/pipeline/digests.py:644-666`) требует точного набора ключей, но вызывается ровно из
 одного места — `core/pipeline/run_identity.py:383`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:3303`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:3393`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. `execution_change: embed_device` diff называет и тогда, когда
 поле есть только с одной стороны.
 ⚠️ **Сверено 08.11.2026 — оговорка к «старые прогоны читаются»:** совместимость чтения
@@ -385,10 +385,10 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (§3), поэтому `hound diff` против прогона прошлой схемы невозможен не из-за поля, а из-за
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
-`RunManifest` (`core/domain/models.py:1913`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:2960`) сопоставляет имя
+`RunManifest` (`core/domain/models.py:1919`) получает поле `embed_device`, и этого
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:3050`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
-(`core/pipeline/report.py:2932`)
+(`core/pipeline/report.py:2976`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
@@ -402,9 +402,9 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 
 ### 4.3. Выбор эмбеддера перестаёт быть «что установлено» (**✅ as-built**)
 
-**До границы** `_resolve_embedder` (`core/cli/wiring.py:2922-2965`) выбирал по факту
+**До границы** `_resolve_embedder` (`core/cli/wiring.py:2998-3041`) выбирал по факту
 установки: `model2vec` → `LocalEmbedder` → `None`. Сегодня он принимает **объявленные**
-`device` и `precision` (`core/cli/wiring.py:2922-2965`) и исполняет таблицу ниже;
+`device` и `precision` (`core/cli/wiring.py:2998-3041`) и исполняет таблицу ниже;
 `LiteEmbedder` — NumPy/CPU by design
 (`core/adapters/embed_model2vec.py:4`), и ось он исполнить не может.
 
@@ -451,7 +451,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (`core/pipeline/corpus_index.py:911-923`; сегодня ключей **восемь**: шесть прежних плюс
 `embed_device` и `embed_precision`).
 
-`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4720`, а в тестах — с явными kwargs
+`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4729`, а в тестах — с явными kwargs
 (`tests/pipeline/test_corpus_phase_boundary.py:153-163`,
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
@@ -460,7 +460,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 `tests/pipeline/test_corpus_stage_timings.py:485`) — меняются неизбежно.
 
 Почему **не** в `embed_model_id`: он описывает **веса**, а не место счёта, и классифицируется
-как `content_change` (`core/pipeline/digests.py:84-95`). Положив устройство туда, мы
+как `content_change` (`core/pipeline/digests.py:86-97`). Положив устройство туда, мы
 прочитали бы смену прибора как смену содержимого — то, от чего `pdf_device` ушёл через
 `extractor_stack`.
 
@@ -629,7 +629,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    (манифест несёт значение как объявлено), `tests/pipeline/test_report.py:2611` (diff называет
    `execution_change: embed_device`, а не «недоступно»). **Прямого теста «`cpu`→`cuda`
    меняет `execution_contract_digest`» нет** — разница держится тем, что поле входит в
-   материал дайджеста (`core/pipeline/digests.py:96`), а пин
+   материал дайджеста (`core/pipeline/digests.py:110`), а пин
    `PINNED_EXECUTION_CONTRACT_DIGEST` (`tests/pipeline/test_corpus_stage_timings.py:86`)
    фиксирует значение для `cpu`. Это названный пробел, а не «покрыто». ⬜ Остаток на
    08.11.2026: для точности такой тест **есть**
@@ -745,10 +745,10 @@ O6) рядом с `embed_precision`, той же природой, что `extra
      durable-элементы для дренажа». ✅ **As-built** (`core/pipeline/corpus_drain.py:1616-1632`:
      `charged_urls` → `add_revalidate_seed`, комментарий называет дефект 3 и `09` §6.3).
      Плюс приписывание владельцу — тем же предикатом, что
-     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5386`, вызов —
-     `core/pipeline/corpus.py:3906`: побеждает самый специфичный
+     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5415`, вызов —
+     `core/pipeline/corpus.py:3915`: побеждает самый специфичный
      `root_path_prefix`), а не «кто первый» (дефект 1); продукт-wide множество
-     `resume_counted` (`core/pipeline/corpus.py:3529`) остаётся — меняется правило
+     `resume_counted` (`core/pipeline/corpus.py:3538`) остаётся — меняется правило
      приписывания.
      **Почему нельзя сделать только приписывание:** измерено — у `digital_q_database`
      host-корень (prefix `/`, потолок 10) случайно забрал зарядку 2402 элементов, поэтому
@@ -787,7 +787,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `core/pipeline/state_adopt.py:120` — **текст там с 08.11.2026 сам устарел**:
    `runs.run_scope` объявлен (`core/store/sqlite.py:206`) и пишется `persist_manifest`
    (`core/store/sqlite_store.py:1284`); правка в `core/` — вне этой полосы), а `ProductPlanSet`
-   существует (`core/domain/models.py:2984`) и **до границы** не персистился ни разу —
+   существует (`core/domain/models.py:2990`) и **до границы** не персистился ни разу —
    единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей. ✅ После границы оба
@@ -892,7 +892,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2932` (первая редакция ссылалась на строку 1970 того же файла);
+`core/pipeline/report.py:2976` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:156` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —

@@ -168,7 +168,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
 артефакт пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
 `core/edge/server.py:622-625`), оси `level`/`device` едут в `submit`. ⚠️ Остаток: паритет `pb`
 между профилями **измерением не подтверждён** (прогона двумя профилями не было), per-site слой
-`document_level` под `split` не действует (`core/cli/wiring.py:3665-3668` — порты собираются
+`document_level` под `split` не действует (`core/cli/wiring.py:3745-3748` — порты собираются
 до per-root резолва), `pdf_pipeline` выбирает edge. Детали — `24-fleet-work-units.md` F1.5
 (паритет `pb` — гейт флота) и §7 (размещение), `07` §6 (расхождения `split`).
 
@@ -257,7 +257,7 @@ L7-инспектируемый JSON, публикуемые схемы, атр�
   пересекает шов чанками (`/v1/extract/{upload,submit,collect,abort}`,
   `core/edge/server.py:622-625`), оси `level`/`device` едут в `submit`
   (`core/cli/wiring.py:3377`). **Не измерен** паритет `pb` между профилями; per-site слой
-  `document_level` под `split` не резолвится (`core/cli/wiring.py:3665-3668` — порты собираются
+  `document_level` под `split` не резолвится (`core/cli/wiring.py:3745-3748` — порты собираются
   до per-root резолва); `pdf_pipeline` выбирает edge (§2).
 - ✅ **Прогон до `report` состоялся:** `3edf2b06097c` (26.10), `c2e7b860ac17` (06.11, 12
   артефактов `outputs/`); живой оценщик — 07–08.11 (`2a5b51af5778`: 905 ячеек, **1923** вызова,
@@ -357,7 +357,7 @@ file); порты без наследников (`core/ports/llm.py:4` — «б�
 
 ✅ сделано (проверено) — `core/pipeline/runner.py:185` (`PhaseResult` c
 `ok|skipped|blocked|failed`), `core/pipeline/gates.py`, `core/pipeline/gate_subject.py`,
-`core/cli/context.py:1702` (`make_profile_gate` подключён в CLI).
+`core/cli/context.py:1722` (`make_profile_gate` подключён в CLI).
 ✅ механизм durable-аттестации профиля есть, **подписей 0**: `save_profile_attestation` вызывается
 из CLI (`core/cli/package/commands.py:3001` → `core/store/state_store.py:1669`), команда —
 `hound package profile attest` (`core/cli/package/commands.py:2912`); строк в `profile_attestation`
@@ -544,7 +544,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 
 ### W10 — Расчёт и отчёты — ✅ done
 
-✅ сделано (проверено) — `core/pipeline/report.py:2109` (`render_battle_card`),
+✅ сделано (проверено) — `core/pipeline/report.py:2199` (`render_battle_card`),
 `:2179` (`render_nda_questions`), `:2809` (`render_preliminary_findings`); живой вывод —
 `runs/ru-pg-dbms-3edf2b06097c/outputs/` (5 артефактов, 26.10) и
 `runs/ru-pg-dbms-c2e7b860ac17/outputs/` (**12** файлов, 06.11, включая `battle_card.xlsx`,
@@ -559,7 +559,7 @@ docs/reports/measurements/` → пусто). Артефакт пере-оцен�
 ### W11 — Search-адаптер и SERP-петля — ✅ код done; ⬜ живой раунд не выполнялся
 
 ✅ сделано (код) — контур исполняется: `core/pipeline/corpus.py:2363` вызывает `_run_serp_contour`
-(def — `core/pipeline/corpus.py:1347`; поиск → допуск → расширение seed-набора **до** дренажа,
+(def — `core/pipeline/corpus.py:1349`; поиск → допуск → расширение seed-набора **до** дренажа,
 одна сборка), `core/pipeline/search_log.py` (бюджет, I23).
 ⬜ не сделано — (а) append-only раунд-цикл `run_serp_loop` (`core/pipeline/serp_loop.py:1553`)
 **не вызывается ни из одного прод-пути**: ссылки только в `core/pipeline/__init__.py` и
@@ -721,7 +721,7 @@ P5), но строка помечена здесь как неактуальна
   `_commit_outcome`. Дефолт `None`/`1` ⇒ inline, байт-в-байт.
   **Ось — провенанс, не контракт:** `extract_workers`/`extract_max_tasks_per_child` в
   `CrawlLimits.as_dict()` не входят ⇒ в `crawl_config_digest`/`run_id` **не** попадают
-  (`core/pipeline/crawl_frontier.py:213-216`): иначе число, выведенное из бюджета хоста, делало бы
+  (`core/pipeline/crawl_frontier.py:226-233`): иначе число, выведенное из бюджета хоста, делало бы
   `run_id` функцией машины. Число выводится из бюджета (`preflight_extraction_budget`) и
   публикуется в манифесте; в `packages/ru-pg-dbms/run.yaml` ось **намеренно не объявлена**
   (`packages/ru-pg-dbms/run.yaml:91`), объявлен только `extract_max_tasks_per_child: 25`
@@ -754,7 +754,7 @@ P5), но строка помечена здесь как неактуальна
   churn `index_build_id`/дайджеста при дефолте — принят (R1). Пул — свойство корня
   (`pool_factory(W, level)`); память = `W × footprint(level)`. Под `split` ось едет в
   `extract/submit` (`core/cli/wiring.py:3377`), но per-site слой не резолвится — порты
-  собираются до per-root резолва (`core/cli/wiring.py:3665-3668`). Новых зависимостей нет.
+  собираются до per-root резолва (`core/cli/wiring.py:3745-3748`). Новых зависимостей нет.
 - **Текстовые форматы и EPUB (as-built).** `core/adapters/extract_text.py` (plain text/markdown,
   все расширенные варианты) и `extract_epub.py` (stdlib OCF) — **первый класс** наравне с HTML,
   не docling: свой читатель и свой чанкер. Диспетчер семейств — `core/adapters/chunker_family.py`
@@ -1022,11 +1022,11 @@ DLP, набор IDS-правил) — design-требования зафикси
   (`.slim/deepwork/crawl-completion/`) закрыт: P0–P7 закоммичены и прошли независимые проверки.
   Открыто **пять** пунктов, и они записаны здесь, а не только в рабочем журнале:
   `--background` (`rg background core/` → 0), `hound crawl materialize` (команды нет: `rg
-  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2510-2516`),
+  materialize core/` даёт только локальную переменную `core/pipeline/report.py:2554-2560`),
   кейсы 2–5 (`packages/` = `ru-pg-dbms`, `demo-absence`, `_template`), R3 (ревизия весов моделей
   не входит в `extractor_version`, `core/adapters/extract_document.py:349-385`), E1 follow-up
   (`experiment.py` не сбрасывает фазу `evaluate`). Паритет реестров под `split`
-  (`core/cli/context.py:1822` против `core/edge/server.py:1105`) **сводится в один замер** с
+  (`core/cli/context.py:1842` против `core/edge/server.py:1105`) **сводится в один замер** с
   паритетом `pb` `local`/`split` (§2): одна процедура — «один вход, два профиля, сравнить
   `index_build_id` и `registry_spec_digest`», — а не две.
   ➖ **A1 follow-up закрыт 07.11.2026:** мультиплексирование root/product — F4a/F4b
@@ -1069,7 +1069,7 @@ DLP, набор IDS-правил) — design-требования зафикси
    раньше, чем помогает «больше железа».
 4. **Паритет `split` — одним замером, до флота.** Открытыми висят два вопроса об одном и том же:
    совпадает ли `index_build_id` для одного входа под `local` и `split` (§2) и совпадает ли
-   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1822`, edge
+   `registry_spec_digest` (ядро считает его по пакетным спекам — `core/cli/context.py:1842`, edge
    выбирает фетчер по своей карте — `core/edge/server.py:1105`). Это **одна** процедура: один
    вход, два профиля, сравнить сборку и дайджест. Пока она не проведена, `split`-прогон нельзя
    публиковать наравне с `local`, и это дешевле любой строки из `24` §3.2: измерение, не разработка.

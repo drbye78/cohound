@@ -1062,6 +1062,7 @@ def build_phases(
     pdf_pipeline: PdfPipeline | None = None,
     document_timeout_s: float | None = None,
     host_concurrency: int | None = None,
+    browser_workers: int | None = None,
     extract_backlog_mb: int | None = None,
     state: Any = None,
     product_modes: Mapping[str, str] | None = None,
@@ -1354,6 +1355,10 @@ def build_phases(
         # ложь о условиях измерения того же класса, что env-модель оценщика (§7.4).
         if host_concurrency is not None:
             override["host_concurrency"] = host_concurrency
+        # Параллелизм браузерного фетча — такая же ось краула (условие измерения):
+        # объявлена в ``crawl_config_digest``, значит обязана доехать до Ш5.
+        if browser_workers is not None:
+            override["browser_workers"] = browser_workers
         if extract_backlog_mb is not None:
             override["extract_backlog_mb"] = extract_backlog_mb
         if override:
@@ -1401,6 +1406,9 @@ def build_phases(
             # единый владелец (RateLimiter), протягивается composition root'ом.
             crawl_sources=crawl_sources,
             crawlers=getattr(ctx.ports, "crawlers", None),
+            # Параллельный браузерный фетч: фабрика движка **на поток**. ``None`` —
+            # прежнее поведение (общий движок из ``crawlers``, один поток).
+            browser_factory=getattr(ctx.ports, "browser_crawler_factory", None),
             # Phase 5.2: карта ``kind → PollPort`` для источников-каталогов (feed/channel).
             pollers=getattr(ctx.ports, "pollers", None),
             rate_limiter=rate_limiter,

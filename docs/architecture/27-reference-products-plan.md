@@ -410,7 +410,7 @@ baseline_id 'upstream-pg', но reference-продукт для него не о
 меняет набор унаследованных ячеек.
 
 Порядок `upstreams` входит в `passports_digest` автоматически (дайджест считается по
-байтам паспорта, `digests.py:428`) — отдельного поля не нужно, но **перестановка предков
+байтам паспорта, `digests.py:442`) — отдельного поля не нужно, но **перестановка предков
 даёт новый `run_id`**, и это правильно: она меняет, кто из них победит.
 
 Оба новых поля — `execution_change`. Разово и явно, не «под капотом».
@@ -1078,7 +1078,7 @@ upstream, (б) переездом документации, (в) дефекто�
 
 | # | что | состояние | где |
 |---|---|---|---|
-| 1 | `baselines_digest` в контракте | ✅ | `digests.py:436`; полей контракта стало **35** (было 33: добавились `baselines_digest` и `baseline_facts_digest`) |
+| 1 | `baselines_digest` в контракте | ✅ | `digests.py:450`; полей контракта стало **35** (было 33: добавились `baselines_digest` и `baseline_facts_digest`) |
 | 2 | `Passport.upstreams`, `baseline_participants`, порядок = приоритет | ✅ | `models.py`; паспорта и `package.yaml` пилота переведены |
 | 3 | `reference_products.yaml` + модель + линтер | ✅ | `config/run_config.py:load_reference_products`; `lint.py` — 4 блокирующих правила + предупреждение `upstream-presence` |
 | 4 | `baseline_facts.csv` + `baseline_facts_digest` + словарь | ✅ | `FactStatus`/`FactReview` в `status-dictionary.yaml` и `domain/dictionary.py` |

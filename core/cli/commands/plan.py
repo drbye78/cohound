@@ -383,6 +383,7 @@ def run(args: argparse.Namespace) -> int:
             inputs,
             seed_config,
             crawl_config_digest=declared.crawl_config_digest,
+            deploy=deploy_config,
         )
     except CrawlPolicyConflict as exc:
         raise CliError(

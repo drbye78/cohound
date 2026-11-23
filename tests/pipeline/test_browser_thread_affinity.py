@@ -206,10 +206,12 @@ def test_browser_fetches_of_the_cohort_run_in_one_foreign_thread(
     assert backend.open_threads[0] != driver_thread
     # Поток назван: иначе владельца движка не опознать в py-spy/журналах.
     assert all(name.startswith(BROWSER_THREAD_PREFIX) for name in backend.thread_names)
-    # Сериализация опубликована числом, а не осталась догадкой.
+    # Параллелизм опубликован числами, а не остался догадкой: сколько фетчей прошло и
+    # сколько их было в полёте одновременно (наблюдение, а не объявление оси).
     notes = _browser_notes(result)
     assert len(notes) == 1
-    assert "2 фетчей через один поток" in notes[0]
+    assert "2 фетчей" in notes[0]
+    assert "пик в полёте 1" in notes[0]
     assert "полоса не блокируется" in notes[0]
 
 
@@ -351,13 +353,14 @@ def test_driver_without_shared_pool_still_uses_one_browser_thread() -> None:
                 resume=None,
                 browser_blocked=False,
                 poolable=False,
+                route="browser",
                 host="seq.test",
                 scope_host=None,
                 enforce_redirect_scope=False,
             ),
         )
         yield corpus_drain.WavePlan(
-            entries=[entry], hosts=frozenset({"seq.test"}), non_poolable=True
+            entries=[entry], hosts=frozenset({"seq.test"}), browser=True
         )
         return (None, [])
 
@@ -389,7 +392,7 @@ def test_driver_without_shared_pool_still_uses_one_browser_thread() -> None:
     assert all(name.startswith(BROWSER_THREAD_PREFIX) for name in names)
     # Пул создан драйвером — драйвер его и остановил: поток не пережил вызов.
     assert _live_browser_threads() == []
-    assert notes and "1 фетчей через один поток" in notes[0]
+    assert notes and "1 фетчей" in notes[0] and "пик в полёте 1" in notes[0]
 
 
 # --------------------------------------------------------------------------- #

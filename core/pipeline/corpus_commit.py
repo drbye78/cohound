@@ -289,6 +289,22 @@ def record_root_outcome(
         record["rate_limits"] = {
             host: dict(spec) for host, spec in sorted(frontier.rate_limits.items())
         }
+    # R1a: durable очередь корня — провенанс, а не условие измерения (в ``run_id`` не
+    # входит). Ключ появляется только у корня, который действительно поднимал очередь или
+    # чей хук отказал: записи остальных остаются байт-в-байт прежними (пин порядка записи
+    # не двигается). «Поднято N» и «отвергнуто M» публикуются вместе: подъём без отказа
+    # читался бы как «очередь вернулась целиком», а отказ без числа — как тишина.
+    if frontier.pending_lifted or frontier.pending_lift_rejected:
+        record["durable_queue"] = {
+            "lifted": frontier.pending_lifted,
+            "lift_rejected": frontier.pending_lift_rejected,
+            "lift_rejected_examples": list(frontier.pending_lift_rejected_examples),
+        }
+    if frontier.enqueue_hook_failures:
+        record["durable_queue_persist_failures"] = {
+            "count": frontier.enqueue_hook_failures,
+            "examples": list(frontier.enqueue_hook_errors),
+        }
     if record_slot is None or record_slot >= len(truncation_records):
         truncation_records.append(record)
     else:

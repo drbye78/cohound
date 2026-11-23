@@ -49,9 +49,14 @@ from core.domain.models import SeedsConfig
 from core.pipeline.corpus_coverage import parse_space_material, space_attests
 from core.pipeline.crawl_frontier import CRAWL_SEMANTICS
 from core.pipeline.digests import (
+    ROOT_SPACE_SCOPE,
     crawl_policy_digest,
+    crawl_root_space_digest,
+    crawl_root_space_material,
     crawl_space_digest,
     crawl_space_material,
+    root_limits_digest,
+    snapshot_url_key,
 )
 from core.ports.state import CrawlPolicyRow
 from core.util.rate_limit import normalize_host
@@ -302,9 +307,12 @@ class CrawlPolicyResolution:
 
     ``digest`` — отпечаток **поверхности решений** (вход ``run_id``): эффективные
     ``decision``/``network_mode``/``corpus_source``, то есть «что прогон сделал».
-    ``space_digest`` — отпечаток **удостоверяемого пространства** (носитель I2d): какие
-    режимы объявлены и при каких лимитах краула, то есть «что исчерпано». Часы меняют
-    первое и не меняют второе.
+    ``space_digest`` — отпечаток удостоверяемого пространства **пакета** (режимы всех
+    корней + глобальный ``crawl_config_digest``); печатается ``crawl policy list``, но
+    носителем I2d больше **не** является. Носитель — per-root отпечаток
+    (:attr:`root_space_digest`): пространство корня = режим этого корня + резолвнутые
+    лимиты этого адреса, поэтому добавление site-ключа чужого продукта не меняет
+    пространство соседних корней (вариант 3). Часы не меняют ни то, ни другое.
     """
 
     decisions: tuple[PolicyDecision, ...]
@@ -321,6 +329,65 @@ class CrawlPolicyResolution:
     requested: tuple[RequestedScope, ...] = ()
     #: Запросы, не совпавшие ни с одним объявленным корнем: видимы, но решения не меняют.
     unmatched_requested: tuple[RequestedScope, ...] = ()
+    #: Отпечаток удостоверяемого пространства **по корню** (``(product_id, host, path)``)
+    #: — носитель I2d (вариант 3). Глобальный ``space_digest`` выше описывает пакет и
+    #: остаётся для ``crawl policy list``; снятие несёт **этот** отпечаток, потому что
+    #: добавление site-ключа чужого продукта не меняет пространство соседних корней.
+    root_space_digest: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    #: Материал того же per-root пространства (режим корня + отпечаток его лимитов).
+    root_space_material: dict[tuple[str, str, str], dict[str, Any]] = field(
+        default_factory=dict
+    )
+    #: То же пространство, но адресованное **канонической формой адреса корня**
+    #: (``(product_id, snapshot_url_key(root_url))``). Отдельная карта, а не вывод из
+    #: ``host``+``path``: объявленный корень и снятие пишут адрес по-разному
+    #: (``/p1`` против ``/p1/``, percent-encoding), и реконструкция адреса из пары
+    #: давала бы промах там, где корень на самом деле один. Пустой ``root_url``
+    #: (корень, объявленный без адреса — тесты, синтетика) в карту не попадает:
+    #: для него остаётся путь через ``(host, path)``.
+    root_space_by_url: dict[tuple[str, str], tuple[str, dict[str, Any]]] = field(
+        default_factory=dict
+    )
+
+    def space_for_root(
+        self, product_id: str, root_url: str
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """``(digest, material)`` удостоверяемого пространства этого корня.
+
+        Сначала адрес ищется **канонической формой** (``snapshot_url_key`` — как у снятий
+        и объявленных корней), затем — по ``(host, path)`` того же адреса
+        (:func:`_split_url`). Второй путь нужен для корня, объявленного без ``root_url``.
+        ``(None, None)`` — пространство корня не посчитано (нет объявленного
+        ``crawl_config_digest`` или корень не входит в резолв).
+        """
+        if root_url:
+            entry = self.root_space_by_url.get(
+                (str(product_id), snapshot_url_key(root_url))
+            )
+            if entry is not None:
+                return entry
+        host, path = _split_url(root_url)
+        key = (str(product_id), host, path)
+        return self.root_space_digest.get(key), self.root_space_material.get(key)
+
+    def space_by_root_url(
+        self, product_id: str | None = None
+    ) -> dict[str, tuple[str | None, dict[str, Any] | None]]:
+        """``{канонический root_url: (digest, material)}`` для сверки покрытия.
+
+        Ключ — :func:`snapshot_url_key`, как у снятий и объявленных корней: адрес
+        сравнивается канонической формой, а не записью. ``product_id`` сужает карту до
+        одного продукта: у двух продуктов один и тот же ``host``+``path`` — разные корни,
+        и сливать их в один ключ значило бы сверять чужое пространство. Корень без
+        посчитанного пространства не попадает (сторона сравнения — глобальные параметры
+        вызова).
+        """
+        result: dict[str, tuple[str | None, dict[str, Any] | None]] = {}
+        for (pid, url_key), (digest, material) in self.root_space_by_url.items():
+            if product_id is not None and pid != str(product_id):
+                continue
+            result[url_key] = (digest, material)
+        return result
 
     def execution_for(self, product_id: str, url: str) -> PolicyExecution:
         """Исполнение для конкретного адреса: ``network_mode`` × ``corpus_source``.
@@ -809,6 +876,7 @@ def resolve_crawl_policy(
     requested: Sequence[RequestedScope] | None = None,
     crawl_config_digest: str | None = None,
     capture_spaces: Mapping[tuple[str, str, str], RootSpace] | None = None,
+    root_limits: Mapping[tuple[str, str, str], Mapping[str, Any]] | None = None,
 ) -> CrawlPolicyResolution:
     """Разрешает эффективную политику по объявленным корням (план 19 §4/§6.1).
 
@@ -821,13 +889,22 @@ def resolve_crawl_policy(
         материал дайджеста через оси исполнения, а не отдельным полем (§6.1: «одно поле —
         один материал»).
     :param crawl_config_digest: отпечаток лимитов краула (``crawl_control_digest``,
-        ``declared.crawl_config_digest``). Входит **только** в ``space_digest``: лимиты
-        определяют исчерпываемое пространство, но не поверхность решений.
+        ``declared.crawl_config_digest``). Остаётся условием «пространство объявлено»: без
+        него сверки нет (``None`` — решение по часам), но в сравнение он **не** входит —
+        сравнение идёт по резолвнутым лимитам **этого** корня (``root_limits``). В
+        ``space_digest`` пакета он по-прежнему входит: тот отпечаток печатает
+        ``crawl policy list`` и носителем I2d больше не является.
     :param capture_spaces: пространство последнего снятия каждого корня
         (:func:`capture_spaces_by_root`). Решение ``scheduled`` читает его как второй
         якорь рядом с часами: расхождение пространства делает ``refresh`` даже при
         неистёкшем интервале, потому что переиспользовать корпус из другого пространства
         значило бы измерять не то, что объявлено. ``None``/неизвестное — решение по часам.
+    :param root_limits: **резолвнутые лимиты каждого корня** (``CrawlLimits.as_dict()``)
+        по ключу ``(product_id, host, path)``. Пространство сверяется **по корню**: режим
+        этого корня + лимиты этого адреса. ``None`` — лимиты не резолвлены (``crawl policy
+        list``): стороны сравнения нет, решение по часам. ``crawl_config_digest`` остаётся
+        лишь условием «пространство объявлено» и в сравнение не входит: иначе добавление
+        site-ключа чужого продукта ломало бы пространство соседних корней (вариант 3).
     :raises CrawlPolicyConflict: равная специфичность с разными режимами.
     """
     records = [*package_records(package_policy), *operator_records(operator_rows)]
@@ -882,23 +959,79 @@ def resolve_crawl_policy(
         semantics=CRAWL_SEMANTICS,
     )
     decisions: list[PolicyDecision] = []
+    #: Пространство **по корню** (вариант 3): отпечаток и материал каждого корня,
+    #: у которого известны резолвнутые лимиты. Заполняется здесь же — второй формулы
+    #: нет, и носитель снятия (``space_for_root``) читает эту карту.
+    root_space_digests: dict[tuple[str, str, str], str] = {}
+    root_space_materials: dict[tuple[str, str, str], dict[str, Any]] = {}
+    #: То же пространство по канонической форме **объявленного** адреса корня: снятие
+    #: пишется адресом корня, и реконструкция ``https://{host}{path}`` промахнулась бы
+    #: там, где объявленный адрес отличается формой (слэш, encoding).
+    root_space_by_url: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+    root_limits_map = dict(root_limits or {})
     for root, chosen, is_requested in selected:
         root_observed = observed.get((root.product_id, root.host, root.path))
         root_space = spaces.get((root.product_id, root.host, root.path))
-        # Без объявленного ``crawl_config_digest`` пространство не объявлено, и сверка
-        # не имеет стороны сравнения: сравнение с ``None`` дало бы ложное «разошлось» и
-        # превратило бы, например, ``crawl policy list`` (он лимитов не резолвит) в
-        # «все корни требуют обхода». ``None`` — «неизвестно» (A3), решение по часам.
-        space_matches = (
-            None
-            if root_space is None or crawl_config_digest is None
-            else space_attests(
-                capture_material=parse_space_material(root_space.space_json),
-                declared_material=space_material,
-                capture_digest=root_space.policy_digest,
-                declared_digest=space_digest,
+        # Пространство корня: лимиты **этого** адреса (``root_limits``) + режим записи.
+        # Ключ лимитов — по **корню** (``root``), а ``host``/``path`` материала — по
+        # ``chosen``: запись описывает область, корень — адрес, чьё пространство исчерпано.
+        limits = root_limits_map.get((root.product_id, root.host, root.path))
+        declared_material: dict[str, Any] | None = None
+        declared_digest: str | None = None
+        if limits is not None and crawl_config_digest is not None:
+            limits_digest = root_limits_digest(limits)
+            declared_material = crawl_root_space_material(
+                product_id=chosen.product_id,
+                scope_kind=chosen.scope_kind.value,
+                host=chosen.host,
+                path=chosen.path,
+                mode=chosen.mode.value,
+                limits_digest=limits_digest,
+                semantics=CRAWL_SEMANTICS,
             )
+            declared_digest = crawl_root_space_digest(
+                product_id=chosen.product_id,
+                scope_kind=chosen.scope_kind.value,
+                host=chosen.host,
+                path=chosen.path,
+                mode=chosen.mode.value,
+                limits_digest=limits_digest,
+            )
+            root_space_digests[(root.product_id, root.host, root.path)] = declared_digest
+            root_space_materials[(root.product_id, root.host, root.path)] = (
+                declared_material
+            )
+            if root.root_url:
+                root_space_by_url[
+                    (root.product_id, snapshot_url_key(root.root_url))
+                ] = (declared_digest, declared_material)
+        capture_material = (
+            None if root_space is None else parse_space_material(root_space.space_json)
         )
+        if root_space is None or declared_material is None:
+            # Нет стороны сравнения (нет снятия, лимитов или объявленного пространства):
+            # ``None`` — «неизвестно» (A3), решение по часам.
+            space_matches: bool | None = None
+        elif (
+            capture_material is None
+            or capture_material.get("scope") != ROOT_SPACE_SCOPE
+        ):
+            # Снятие записано **не** per-root формой: либо legacy-материал (список всех
+            # корней), либо материала нет вовсе (строка прежней схемы). Оба случая
+            # сравнивать нечем: их ``policy_digest`` посчитан глобальной формулой, а
+            # объявленный — формулой корня, и отпечатки разойдутся у любого такого
+            # снятия независимо от того, менялось ли пространство. Запасное правило «оба
+            # отпечатка известны и различны ⇒ False» здесь дало бы ложное «другое
+            # пространство» и разовый пере-обход всего пакета. ``None`` — «неизвестно»
+            # (A3): решение по часам, состоявшееся снятие сохраняет ``complete``.
+            space_matches = None
+        else:
+            space_matches = space_attests(
+                capture_material=capture_material,
+                declared_material=declared_material,
+                capture_digest=root_space.policy_digest,
+                declared_digest=declared_digest,
+            )
         decision = _decision_for(
             chosen,
             now=_as_utc(now),
@@ -965,4 +1098,7 @@ def resolve_crawl_policy(
         space_material=space_material,
         requested=requests,
         unmatched_requested=unmatched_requested,
+        root_space_digest=root_space_digests,
+        root_space_material=root_space_materials,
+        root_space_by_url=root_space_by_url,
     )

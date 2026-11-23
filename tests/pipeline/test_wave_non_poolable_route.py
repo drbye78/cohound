@@ -81,7 +81,7 @@ def _desc(
     fetch: FetchMode = FetchMode.BROWSER,
     rate_limit: RateLimitSpec | None = None,
 ) -> LocalFetch:
-    """Дескриптор живого фетча: ``poolable=False`` — браузерный маршрут."""
+    """Дескриптор живого фетча: ``poolable=False`` — браузерный маршрут (``route``)."""
     return LocalFetch(
         pid="p1",
         wu=url,
@@ -93,6 +93,7 @@ def _desc(
         resume=None,
         browser_blocked=False,
         poolable=poolable,
+        route="fetch" if poolable else "browser",
         host="browser.test",
         scope_host="browser.test",
         enforce_redirect_scope=True,
@@ -104,13 +105,13 @@ def _desc(
 def _wave(
     entries: list[_WaveEntry],
     *,
-    non_poolable_pool: ThreadPoolExecutor,
+    browser_pool: ThreadPoolExecutor,
     fetch_pool: ThreadPoolExecutor,
 ) -> tuple[Any, WaveOutcomes]:
     request = _dispatch_wave(
         entries,
         pool=fetch_pool,
-        non_poolable_pool=non_poolable_pool,
+        browser_pool=browser_pool,
         local_fetch=partial(local_fetch, limiter=RateLimiter()),
     )
     return request, _await_wave(request, timings=_CorpusStageTimings())
@@ -131,14 +132,14 @@ def test_browser_route_runs_on_its_own_single_thread() -> None:
     ]
     caller = threading.get_ident()
     with (
-        ThreadPoolExecutor(max_workers=1) as non_poolable_pool,
+        ThreadPoolExecutor(max_workers=1) as browser_pool,
         ThreadPoolExecutor(max_workers=2) as fetch_pool,
     ):
         request, outcomes = _wave(
-            entries, non_poolable_pool=non_poolable_pool, fetch_pool=fetch_pool
+            entries, browser_pool=browser_pool, fetch_pool=fetch_pool
         )
 
-    assert request.non_poolable is True
+    assert request.browser is True
     assert len(crawler.threads) == 3
     assert all(tid != caller for tid in crawler.threads)
     # Поток-владелец ``BrowserCrawler`` один: маршрут исполняется строго последовательно.
@@ -168,14 +169,14 @@ def test_poolable_route_does_not_mark_the_wave_and_bypasses_resume() -> None:
     ]
     caller = threading.get_ident()
     with (
-        ThreadPoolExecutor(max_workers=1) as non_poolable_pool,
+        ThreadPoolExecutor(max_workers=1) as browser_pool,
         ThreadPoolExecutor(max_workers=2) as fetch_pool,
     ):
         request, outcomes = _wave(
-            entries, non_poolable_pool=non_poolable_pool, fetch_pool=fetch_pool
+            entries, browser_pool=browser_pool, fetch_pool=fetch_pool
         )
 
-    assert request.non_poolable is False
+    assert request.browser is False
     # Живой фетч ушёл в пул фетча, а не в пул не-poolable маршрута.
     assert len(crawler.threads) == 1
     assert crawler.threads[0] != caller

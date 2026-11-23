@@ -37,7 +37,7 @@
 (`retain`, `core/pipeline/corpus_ingest.py:1283`), durable per-URL состоянием (`crawl_session_items`,
 `core/store/sqlite.py:572`), расширением ссылок из **сырых байтов** (`extract_links`,
 `core/util/html_links.py:105`) и покрытием, выводимым из элементов сеанса и усечения
-(`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:194`), а не из корпуса.
+(`derive_corpus_coverage`, `core/pipeline/corpus_coverage.py:368`), а не из корпуса.
 
 **Не владеет:** конверсией (docling/pdfium/office), нарезкой, эмбеддингом, индексом, дедупом по
 контенту (I17 — свойство корпуса), вердиктами.
@@ -282,7 +282,7 @@ PDF, `docs/reports/measurements/2026-10-29-corpus-retention-footprint.md:37`). �
 **Если потребителя нет вовсе:** краул не встаёт молча и не врёт `completed` — при достижении
 предела он **останавливает приём**, закрывает сеанс `partial` (причина `extract_backlog_full` для
 оси, `disk_low_headroom` для сторожа) и публикует числа (`hound crawl status`,
-`core/cli/commands/crawl.py:963`). Продолжение — `hound crawl resume`, и вот в чём разница причин:
+`core/cli/commands/crawl.py:964`). Продолжение — `hound crawl resume`, и вот в чём разница причин:
 очередь **разбирается**, поэтому после работы потребителя `resume` имеет смысл; свободное место не
 возвращается, поэтому после `disk_low_headroom` `resume` упрётся в то же число, пока носитель не
 освободит оператор. «Видимая остановка» выбрана сознательно вместо «тихо ждать потребителя».
@@ -322,12 +322,12 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 `rate_limit` (`c4d9ee2`) входят в `crawl_config_digest`).
 Прогон прежней семантики под прежним `run_id` больше не воспроизводится — это цель правки, а не
 регресс. Класс — `execution_change` (§9); `EXECUTION_CONTRACT_FIELDS` остаётся **32** поля
-(`core/pipeline/digests.py:96`; «29» было на момент F1–F9): слаг входит через `crawl_config_digest`.
+(`core/pipeline/digests.py:110`; «29» было на момент F1–F9): слаг входит через `crawl_config_digest`.
 
 **Что публикуется о ширине.** Не preflight, а фаза: `lane_notes` (→ `notes`) называет по
 продукту число объявленных host'ов и предел «одновременно полос не больше N» — когда host'ов
-меньше объявленных полос (`core/pipeline/corpus.py:3822-3828`), — а также расхождение
-объявления по корням продукта (`core/pipeline/corpus.py:3787`); это факт, а не тихое усечение.
+меньше объявленных полос (`core/pipeline/corpus.py:3831-3837`), — а также расхождение
+объявления по корням продукта (`core/pipeline/corpus.py:3796`); это факт, а не тихое усечение.
 Ожидаемый критический путь **до** прогона не печатается: он
 считается после, из сеанса, как `wall ≥ max_host (бюджет_host × медиана интервала_host)`
 (`docs/reports/measurements/2026-11-02-crawl-cohort-parallel.md`: `docs.tantorlabs.ru`
@@ -335,14 +335,14 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 
 **Горизонтальный масштаб — не ось.** Число узлов и шард — свойство развёртывания; оно входит в
 провенанс (`node_id`, `host_shard`) и в `EXECUTION_CONTRACT_FIELDS` не входит — там нет ни `owner`,
-ни идентификатора узла (`core/pipeline/digests.py:96`). Причина та же, по которой из `run_id`
+ни идентификатора узла (`core/pipeline/digests.py:110`). Причина та же, по которой из `run_id`
 исключены `owner`/`heartbeat_at` сеанса: узел не меняет измеряемое, если артефакты порядко-независимы
 (§6, F3). Пока F3 не доказан — узел **меняет порядок наблюдения**, и это фиксируется в провенансе
 явно, а не подразумевается.
 
 **Критерий демотирования оси в провенанс.** Если F3 докажет порядко-независимость корпуса **на
 якоре**, `host_concurrency` перестаёт быть полем контракта — ровно по тому доводу, которым
-`extract_workers` уже исключён (`core/pipeline/crawl_frontier.py:215`: «параллелизм извлечения не
+`extract_workers` уже исключён (`core/pipeline/crawl_frontier.py:222`: «параллелизм извлечения не
 может изменить состав корпуса»). Состояние после F3: T3/T4 доказывают, что **набор** `corpus_docs`
 и победитель дедупа не зависят ни от числа полос, ни от порядка завершения страниц, — но это
 тесты, а не замер на пакете. Демотирование — **отдельный акт** после F8: пока ось остаётся
@@ -352,12 +352,12 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 исполняет: при `executor` `lane_width` возвращает `None`, то есть пула нет
 (`core/pipeline/corpus_drain.py:1124`). Ось под `split` — видимый no-op: чередование не
 действует, и это публикуется строкой `lane_notes` («волну собирает шов одним блокирующим
-вызовом», `core/pipeline/corpus.py:3773`), а не `errors` — деградации нет, поэтому и ошибки нет.
+вызовом», `core/pipeline/corpus.py:3782`), а не `errors` — деградации нет, поэтому и ошибки нет.
 
 ## 6. Фазы
 
 * **F1. Ось без поведения — сделана (`a50be3e`).** Поле + условный ключ в `as_dict()` + `CRAWL_AXIS_DESTS`
-  (`core/cli/execution_axes.py:193`) + флаги. Проверка: пин `run_id` без флага;
+  (`core/cli/execution_axes.py:195`) + флаги. Проверка: пин `run_id` без флага;
   `tests/cli/test_plan_crawl_axes.py:202` зелёный; `tests/pipeline/test_corpus_write_order.py:187`
   не сдвинулся.
 * **F2. Краул как отдельный вход — сделана (`f932271`).** `hound crawl run --crawl-only`: frontier + фетч + retention +
@@ -379,7 +379,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **B — дедуп и `errors`.** Победитель контент-дедупа — `min(url)` среди равных `doc_hash`, а не
   первым пришедший. Длительный носитель — аддитивная колонка `crawl_session_items.doc_hash` (хеш
   **извлечённого текста**, а не сырых байтов: по `content_hash` алиасы не группируются); согласование
-  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:630`) и видимо счётчиком
+  идемпотентно (`canonicalize_doc_urls`, `core/pipeline/corpus.py:632`) и видимо счётчиком
   `product_end.canonical_url_changes`, а не тихой подменой адреса. `errors` сортируются при **записи**
   артефакта (`sorted_error_lines`, `core/pipeline/runner.py:167`), без дедупликации.
   **Проверка:** T3, T4 (`tests/pipeline/test_corpus_concurrency.py`), плюс `test_frontier_order.py`,
@@ -651,7 +651,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   До F9 `drive_roots` вызывался **внутри** цикла продуктов, поэтому волна не могла содержать
   корни двух продуктов и окна `fetch_started_at` продуктов не пересекались ни при какой оси
   `crawl.host_concurrency` (наблюдено: продукты когорты шли строго последовательно). Теперь
-  вызов **один на когорту** (`core/pipeline/corpus.py:5461`): поток планов содержит корни всех
+  вызов **один на когорту** (`core/pipeline/corpus.py:5468`): поток планов содержит корни всех
   продуктов в авторском порядке, а граница продукта — типизированный маркер
   `ProductBoundary` (`core/pipeline/corpus_driver.py:146`), а не «смена `product_id`». Маркер
   нужен потому, что смена pid не наступает у **последнего** продукта потока и у продукта без
@@ -659,10 +659,10 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   **Единица права — host на всю когорту.** Реестр claim (`claimed`) один на вызов драйвера:
   волна корня допускается, только если её host'ы не заняты волной **любого** продукта. Поэтому
   synthetic-бакеты ревалидации (leftover каталога, orphan-бакеты) идут тем же потоком планов
-  (`core/pipeline/corpus.py:3515`), а не отдельным дренажом в хвосте продукта: одиночный
+  (`core/pipeline/corpus.py:3524`), а не отдельным дренажом в хвосте продукта: одиночный
   дренаж открыл бы второй реестр и пустил бы бакет на host, который уже держит сосед.
   **Хвост продукта — на главном потоке, при закрытии его последнего корня**
-  (`core/pipeline/corpus.py:4341`; сам вызов — `core/pipeline/corpus_driver.py:438`). Почему
+  (`core/pipeline/corpus.py:4350`; сам вызов — `core/pipeline/corpus_driver.py:438`). Почему
   там: run-DB — SQLite с **одним** писателем (§1), а драйвер — единственный мутатор состояния
   фазы (инвариант T5), значит конверсия, Pass B, покрытие и строка продукта обязаны исполняться
   там же, где коммитятся исходы корней, и не могут идти параллельно ни друг с другом, ни с
@@ -678,11 +678,11 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
   объявленных входов F9 не вводит: объявление самой оси, как и до F9 (F1), даёт новый `run_id`
   штатным `crawl_config_digest`, а F9 меняет только расписание исполнения — то есть ни одного
   нового поля в `EXECUTION_CONTRACT_FIELDS`.
-  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:5184`): ось
+  **Потолок полос продукта** приходит из `lane_limit_for` (`core/pipeline/corpus.py:5193`): ось
   объявлена на корень (`app < run < site`), поэтому продукт со строгим объявлением не получает
   полос «за компанию» с соседом; потолок когорты — максимум объявленных продуктовых значений.
   Продуктовые значения (накопитель, дедуп-множества, счётчик seed'ов, бакеты стадий, группы
-  ревалидации) живут в `ProductContext` (`core/pipeline/corpus.py:1102`): хвост исполняется
+  ревалидации) живут в `ProductContext` (`core/pipeline/corpus.py:1104`): хвост исполняется
   позже планирования, и переменная цикла была бы читателем чужого продукта.
   Проверки: `test_cohort_waves_of_two_products_overlap_on_distinct_hosts` (два продукта на
   разных host'ах реально в полёте вместе; `product_start` второго раньше `product_end`
@@ -741,8 +741,8 @@ T9/T10 — `tests/pipeline/test_crawl_shards.py`). **T12 не реализова
 необъявленной оси расписание прежнее байт-в-байт.
 
 Обвязка многохостовых фейков и два пина поведения под конкурентностью уже есть
-(`tests/pipeline/test_corpus_concurrency.py:389` — `_multi_host_pages`,
-`tests/pipeline/test_corpus_concurrency.py:398` — `_declared_multi_host_profiles`; пины T1/T2 —
+(`tests/pipeline/test_corpus_concurrency.py:390` — `_multi_host_pages`,
+`tests/pipeline/test_corpus_concurrency.py:399` — `_declared_multi_host_profiles`; пины T1/T2 —
 `tests/pipeline/test_corpus_concurrency.py:919`, `tests/pipeline/test_corpus_concurrency.py:957`);
 пин `run_id` — `tests/cli/test_plan_crawl_axes.py:281`.
 
@@ -914,7 +914,7 @@ host'ах, поэтому бюджет, собранный на одном зе�
   `capture` (`core/store/state_sqlite.py:461-462`), то есть bump `STATE`. Дата при этом
   настоящая (`observed_at` = mtime кэша), поэтому на датированный носитель I2d это не влияет.
 - Смена effective crawl policy создаёт execution change.
-  → ✅ `core/pipeline/digests.py:96` (`crawl_strategy`/`crawl_rate_limit`/`crawl_config_digest`
+  → ✅ `core/pipeline/digests.py:110` (`crawl_strategy`/`crawl_rate_limit`/`crawl_config_digest`
   ⇒ новый `run_id`).
 - После технической приёмки всё ещё выполняются реальные PDF/Office, golden, adversarial и
   manual-baseline проверки.
@@ -1019,7 +1019,7 @@ IP-pinning отсутствует). **Gate:** одинаковый fake-server �
 `queue_depth|dlq|lease_age` по `core/` — 0); команд `inspect`, `pause`, `reconcile`, `replay`,
 `explain-entry` нет. Подкоманды `hound crawl` на 08.11.2026 —
 `run|status|list|resume|restart|cancel` + `policy set|list|clear`
-(`core/cli/commands/crawl.py:1986`); `hound extract consume` (`core/cli/commands/extract.py:319`)
+(`core/cli/commands/crawl.py:1987`); `hound extract consume` (`core/cli/commands/extract.py:319`)
 это не `inspect`/`replay`. Наблюдаемость живого краула есть в другом объёме: `crawl_progress`/
 `crawl_product`, `--per-url`, `owner`/`heartbeat_at`/`stale_reason`. Документы уже описывают шов
 и профили, но deployment drill (две edge-реплики, отдельный PDF-пул, два профиля, proxy/DLP

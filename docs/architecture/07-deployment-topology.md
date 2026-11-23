@@ -104,9 +104,9 @@ application-layer firewall (L7). Функционал, которому нуже
 > §6 этого документа; целевой контракт шва — §3.
 >
 > ⬜ **не сделано (2026-10-28, перепроверено 2026-11-08):** `rg -n extractor_zone core/` даёт
-> только `core/config/deploy.py:784` (поле модели), `core/config/deploy.py:802-808` (валидатор)
+> только `core/config/deploy.py:791` (поле модели), `core/config/deploy.py:802-808` (валидатор)
 > и константу `EXTRACTOR_ZONES` (`core/config/deploy.py:98`); сборка экстрактора —
-> `core/cli/wiring.py:2222` (`build_worker_extractor`) — на поле не смотрит.
+> `core/cli/wiring.py:2298` (`build_worker_extractor`) — на поле не смотрит.
 
 > **Почему extractor в core, а не в edge.** Экстракция парсит **недоверенные байты** из
 > интернета — это основная поверхность атаки (парсеры/шрифты/архивы). Идея «вынести её в edge»
@@ -425,7 +425,7 @@ LLM-endpoint корп. облака — только в Z0.
    `resolve_crawl_limits("", app=…, run=…, profiles=None)` (`core/cli/wiring.py:3725`) отдаёт
    только app+run — и это сказано в самом коде: «per-root слой здесь не виден — порты
    собираются до per-root резолва (то же ограничение, что у ``pdf_pipeline`` выше)»
-   (`core/cli/wiring.py:3665-3667`). Итог: под `split` действуют app+run, per-root
+   (`core/cli/wiring.py:3745-3747`). Итог: под `split` действуют app+run, per-root
    переопределение — нет; под `local` действует вся цепочка. Это не «тихий успех» (непринятое
    значение нигде не выдаётся за применённое), но и не сообщается — поэтому пункт открыт, а не
    выдан за сделанный.

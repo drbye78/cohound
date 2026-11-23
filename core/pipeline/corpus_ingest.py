@@ -759,9 +759,15 @@ class LocalFetch:
     (соответственно ``resume_page`` или ``FAILED``-``mark``) пост-фазой в FIFO-порядке
     отправки (детерминизм победителя дедупа и ``errors``).
 
-    ``poolable`` — идёт ли живой фетч в пул: ``True`` только для не-браузерного живого
-    фетча (resume/browser-guard/терминальный ``not_found``/``FetchMode.BROWSER`` — всегда
-    inline на главном потоке).
+    ``poolable`` — идёт ли живой фетч в пул фетча: ``True`` только для не-браузерного
+    живого фетча (resume/browser-guard/терминальный ``not_found`` — живого фетча не делают
+    вовсе).
+
+    ``route`` — **явный маршрут** живого фетча: ``"fetch"`` (HTTP-пул) либо ``"browser"``
+    (пул браузерных движков). До этой оси маршрут выводился из ``not poolable``, и
+    «браузерный» было синонимом «не в пуле»: теперь браузерный фетч идёт в **свой** пул
+    (``browser_workers`` потоков, по движку на поток), а «не в пуле» осталось только у
+    записей без живого фетча.
 
     ``terminal`` — элемент уже получил определённый ответ «ресурса нет» (``not_found``):
     живой фетч не выполняется, пост-фаза лишь подтверждает терминальный исход.
@@ -780,6 +786,9 @@ class LocalFetch:
     host: str
     scope_host: str | None
     enforce_redirect_scope: bool
+    #: Маршрут живого фетча: ``"fetch"`` (пул HTTP) ‖ ``"browser"`` (пул браузерных
+    #: движков). Решается по ``fetch_plan.fetch``: рендер нужен только ``FetchMode.BROWSER``.
+    route: str = "fetch"
     terminal: bool = False
     #: P0: retained raw отклонён по размеру/бинарности — терминальный исход без экстракции.
     reject: RetainedReject | None = None
@@ -2948,15 +2957,17 @@ def local_prefetch(
         getattr(active, "supports_browser", True) is False
         and fetch_plan.fetch is FetchMode.BROWSER
     )
-    # D4/e: в пул идёт ТОЛЬКО живой не-браузерный фетч. Браузерные элементы (даже при
-    # ``supports_browser`` краулере) — никогда: ``BrowserCrawler`` водит единственную
-    # ``_page`` без лока. Resume живого фетча не делает вовсе.
+    # D4/e: в пул фетча идёт ТОЛЬКО живой не-браузерный фетч. Браузерный живой фетч идёт
+    # в **свой** пул (``browser_workers`` потоков, по движку на поток) — маршрут назван
+    # явно (``route``), а не выводится из «не poolable». Resume живого фетча не делает
+    # вовсе.
+    route = "browser" if fetch_plan.fetch is FetchMode.BROWSER else "fetch"
     poolable = (
         resume is None
         and reject is None
         and not terminal
         and not browser_blocked
-        and fetch_plan.fetch is not FetchMode.BROWSER
+        and route == "fetch"
     )
     host = (urlsplit(wu).hostname or "").lower()
     return LocalFetch(
@@ -2970,6 +2981,7 @@ def local_prefetch(
         resume=resume,
         browser_blocked=browser_blocked,
         poolable=poolable,
+        route=route,
         host=host,
         scope_host=scope_host,
         enforce_redirect_scope=enforce_redirect_scope,
@@ -2998,6 +3010,7 @@ def _fetch_with_paced_retries(
     *,
     limiter: RateLimiter,
     pacing: CrawlPacing | None = None,
+    crawler: Any = None,
 ) -> RawPage:
     """Живой фетч с повторами, **каждый из которых берёт свой слот** лимитера.
 
@@ -3028,7 +3041,9 @@ def _fetch_with_paced_retries(
     stats = FetchAttemptStats()
     try:
         return fetch_with_paced_retries(
-            lambda: desc.active.fetch(desc.wu, desc.fetch_plan),
+            lambda: (crawler if crawler is not None else desc.active).fetch(
+                desc.wu, desc.fetch_plan
+            ),
             host=desc.host,
             rate_limit=desc.fetch_plan.rate_limit,
             limiter=limiter,
@@ -3062,6 +3077,7 @@ def local_fetch(
     *,
     limiter: RateLimiter,
     pacing: CrawlPacing | None = None,
+    crawler: Any = None,
 ) -> RawPage:
     """D4 fetch-фаза (**единственный** вызов, идущий в пул): paced-ретраи + ``active.fetch``.
 
@@ -3072,6 +3088,12 @@ def local_fetch(
     Гарантия — внутри процесса; при пуле процессов состояние не разделяется (см.
     ``util/rate_limit``).
 
+    ``crawler`` — движок, которым исполнять **этот** фетч; ``None`` — ``desc.active``
+    (движок, разрешённый на главном потоке). Параметр существует ради браузерного
+    маршрута: там движок принадлежит потоку (Playwright sync-API), и воркер обязан взять
+    **свой** из thread-local, а не общий из дескриптора — иначе ``_assert_owner_thread``
+    отказал бы, а все потоки подрались бы за одну ``_page``.
+
     **Резерв — один на попытку, не один на элемент работы.** Успешный фетч по-прежнему
     делает ровно один резерв; повтор (5xx/408/429/сетевой сбой) — новый резерв, и это
     исправление дефекта 07.11.2026: ретраи загрузчика Scrapy исполнялись внутри одной
@@ -3081,7 +3103,7 @@ def local_fetch(
     Оба пути (:func:`local_fetch` и :func:`fetch_and_commit`) зовут один помощник
     :func:`_fetch_with_paced_retries`, поэтому пейсят одинаково.
     """
-    return _fetch_with_paced_retries(desc, limiter=limiter, pacing=pacing)
+    return _fetch_with_paced_retries(desc, limiter=limiter, pacing=pacing, crawler=crawler)
 
 
 def fetch_and_commit(
@@ -3090,16 +3112,23 @@ def fetch_and_commit(
     limiter: RateLimiter,
     commit_local: Callable[..., LocalOutcome | None],
     pacing: CrawlPacing | None = None,
+    crawler: Any = None,
 ) -> LocalOutcome | None:
     """Inline-фетч на главном потоке + коммит (последовательный путь и browser-режим D4).
 
     Используется, когда фетч **не** уходит в пул: ``max_workers in (None, 1)`` либо
-    browser-элемент (``BrowserCrawler`` не потокобезопасен). Метка ``fetch_started_at``
-    и повторы — тот же помощник, что у пулового пути (:func:`_fetch_with_paced_retries`),
-    поэтому успешный фетч делает ровно один резерв, а повтор — ещё один.
+    браузерный элемент на последовательном маршруте (``browser_workers`` не объявлен).
+    Метка ``fetch_started_at`` и повторы — тот же помощник, что у пулового пути
+    (:func:`_fetch_with_paced_retries`), поэтому успешный фетч делает ровно один резерв,
+    а повтор — ещё один.
+
+    ``crawler`` — движок **этого** вызова (``None`` — ``desc.active``): нужен браузерному
+    маршруту, где движок принадлежит потоку (см. :func:`local_fetch`).
     """
     try:
-        page = _fetch_with_paced_retries(desc, limiter=limiter, pacing=pacing)
+        page = _fetch_with_paced_retries(
+            desc, limiter=limiter, pacing=pacing, crawler=crawler
+        )
     except Exception as exc:  # noqa: BLE001 — изоляция по контракту фазы
         return commit_local(desc, exc=exc)
     return commit_local(desc, page=page)

@@ -1149,3 +1149,119 @@ def test_capture_material_limit_change_zeroes_root_complete() -> None:
     assert coverage.roots[0].policy_matched is False
     assert coverage.roots[0].complete is False
     assert coverage.complete is False
+
+# --------------------------------------------------------------------------- #
+# Вариант 3: пространство сверяется **по корню** (``declared_space_by_root``)
+# --------------------------------------------------------------------------- #
+
+def _root_material(*, limits: str, mode: str = "scheduled") -> dict:
+    from core.pipeline.digests import crawl_root_space_material
+
+    return crawl_root_space_material(
+        product_id=PRODUCT,
+        scope_kind="root",
+        host="docs.test",
+        path="/p1",
+        mode=mode,
+        limits_digest=limits,
+        semantics="crawl-4",
+    )
+
+def _by_root(*, digest: str, material: dict) -> dict:
+    from core.pipeline.digests import snapshot_url_key
+
+    return {snapshot_url_key(ROOT): (digest, material)}
+
+def test_per_root_matching_space_keeps_complete() -> None:
+    """Per-root материал совпал с объявленным — снятие удостоверяет (I2d)."""
+    from core.pipeline.corpus_coverage import encode_space_material
+
+    material = _root_material(limits="lim-1")
+    capture = dataclasses.replace(
+        _capture(policy_digest="d-root"), space_json=encode_space_material(material)
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[capture],
+        declared_space_by_root=_by_root(digest="d-root", material=material),
+    )
+    assert coverage.roots[0].policy_matched is True
+    assert coverage.roots[0].complete is True
+    assert coverage.complete is True
+
+def test_legacy_global_capture_keeps_complete_under_per_root_declaration() -> None:
+    """Legacy-снятие (глобальная форма) не сравнивается — ``complete`` не теряется.
+
+    Формат записи изменился, а не пространство: ``False`` обнулил бы состоявшееся
+    снятие только из-за смены формы (A3: неизвестное не выдаётся за несовпадение).
+    """
+    from core.pipeline.corpus_coverage import encode_space_material
+
+    capture = dataclasses.replace(
+        _capture(policy_digest="legacy-digest"),
+        space_json=encode_space_material(_material(config="c-old", semantics="crawl-4")),
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[capture],
+        declared_space_by_root=_by_root(
+            digest="d-root", material=_root_material(limits="lim-1")
+        ),
+    )
+    assert coverage.roots[0].policy_matched is None
+    assert coverage.roots[0].complete is True
+    assert coverage.complete is True
+
+def test_capture_without_material_keeps_complete_under_per_root_declaration() -> None:
+    """Снятие прежней схемы (материала нет) тоже не сравнивается — ``complete`` цел.
+
+    Его отпечаток посчитан **глобальной** формулой, а объявленный — формулой корня:
+    отпечатки разойдутся у любого такого снятия, поэтому запасное правило «различны ⇒
+    другое пространство» дало бы ложное обнуление и разовый пере-обход всего пакета.
+    """
+    capture = dataclasses.replace(_capture(policy_digest="legacy-global-digest"))
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[capture],
+        declared_space_by_root=_by_root(
+            digest="d-root", material=_root_material(limits="lim-1")
+        ),
+    )
+    assert coverage.roots[0].policy_matched is None
+    assert coverage.roots[0].complete is True
+    assert coverage.complete is True
+
+def test_foreign_per_root_space_zeroes_complete() -> None:
+    """Снятие в другом per-root пространстве носителем не является."""
+    from core.pipeline.corpus_coverage import encode_space_material
+
+    capture = dataclasses.replace(
+        _capture(policy_digest="d-other"),
+        space_json=encode_space_material(_root_material(limits="lim-old")),
+    )
+    coverage = derive_corpus_coverage(
+        product_id=PRODUCT,
+        items=[],
+        truncated=False,
+        computed_at=TS,
+        declared_roots=[ROOT],
+        captures=[capture],
+        declared_space_by_root=_by_root(
+            digest="d-root", material=_root_material(limits="lim-new")
+        ),
+    )
+    assert coverage.roots[0].policy_matched is False
+    assert coverage.roots[0].complete is False
+    assert coverage.complete is False

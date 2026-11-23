@@ -59,7 +59,7 @@ case-sensitive); ``exclude_documents`` — glob по **basename** (послед�
 from __future__ import annotations
 
 import heapq
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -106,6 +106,7 @@ __all__ = [
     "EmbedSpec",
     "Frontier",
     "blacklist_match",
+    "browser_worker_bound",
     "decoded_scope_path",
     "is_blacklisted",
     "normalize_scope_host",
@@ -133,6 +134,12 @@ SUBDOMAIN_REJECT_EXAMPLES_MAX = 3
 
 #: Потолок **примеров** схлопнутых форм одного URL в провенансе (счётчик — точный).
 DUPLICATE_FORM_EXAMPLES_MAX = 10
+
+#: Сколько сообщений об отказах хука постановки в очередь держится у корня.
+#: Счётчик отказов (:attr:`Frontier.enqueue_hook_failures`) точный; список ограничен,
+#: иначе отказ персистенции на 100k URL превратился бы в 100k строк в памяти и в
+#: манифесте, то есть «видимость» стала бы отчётом о сбое хранилища, а не о корне.
+ENQUEUE_HOOK_ERRORS_MAX = 5
 
 #: Слаг **семантики краула** — версия правил обхода, а не осей (F3 плана 17).
 #:
@@ -233,6 +240,14 @@ class CrawlLimits:
     #: отмечает объявление на app/run слое: только тогда ключ попадает в ``as_dict``.
     host_concurrency: int | None = None
     host_concurrency_explicit: bool = False
+    #: Сколько **браузерных движков** (потоков) обслуживают браузерный фетч. ``None``/``1`` —
+    #: сегодняшнее поведение (один движок в одном потоке). Цепочка app < run < site: у этой
+    #: оси per-site слой есть (в отличие от ``host_concurrency``). ``browser_workers_explicit``
+    #: отмечает объявление на app/run/site-слое: только тогда ключ попадает в
+    #: :meth:`as_dict` — прогон без оси обязан сохранить прежний
+    #: ``crawl_config_digest``/``run_id``.
+    browser_workers: int | None = None
+    browser_workers_explicit: bool = False
     #: Темп запросов (ось ``rate_limit``) в **канонической строковой** форме
     #: (:func:`core.domain.models.canonical_rate_limit`). Это **условие измерения**, а не
     #: рычаг расписания: per-site значение перекрывает объявленную run-level ось, то есть
@@ -492,6 +507,13 @@ class CrawlLimits:
         # ``crawl_config_digest`` безусловно.
         if self.host_concurrency_explicit:
             payload["host_concurrency"] = self.host_concurrency
+        # Параллелизм **браузерного** фетча — тоже условие измерения, а не удобство: N
+        # движков одновременно меняют нагрузку на хост (память, CPU, сеть) и wall time
+        # прогона, то есть наблюдаемые условия съёма. Ключ — только при объявлении: прогон
+        # без оси сохраняет прежний ``crawl_config_digest``/``run_id`` (та же дисциплина,
+        # что у ``host_concurrency``).
+        if self.browser_workers_explicit:
+            payload["browser_workers"] = self.browser_workers
         # Темп — условие измерения (перекрытие run-level оси, исход ``429``/``5xx``,
         # взаимодействие с усечением ``max_documents``). Только при объявлении: иначе
         # прогон без темпа получил бы новый ``run_id`` без изменения измерения (§13).
@@ -774,6 +796,40 @@ def _axis_explicit(
     )
 
 
+def browser_worker_bound(
+    app: CrawlConfig,
+    run: CrawlRunConfig | None,
+    profiles: Mapping[str, DomainProfile] | None,
+) -> int | None:
+    """Верхняя граница объявленного числа браузерных движков **когорты**.
+
+    Пул браузерного маршрута создаётся до того, как известны корни (планы ленивые), а
+    ось резолвится per-URL. Поэтому размер пула — максимум по **объявленным** слоям:
+    app, run и все профили доменов. Это верхняя граница любого per-URL резолва
+    (:func:`resolve_crawl_limits`), а не вторая формула: каждое значение здесь — то же
+    поле, которое возьмёт :func:`_pick`.
+
+    ``None`` — ось не объявлена нигде (поведение прежнее: один движок, один поток).
+    Число — **не** потолок: оно описывает объявленное условие, а сколько движков реально
+    понадобилось, публикует наблюдение (``browser_in_flight_max``).
+    """
+    declared = [
+        value
+        for value in (
+            getattr(app, "browser_workers", None),
+            getattr(run, "browser_workers", None) if run is not None else None,
+            *(
+                profile.browser_workers
+                for profile in (profiles or {}).values()
+            ),
+        )
+        if value is not None
+    ]
+    if not declared:
+        return None
+    return max(int(value) for value in declared)
+
+
 def resolve_crawl_limits(
     url: str,
     *,
@@ -882,6 +938,16 @@ def resolve_crawl_limits(
         run_host_concurrency
         if run_host_concurrency is not None
         else app_host_concurrency
+    )
+    # Параллелизм браузерного фетча: цепочка app < run < site — у этой оси per-site слой
+    # есть (движки занимают память/CPU конкретного сайта), поэтому резолв — обычный ``_pick``.
+    run_browser_workers = (
+        getattr(run, "browser_workers", None) if run is not None else None
+    )
+    app_browser_workers = getattr(app, "browser_workers", None)
+    site_browser_workers = profile.browser_workers if profile is not None else None
+    browser_workers = _pick(
+        app_browser_workers, run_browser_workers, site_browser_workers
     )
     # Темп: цепочка **той же формулы**, что исполнение (``resolve_fetch_plan``) —
     # ``site > run``, app-слой темпа не объявляет вовсе. Вторая копия правила разошлась бы
@@ -1163,6 +1229,12 @@ def resolve_crawl_limits(
         ),
         host_concurrency_explicit=_axis_explicit(
             app, "host_concurrency", run_host_concurrency, None
+        ),
+        browser_workers=(
+            None if browser_workers is None else int(browser_workers)
+        ),
+        browser_workers_explicit=_axis_explicit(
+            app, "browser_workers", run_browser_workers, site_browser_workers
         ),
         # Темп: объявление на site/run слое включает ключ дайджеста. Значение уже
         # канонизировано выше — сравнение строковое и не зависит от формата чисел.
@@ -1449,6 +1521,22 @@ class Frontier:
     добытые (retained) страницы этого корня — для ``max_documents``. ``truncated``/
     ``truncated_reason`` фиксируют усечение (потолок документов или глубины) для
     провенанса (D1/G — «честность усечения»).
+
+    **Очередь переживает падение процесса (R1a).** ``on_enqueue`` — хук
+    ``(depth, url, is_revalidation)``, который вызывается **после** фактического принятия
+    URL в очередь, в трёх точках постановки (:meth:`add_seed`, :meth:`discover`,
+    :meth:`add_revalidate_seed`). До него очередь жила только в памяти (``_queue``/
+    ``_seen``): измерено на прогоне ``ru-pg-dbms-3a737f13962f`` — 30 207 строк
+    ``crawl_session_items`` и **ноль** ``pending``, тогда как ``queue_remaining=584``
+    лежал в памяти и был потерян. Форма одна — три позиционных аргумента, а не второй
+    хук: признак ревалидации меняет бюджет изъятия (ревалидация ``max_documents`` не
+    расходует), поэтому он обязан быть рядом с адресом в одном вызове, а не во втором
+    хуке, который каждая новая точка постановки может забыть вызвать.
+
+    Хук **не** участвует в решении о постановке: исключение из него гасится и
+    копится в :attr:`enqueue_hook_errors`/:attr:`enqueue_hook_failures` (очередь —
+    провенанс, а не условие измерения; её сбой не имеет права уронить обход, но обязан
+    быть видимым). ``on_enqueue=None`` (умолчание) — поведение байт-в-байт прежнее.
     """
 
     def __init__(
@@ -1458,6 +1546,7 @@ class Frontier:
         *,
         scope_hosts: Iterable[str] | None = None,
         shard_hosts: Iterable[str] | None = None,
+        on_enqueue: Callable[[int, str, bool], None] | None = None,
     ) -> None:
         self.root_url = root_url
         parsed = urlsplit(root_url)
@@ -1583,6 +1672,21 @@ class Frontier:
         #: у них разные минимумы. Значение пишет драйвер (:func:`note_rate_limit`) из
         #: **того** плана, которым пойдёт запрос, — второго резолва нет.
         self.rate_limits: dict[str, dict[str, float]] = {}
+        #: R1a: хук постановки в очередь ``(depth, url, is_revalidation)`` — durable
+        #: очередь, переживающая падение процесса. ``None`` — очередь только в памяти
+        #: (durable-краул выключен), поведение прежнее.
+        self.on_enqueue: Callable[[int, str, bool], None] | None = on_enqueue
+        #: Отказы хука: точный счётчик + ограниченные сообщения
+        #: (:data:`ENQUEUE_HOOK_ERRORS_MAX`). Сбой персистенции очереди не роняет обход,
+        #: но публикуется провенансом корня — иначе «потеряли очередь» было бы тишиной.
+        self.enqueue_hook_failures = 0
+        self.enqueue_hook_errors: list[str] = []
+        #: R1a: поднятые из durable-очереди ``pending``-URL этого корня и отвергнутые
+        #: подъёмом (scope/блэклист/глубина). Оба числа публикуются в провенансе корня:
+        #: молчаливый дроп поднятого URL — тот же класс дефекта, что тихий обход prefix.
+        self.pending_lifted = 0
+        self.pending_lift_rejected = 0
+        self.pending_lift_rejected_examples: list[str] = []
 
     # -- scope -------------------------------------------------------------- #
 
@@ -1883,6 +1987,7 @@ class Frontier:
         self._seen_forms.add(url_form_key(url))
         heapq.heappush(self._queue, (0, url))
         self.note_host_accept(url)
+        self._notify_enqueue(0, url, is_revalidation=False)
         return "queued"
 
     def add_revalidate_seed(self, url: str) -> str:
@@ -1929,6 +2034,7 @@ class Frontier:
         self._revalidation.add(url)
         heapq.heappush(self._revalidation_queue, (0, url))
         self.note_host_accept(url)
+        self._notify_enqueue(0, url, is_revalidation=True)
         return "queued"
 
     def is_revalidation(self, url: str) -> bool:
@@ -2000,6 +2106,7 @@ class Frontier:
         self._seen_forms.add(url_form_key(url))
         heapq.heappush(self._queue, (depth, url))
         self.note_host_accept(url)
+        self._notify_enqueue(depth, url, is_revalidation=False)
         return True
 
     def offer(self, links: Sequence[str], parent_depth: int) -> None:
@@ -2106,6 +2213,11 @@ class Frontier:
             limits,
             scope_hosts=self.scope_hosts,
             shard_hosts=self.shard_hosts,
+            # R1a: хук — не лимит корня, а способ записи его очереди; клон обходит ту же
+            # очередь с урезанными осями, поэтому постановка в клон обязана попасть туда же.
+            # Отказы хука у клона свои: они говорят о том же хранилище, но не удваивают
+            # счётчик корня.
+            on_enqueue=self.on_enqueue,
         )
         clone._seen = set(self._seen)
         clone._seen_forms = set(self._seen_forms)
@@ -2147,6 +2259,35 @@ class Frontier:
         return clone
 
     # -- внутреннее --------------------------------------------------------- #
+
+    def _notify_enqueue(self, depth: int, url: str, *, is_revalidation: bool) -> None:
+        """Сообщить хуку о принятом в очередь URL (R1a); сбой — видимый, не смертельный.
+
+        Вызывается **после** ``_seen``/кучи: хук получает ровно те адреса, которые
+        очередь приняла, и не может повлиять на решение (он вызывается последним, а
+        исключение гасится). Цена одного вызова — O(1) у вызывающего; на 30 207 URL это
+        буферизуется и пишется пачками (см. ``corpus_drain``), поэтому здесь ничего не
+        копится, кроме отказов.
+        """
+        hook = self.on_enqueue
+        if hook is None:
+            return
+        try:
+            hook(depth, url, is_revalidation)
+        except Exception as exc:  # noqa: BLE001 — очередь вторична к обходу
+            self.note_enqueue_failure(f"{type(exc).__name__}: {exc}")
+
+    def note_enqueue_failure(self, message: str) -> None:
+        """Учесть отказ персистенции очереди (R1a): точный счётчик + примеры.
+
+        Публичная, потому что отказ бывает двух родов: исключение самого хука
+        (:meth:`_notify_enqueue`) и неудавшаяся запись пачки (буфер дренажа пишет
+        пачками и сообщает сюда же). Один носитель — одно место в провенансе: два
+        счётчика читались бы как два разных дефекта.
+        """
+        self.enqueue_hook_failures += 1
+        if len(self.enqueue_hook_errors) < ENQUEUE_HOOK_ERRORS_MAX:
+            self.enqueue_hook_errors.append(message)
 
     def note_duplicate_form(self, url: str) -> None:
         """Учесть схлопнутую форму URL (``/page/`` при известном ``/page``).

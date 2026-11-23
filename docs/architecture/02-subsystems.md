@@ -125,10 +125,10 @@ G1/G2, очередь ревью для G3, Coverage/Capability/артефакт
 принимает только `G1`/`G2`). `--actor` обязателен, `--dry-run` не пишет ничего, повторная
 подача того же решения идемпотентна. Читает аттестацию **только прогон** — он её не пишет;
 материал дайджеста у аттестации и у гейта собирает одна функция
-(`_profile_material_for_run`, `core/cli/context.py:1588`), иначе проверялось бы не то, что
+(`_profile_material_for_run`, `core/cli/context.py:1608`), иначе проверялось бы не то, что
 аттестовано. Проверка подключена: `make_profile_gate`
 (`core/pipeline/profile_attestation.py:313`) → `_profile_gate_resolver`
-(`core/cli/context.py:1677`).
+(`core/cli/context.py:1697`).
 
 **Статус подписи — операционный факт, не дефект дизайна.** Измерено 2026-11-08: **0 строк**
 `profile_attestation` в `state.db` стенда (`~/.cohound/stands/ru-pg-dbms`) — механизмом не
@@ -318,7 +318,7 @@ URL ставится в очередь, если он (1) проходит SSRF-
 
 - `Frontier.host_in_scope` (`core/pipeline/crawl_frontier.py:1300-1324`): хост корня — всегда,
   `www.`-вариант эквивалентен базовому (`normalize_scope_host`,
-  `core/pipeline/crawl_frontier.py:189`); поддомен — **только если
+  `core/pipeline/crawl_frontier.py:204`); поддомен — **только если
   объявлен** (`scope_hosts`: seed-корень продукта или ключ `domain_profiles.yaml`); чужой
   хост и необъявленный поддомен — вне scope.
 - Отказ **видим**: `out_of_scope_subdomains` (точный счётчик по хостам + ограниченные
@@ -359,7 +359,7 @@ index`. Это делает DMZ-шов физической границей **I
 `failed` и не `partial`; статус ставит recovery-on-open по свидетельству живости
 (`owner`/`heartbeat_at`), а `hound crawl cancel` демотирует `running` в `interrupted`
 (`cancelled_by_operator`). `interrupted` обязан оставаться в `_TERMINAL_SESSION_STATUSES`
-(`core/cli/context.py:2354`), иначе `--follow` ждёт вечно.
+(`core/cli/context.py:2374`), иначе `--follow` ждёт вечно.
 `completed` — при отсутствии failed/cancelled, иначе `partial`. При наличии `store` и `run_id` Ш5 перед фетчем читает
 durable-элементы сеанса и **не фетчит повторно** URL, у которого уже есть retained-байты:
 `RawPage` реконструируется из `corpus_raw` (I19: raw — источник), затем идёт ре-экстракция;
@@ -372,7 +372,7 @@ recovery-on-open переводит «зависшие» `running` обратн�
 retained-байтами не фетчится заново
 (правка 07.11.2026: до неё `--reset` стирал сеанс, превращая повтор фазы в новый обход —
 измерено 5 060 `fetched`-элементов и ≈7 ч сети на трёх продуктах при байтах на диске;
-`core/cli/commands/run.py:1457-1481`). У команды `hound crawl run` своя семантика: там `--reset`
+`core/cli/commands/run.py:1458-1481`). У команды `hound crawl run` своя семантика: там `--reset`
 сеанс очищает до старта. Глобальный R7-кэш при `--from-scratch` не используется
 (`cache=None`), поэтому живой фетч гарантирован. Ошибки записи изолируются (фаза остаётся
 `ok`-с-ошибками); счётчики `pending/fetched/failed` идут в `IndexBuild` (наблюдаемость).
@@ -399,7 +399,7 @@ retained-байтами не фетчится заново
 
 **Когда именно идёт развёртка.** Каталог разворачивается **на постановке seed'ов, до
 краула**: `expand_directory` (`core/pipeline/corpus_ingest.py:2440-2479`) вызывается в
-цикле продукта (`core/pipeline/corpus.py:3483`), и каждая запись становится **отдельным
+цикле продукта (`core/pipeline/corpus.py:3492`), и каждая запись становится **отдельным
 seed-корнем глубины 0** — это и есть «один уровень развёртки». Под `split` сетевую часть
 (опрос каталога) исполняет DMZ через `RemoteFeedPoller`, логика развёртки остаётся в ядре.
 Волн «top-level URL → опрос каталогов → записи» нет: `split` подаёт исполнителю **волны
@@ -596,11 +596,11 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1623-1654`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1629-1660`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
-  адаптер (`_resolve_llm_scenarios`, `core/cli/execution_axes.py:838-922`). Провайдер может
+  адаптер (`_resolve_llm_scenarios`, `core/cli/execution_axes.py:840-922`). Провайдер может
   игнорировать `seed`: замер — 4.2 % (5 из 119) ячеек меняют вердикт при идентичном
   `prompt_hash` (`docs/reports/measurements/2026-10-26-verdict-reproducibility.md`). Это
   остаточный недетерминизм, а не гарантия.
@@ -666,7 +666,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 из 70 без доказательства о предмете.
 **Следствие-аномалия теперь публикуется** (V1 закрыт 08.11.2026): записи замера идут в
 операторский `nda_questions.csv` строками `anomaly_kind=unrelated_support`
-(`core/pipeline/report.py:2223`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
+(`core/pipeline/report.py:2267`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
 не меняется. Маркерная проверка класса утверждения (отрицание/условность в цитате против
 заявленного ✅) остаётся **названным ограничением**, а не работой: она требует замера шума
 на корпусе, иначе превращается в порог из головы (A3).
@@ -716,7 +716,7 @@ llm_scenarios:
 **Только `evaluator` и объявляется.** Остальные сценарии (`search_adapter`/`discovery`/
 `concept_scout`) слотов в `deploy.llm` не имеют и в `llm_scenarios` не пишутся —
 пустая таблица честнее выдуманной (`_resolve_llm_scenarios`,
-`core/cli/execution_axes.py:853-857`). Строка `evaluator` появляется только при **активном**
+`core/cli/execution_axes.py:855-857`). Строка `evaluator` появляется только при **активном**
 слоте (непустой `base_url`); если endpoint пришёл из env, таблица остаётся пустой и факт
 «оценщик вне execution contract» сообщает `llm_env_notices`.
 
@@ -828,7 +828,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3881`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3971`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -951,13 +951,13 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3881` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:3971` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:175`, `TEMPLATE_VERSION = "evaluator_v7"`, файлы
 `core/pipeline/templates/evaluator_v{1..7}.txt`; версия входит в `prompt_hash` —
 `core/util/hashing.py:44-74`; с 19.11.2026 в материал hash входят и `group`/`module`); глобальный content-addressed кэш для R7 (ADR 0016) — ✅ сделано
-(`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1867-1878`,
+(`core/util/cache.py:133`, проводка `resolve_content_cache` → `core/cli/context.py:1887-1898`,
 потребитель — `HttpCrawler` и поисковые адаптеры); политика ретраев и backoff —
 ✅ сделано (общая политика HTTP-адаптеров `core/util/retry.py:1-27`,
 `request_with_retry` `core/util/retry.py:129`, потребители — `core/adapters/search_glm.py:486` и

@@ -71,6 +71,7 @@ def _resolve(
     requested: tuple[str, ...] = (),
     crawl_config_digest: str | None = None,
     spaces: dict[tuple[str, str, str], RootSpace] | None = None,
+    root_limits: dict[tuple[str, str, str], dict[str, object]] | None = None,
 ):
     return resolve_crawl_policy(
         package_policy=config,
@@ -83,7 +84,16 @@ def _resolve(
         ),
         crawl_config_digest=crawl_config_digest,
         capture_spaces=spaces,
+        root_limits=root_limits,
     )
+
+def _limits(marker: str, *, max_depth: int = 3) -> dict[str, object]:
+    """Резолвнутые лимиты корня в форме ``CrawlLimits.as_dict()`` (минимальная выборка).
+
+    ``root_limits_digest`` хеширует словарь как есть, поэтому для теста достаточно
+    отличимого значения: важно, что **этот** корень объявлен с другими лимитами.
+    """
+    return {"max_depth": max_depth, "document_level": marker}
 
 
 def test_execution_for_carries_scheduled_mode_and_interval() -> None:
@@ -434,11 +444,29 @@ def test_space_mismatch_forces_refresh_before_the_interval_expires() -> None:
     Расписание отвечает «когда обновлять», но не «в каком пространстве собран корпус».
     Переиспользование снятия, сделанного при других лимитах, измерило бы старое
     пространство под новым объявлением (решение владельца 21.11.2026).
+
+    Снятие записано **per-root** формой с другими лимитами — это наблюдённое расхождение
+    пространства, а не смена формы записи (для неё — ``None``, см.
+    ``test_legacy_global_material_decides_by_clock``).
     """
+    import json
+
+    from core.pipeline.digests import crawl_root_space_material
+
     observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    foreign = crawl_root_space_material(
+        product_id="p1",
+        scope_kind="root",
+        host="docs.test",
+        path="/docs",
+        mode="scheduled",
+        limits_digest="lim-old",
+        semantics="crawl-4",
+    )
     spaces = {
         ("p1", "docs.test", "/docs"): RootSpace(
-            policy_digest="old", space_json=None
+            policy_digest="old",
+            space_json=json.dumps(foreign, sort_keys=True, separators=(",", ":")),
         )
     }
     decision = _resolve(
@@ -447,6 +475,7 @@ def test_space_mismatch_forces_refresh_before_the_interval_expires() -> None:
         observed=observed,
         crawl_config_digest="limits-new",
         spaces=spaces,
+        root_limits={("p1", "docs.test", "/docs"): _limits("text")},
     ).decisions[0]
     assert decision.space_matches is False
     assert decision.decision == "refresh"
@@ -456,15 +485,25 @@ def test_space_mismatch_forces_refresh_before_the_interval_expires() -> None:
 def test_space_match_keeps_clock_decision() -> None:
     """Пространство совпало — решение по часам: ``reuse`` до срока, ``refresh`` после.
 
-    Отпечаток снятия — **тот же** ``space_digest``, который считает резолв (так его пишет
-    ``capture.policy_digest``), поэтому берём его у первого разрешения, а не сочиняем.
+    Снятие берётся в той форме, которую пишет ``_record_root_capture``
+    (:func:`_root_space_from`): отпечаток **и** материал этого корня. Без материала
+    сравнение per-root невозможно (его отпечаток посчитан другой формулой), и решение
+    ушло бы по часам как «неизвестно» — это отдельный тест
+    (``test_legacy_capture_without_material_is_not_compared_per_root``).
     """
     observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    limits = {("p1", "docs.test", "/docs"): _limits("text")}
     declared = _resolve(
-        _scheduled_config(), [ROOT], observed=observed, crawl_config_digest="limits-same"
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits-same",
+        root_limits=limits,
     )
     spaces = {
-        ("p1", "docs.test", "/docs"): RootSpace(policy_digest=declared.space_digest)
+        ("p1", "docs.test", "/docs"): _root_space_from(
+            declared, "p1", "https://docs.test/docs/"
+        )
     }
     fresh = _resolve(
         _scheduled_config(),
@@ -472,6 +511,7 @@ def test_space_match_keeps_clock_decision() -> None:
         observed=observed,
         crawl_config_digest="limits-same",
         spaces=spaces,
+        root_limits=limits,
     ).decisions[0]
     assert fresh.space_matches is True
     assert fresh.decision == "reuse"
@@ -481,6 +521,7 @@ def test_space_match_keeps_clock_decision() -> None:
         observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=200)},
         crawl_config_digest="limits-same",
         spaces=spaces,
+        root_limits=limits,
     ).decisions[0]
     assert stale.decision == "refresh"
 
@@ -508,13 +549,17 @@ def test_unknown_space_decides_by_clock() -> None:
     assert unknown.decision == "reuse"
 
 
-def test_legacy_capture_with_diverged_digest_forces_refresh() -> None:
-    """Строка прежней схемы (материала нет) с другим отпечатком ⇒ ``refresh``.
+def test_legacy_capture_without_material_is_not_compared_per_root() -> None:
+    """Строка прежней схемы (материала нет) с per-root объявлением — решение по часам.
 
-    Это правило **до** появления материала и оно остаётся: оба отпечатка известны и
-    различны — наблюдённое расхождение. Миграция 13 → 14 поэтому не меняет вердиктов;
-    цена — разовый обход, а не «поверили, что пространство то же» (A3 работает в обе
-    стороны: неизвестное не выдаётся за совпадение).
+    Её ``policy_digest`` посчитан **глобальной** формулой (список всех корней пакета), а
+    объявленный — формулой корня, поэтому отпечатки разойдутся у **любого** такого снятия
+    независимо от того, менялось ли пространство. Запасное правило «оба отпечатка известны
+    и различны ⇒ ``False``» здесь дало бы ложное «другое пространство» и разовый пере-обход
+    всего пакета — то есть ровно тот дефект (``81dac2e``), ради которого сверка стала
+    per-root. Правило «без материала сравниваем по отпечатку» остаётся верным только для
+    **глобального** объявления, и оно закреплено на уровне ``space_attests``
+    (``test_legacy_capture_without_material_compares_by_digest``).
     """
     decision = _resolve(
         _scheduled_config(),
@@ -522,9 +567,10 @@ def test_legacy_capture_with_diverged_digest_forces_refresh() -> None:
         observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
         crawl_config_digest="limits-new",
         spaces={("p1", "docs.test", "/docs"): RootSpace(policy_digest="other")},
+        root_limits={("p1", "docs.test", "/docs"): _limits("text")},
     ).decisions[0]
-    assert decision.space_matches is False
-    assert decision.decision == "refresh"
+    assert decision.space_matches is None
+    assert decision.decision == "reuse"
 
 
 def test_space_check_requires_declared_limits() -> None:
@@ -558,14 +604,35 @@ def test_requested_scope_still_wins_over_space_match() -> None:
 
 
 def test_non_scheduled_modes_ignore_space() -> None:
-    """``auto``/``network_denied`` от сверки не зависят: они не решают по часам."""
+    """``auto``/``network_denied`` от сверки не зависят: они не решают по часам.
+
+    Сверка при этом **состоялась** (``space_matches=False`` — снятие в другом per-root
+    пространстве), и режим её просто не читает: иначе тест не отличал бы «не зависит» от
+    «не проверяли».
+    """
     for mode, expected in (("auto", "auto"), ("network_denied", "network_denied")):
-        decision = _resolve(
-            _config(defaults={"mode": mode}),
+        config = _config(defaults={"mode": mode})
+        observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+        declared = _resolve(
+            config,
             [ROOT],
-            observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
-            crawl_config_digest="limits-new",
-            spaces={("p1", "docs.test", "/docs"): RootSpace(policy_digest="old")},
+            observed=observed,
+            crawl_config_digest="limits-same",
+            root_limits={("p1", "docs.test", "/docs"): _limits("text")},
+        )
+        spaces = {
+            ("p1", "docs.test", "/docs"): _root_space_from(
+                declared, "p1", "https://docs.test/docs/"
+            )
+        }
+        decision = _resolve(
+            config,
+            [ROOT],
+            observed=observed,
+            crawl_config_digest="limits-same",
+            spaces=spaces,
+            # Лимиты этого корня изменились — пространство другое.
+            root_limits={("p1", "docs.test", "/docs"): _limits("layout")},
         ).decisions[0]
         assert decision.decision == expected
         assert decision.space_matches is False
@@ -588,3 +655,122 @@ def test_capture_spaces_by_root_maps_urls_to_declared_roots() -> None:
         ("p1", "docs.test", "/docs"): RootSpace(policy_digest="new", space_json='{"a":1}'),
         ("p1", "docs.test", "/other"): RootSpace(policy_digest="other-root"),
     }
+
+# ---------------------------------------------------------------------------
+# Вариант 3: пространство удостоверяется **по корню**, а не дайджестом пакета
+# ---------------------------------------------------------------------------
+
+ROOT_P2 = DeclaredRoot("p2", "other.test", "/docs")
+
+def _root_space_from(resolution, product_id: str, root_url: str) -> RootSpace:
+    """Снятие корня в форме, которую пишет ``_record_root_capture`` (per-root)."""
+    digest, material = resolution.space_for_root(product_id, root_url)
+    assert digest is not None
+    import json
+
+    return RootSpace(
+        policy_digest=digest,
+        space_json=json.dumps(material, sort_keys=True, separators=(",", ":")),
+    )
+
+def test_foreign_site_key_does_not_move_neighbour_space() -> None:
+    """Добавление site-ключа чужого продукта не меняет пространство соседнего корня.
+
+    Дефект ``81dac2e``: один ключ ``support.huaweicloud.com`` сдвинул глобальный
+    ``crawl_config_digest`` у всего пакета, и ``scheduled`` переобошёл чужой продукт.
+    Пространство корня = режим этого корня + лимиты этого адреса, поэтому глобальная
+    смена здесь не видна.
+    """
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    config = _config(
+        sites={
+            "p1": {"docs.test/docs": {"mode": "scheduled", "interval_hours": 168}},
+            "p2": {"other.test/docs": {"mode": "scheduled", "interval_hours": 168}},
+        }
+    )
+    p1_limits = {("p1", "docs.test", "/docs"): _limits("text")}
+    p2_limits = {("p2", "other.test", "/docs"): _limits("layout")}
+    declared = _resolve(
+        config,
+        [ROOT, ROOT_P2],
+        observed=observed,
+        crawl_config_digest="limits-before",
+        root_limits={**p1_limits, **p2_limits},
+    )
+    spaces = {
+        ("p1", "docs.test", "/docs"): _root_space_from(
+            declared, "p1", "https://docs.test/docs/"
+        )
+    }
+    # Чужой site-ключ уже был; его добавление меняет **глобальный** отпечаток, но не
+    # per-root лимиты соседнего корня.
+    after = _resolve(
+        config,
+        [ROOT, ROOT_P2],
+        observed=observed,
+        crawl_config_digest="limits-after-foreign-key",
+        spaces=spaces,
+        root_limits={**p1_limits, **p2_limits},
+    )
+    p1 = next(item for item in after.decisions if item.product_id == "p1")
+    assert p1.space_matches is True
+    assert p1.decision == "reuse"
+
+def test_own_root_limit_change_forces_refresh() -> None:
+    """Смена лимитов **этого** корня — другое пространство ⇒ ``refresh`` до срока."""
+    observed = {("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)}
+    declared = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits",
+        root_limits={("p1", "docs.test", "/docs"): _limits("text", max_depth=3)},
+    )
+    spaces = {
+        ("p1", "docs.test", "/docs"): _root_space_from(
+            declared, "p1", "https://docs.test/docs/"
+        )
+    }
+    changed = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed=observed,
+        crawl_config_digest="limits",
+        spaces=spaces,
+        root_limits={("p1", "docs.test", "/docs"): _limits("text", max_depth=8)},
+    ).decisions[0]
+    assert changed.space_matches is False
+    assert changed.decision == "refresh"
+
+def test_legacy_global_material_decides_by_clock() -> None:
+    """Снятие глобальной формы (список всех корней) не сравнивается — решение по часам.
+
+    Формат другой, а не пространство: ``False`` обнулил бы ``complete`` состоявшегося
+    снятия только из-за смены формы записи.
+    """
+    import json
+
+    legacy_material = {
+        "crawl_space": [
+            ["p1", "root", "docs.test", "/docs", "scheduled"],
+            ["p2", "root", "other.test", "/docs", "scheduled"],
+        ],
+        "crawl_config_digest": "limits",
+        "semantics": "crawl-4",
+    }
+    spaces = {
+        ("p1", "docs.test", "/docs"): RootSpace(
+            policy_digest="legacy-digest",
+            space_json=json.dumps(legacy_material, sort_keys=True),
+        )
+    }
+    decision = _resolve(
+        _scheduled_config(),
+        [ROOT],
+        observed={("p1", "docs.test", "/docs"): NOW - dt.timedelta(hours=2)},
+        crawl_config_digest="limits",
+        spaces=spaces,
+        root_limits={("p1", "docs.test", "/docs"): _limits("text")},
+    ).decisions[0]
+    assert decision.space_matches is None
+    assert decision.decision == "reuse"

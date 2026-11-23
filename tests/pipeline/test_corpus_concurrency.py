@@ -7,7 +7,8 @@
 2. граница конкурентности (записывающий пул, мульти-хостовая волна);
 3. детерминизм FIFO-коммита (retained-set/``index_build_id``/победитель дедупа);
 4. жёсткий стоп ``max_documents`` соблюдён при ``K>1``;
-5. browser-элементы не пулятся (один in-flight);
+5. browser-элементы не пулятся в **HTTP**-пул: у них свой маршрут (``route``), и без
+   объявленной оси ``browser_workers`` он исполняется одним потоком (один in-flight);
 6. resume-элементы минуют пул (живого фетча нет).
 
 Нейтральные данные (§1.3); конкретные адаптеры не импортируются (только контракт портов).
@@ -545,7 +546,7 @@ def test_max_documents_respected_under_concurrency(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# (5) Browser-элементы не пулятся: один in-flight (inline на главном потоке)
+# (5) Browser-элементы не пулятся в HTTP-пул: свой маршрут, один поток без оси
 # --------------------------------------------------------------------------- #
 
 
@@ -555,7 +556,9 @@ def test_browser_items_are_not_pooled(tmp_path: Path) -> None:
     for i in range(3):
         explicit[f"https://h{i}.docs.test/{i}"] = FetchMode.BROWSER
     created: list[_RecordingPool] = []
-    crawler = _Crawler(pages)  # supports_browser=True ⇒ browser-фетч легитимен, но не пулится
+    # supports_browser=True ⇒ browser-фетч легитимен; ось ``browser_workers`` не объявлена
+    # ⇒ браузерный маршрут исполняется одним потоком, а HTTP-пул остаётся пустым.
+    crawler = _Crawler(pages)
 
     result = _build(
         tmp_path,

@@ -303,6 +303,7 @@ def _crawl_policy_resolution(
     *,
     now: _dt.datetime | None = None,
     crawl_config_digest: str | None = None,
+    deploy: Any | None = None,
 ) -> Any:
     """Разрешает политику краула для ``plan``/``run``/``crawl run`` (план 19 §6.1).
 
@@ -317,6 +318,11 @@ def _crawl_policy_resolution(
     ``crawl_config_digest`` — **то же** значение, что входит в контракт прогона
     (``declared.crawl_config_digest``): лимиты краула определяют удостоверяемое
     пространство снятия (I2d), поэтому второй формулы здесь нет.
+
+    ``deploy`` — resolved ``DeployConfig``: если передан, лимиты разрешаются **по корню**
+    (вариант 3) той же цепочкой, что у ``run_id``, и пространство сравнивается по своему
+    корню. ``None`` — лимиты не резолвятся, сверки нет (``crawl policy list`` решает по
+    часам, как и прежде).
     """
     from core.config.crawl_policy import CrawlPolicyConfig
     from core.pipeline.crawl_policy import (
@@ -356,6 +362,19 @@ def _crawl_policy_resolution(
         # Второй якорь решения ``scheduled``: пространство последнего снятия корня.
         # Расхождение с объявленным делает ``refresh`` даже до срока (0.7.0+).
         spaces = capture_spaces_by_root(read_capture_spaces(db_path), roots)
+    # Пространство сравнивается **по корню** (вариант 3): лимиты разрешаются тем же
+    # путём, что у ``run_id`` (операторские оси → run-слой → app < run < product < site),
+    # и снятие соседнего корня не обесценивается добавлением site-ключа чужого продукта.
+    root_limits: dict[tuple[str, str, str], dict[str, Any]] | None = None
+    if deploy is not None:
+        from core.cli.execution_axes import declared_root_limits_for
+
+        root_limits = declared_root_limits_for(
+            args,
+            inputs,
+            deploy,
+            [(root.product_id, root.host, root.path) for root in roots],
+        )
     return resolve_crawl_policy(
         package_policy=policy,
         operator_rows=rows,
@@ -365,6 +384,7 @@ def _crawl_policy_resolution(
         requested=requested,
         crawl_config_digest=crawl_config_digest,
         capture_spaces=spaces,
+        root_limits=root_limits,
     )
 
 
@@ -2903,6 +2923,10 @@ def _resolve_phases(
         # (``_crawl_axis_overrides``), и без проводки ``run_id`` описывал бы полосы и
         # дроссель, которых в исполнении не было.
         "host_concurrency": getattr(args, "host_concurrency", None),
+        # Параллелизм браузерного фетча — та же проводка, что у ``host_concurrency``:
+        # ось объявлена в ``run_id``, значит обязана доехать до Ш5 (иначе прогон объявлял
+        # бы N движков, а исполнял один — ложь о условиях измерения).
+        "browser_workers": getattr(args, "browser_workers", None),
         "extract_backlog_mb": getattr(args, "extract_backlog_mb", None),
         # P5: CLI-уточнение run-слоя уровня извлечения документов (--document-level).
         "document_level": document_level,
@@ -3629,6 +3653,19 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "сколько host'ов процесс краула ведёт одновременно "
             "(дефолт: последовательно, как сегодня; ось входит в run_id при объявлении)"
+        ),
+    )
+    # Параллелизм браузерного фетча: N движков, каждый в своём потоке (Playwright
+    # sync-API не переносим между потоками). ``None`` — сегодняшнее поведение.
+    parser.add_argument(
+        "--browser-workers",
+        dest="browser_workers",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "сколько браузерных движков (потоков) обслуживают браузерный фетч "
+            "(дефолт: один, как сегодня; ось входит в run_id при объявлении)"
         ),
     )
     # F6 (план 17, §4.3): watermark бэклога конверсии (run-слой поверх run.yaml).

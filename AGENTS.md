@@ -328,7 +328,7 @@ chunker knows the address — at slicing time. `text`/`content_hash` do not chan
 16.11.2026: `chunk_text` with and without tables gives byte-identical texts), but
 `chunker_version` → `policy-6` because a reused chunk-set from `state.db` would otherwise come
 back without the address — the same class as `pdfium-text-5`; `chunker_version` is a contract
-field (`digests.py:116`), so this is an `execution_change` with an unchanged corpus text. Why
+field (`digests.py:130`), so this is an `execution_change` with an unchanged corpus text. Why
 phase 2 is an address and not a re-slicing, with numbers: plan `26` §O39 and
 `docs/reports/measurements/2026-11-16-tables.md` (24 documents / 181 tables: no table row is
 longer than the chunk budget, so the cut already falls between rows). The address never reaches
@@ -385,7 +385,7 @@ IP is not implemented; the residual TOCTOU/DNS-rebinding is risk **S9g**, named 
   what the site does not want walked; a forbidden section is therefore **not** "product material
   we failed to download", and no hypothesis is built about what is inside it. A root capture is
   `complete = not incomplete and observed` — `_root_capture_complete`
-  (`core/pipeline/corpus.py:1693`) is the single predicate — where `incomplete = truncated or
+  (`core/pipeline/corpus.py:1695`) is the single predicate — where `incomplete = truncated or
   skipped_documents` and `observed` means at least one page was read (discovery or
   revalidation) or the site refused by its own `robots`. So a `robots` refusal does not keep
   the root unexhausted, does not make the session incomplete, and does not make an origin
@@ -490,12 +490,25 @@ counts in `observed` (`frontier.replayed`) but not in `fetched`, so a root repla
 entirely from bytes still captures `complete=1` (I2d).
 
 **The clock is not the only anchor for `reuse` — the space is the second.** A `scheduled`
-reuse is legitimate only if the stored corpus was gathered in the **declared** space (same
-policy modes, same `crawl_config_digest`), so the decision reads the root's last capture
-(`capture.policy_digest` + `capture.space_json`) and compares it with the declared material
-(`space_attests`). `False` ⇒ `refresh` even before the interval expires: reusing a corpus
-built under other limits would measure the old space under a new declaration. `None` (no
-capture, no material, or the difference is explained by a changed **crawl formula** —
+reuse is legitimate only if the stored corpus was gathered in the **declared** space, so the
+decision reads the root's last capture (`capture.policy_digest` + `capture.space_json`) and
+compares it with the declared material (`space_attests`). **The space is per root**: the mode
+of *this* root plus the resolved limits of *this* address
+(`resolve_crawl_limits(url, …).as_dict()` → `root_limits_digest`), published as
+`CrawlPolicyResolution.root_space_digest`/`space_for_root`. The global
+`crawl_config_digest` still enters `run_id` and still gates the comparison (no declared digest
+⇒ no comparison), but it is **not** the carrier of I2d any more: measured `81dac2e`, where one
+site key (`support.huaweicloud.com`) moved the package-wide digest, every root reported
+`space_matches=false`, `scheduled` said `refresh` instead of `reuse` and a foreign product was
+re-crawled — adding a site key of another product no longer moves a neighbour's space. A
+capture written in the old **global** form (`scope != "root"`) — including a pre-schema-14 row
+with no `space_json` at all — is not compared at all: its `policy_digest` was computed by the
+package-wide formula while the declared one is the root's, so the two would differ for *any*
+such capture whether or not the space moved. `space_matches=None` (decide by the clock) and
+`complete` is kept, because a changed record *format* is not a changed space. `False` ⇒
+`refresh` even before the interval expires: reusing
+a corpus built under other limits would measure the old space under a new declaration. `None`
+(no capture, no material, or the difference is explained by a changed **crawl formula** —
 `CRAWL_SEMANTICS`) ⇒ decide by the clock, because absence of a fact is not a fact of
 absence (A3). The comparison is published as `PolicyDecision.space_matches` and is **not** a
 separate digest field — its consequence is already the `decision`.
@@ -649,7 +662,7 @@ Three facts that are cheap to state and expensive to rediscover:
 ## 9. Run identity, declared axes, versioning
 
 - `run_id` is a function of **declared inputs only**: 37 fields in
-  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:105`). Host-observed values
+  `EXECUTION_CONTRACT_FIELDS` (`core/pipeline/digests.py:119`). Host-observed values
   (`extractor_version`, `embed_model_id`, engine versions, index build) are **provenance**,
   not identity — they surface via `pb`/`index_build_id` and belong to `content_change`.
   `embed_spec` (`model_id@revision`) is the declared twin of `embed_model_id`, exactly as
@@ -682,7 +695,7 @@ Three facts that are cheap to state and expensive to rediscover:
   `rate_limit` (site > run, same formula as execution, key only when declared) — a per-site
   value overrides the run-level axis, so leaving it out let a host be re-paced without a new
   `run_id`. Add a new operator axis to the single inventory `CRAWL_AXIS_DESTS`
-  (`core/cli/execution_axes.py:195`) so `plan` and `run` pick it up together — flag parity is
+  (`core/cli/execution_axes.py:197`) so `plan` and `run` pick it up together — flag parity is
   tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
   current run; otherwise two different corpora become one measurement.
 - **Declared defaults live in `deploy.yaml`, not in code.** `retrieval.profile` (I16),

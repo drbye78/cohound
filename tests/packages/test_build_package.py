@@ -62,6 +62,7 @@ PROFILE_FIELDS = {
     "exclude_paths",
     "exclude_documents",
     "document_level",
+    "browser_workers",
     "sitemap",
 }
 

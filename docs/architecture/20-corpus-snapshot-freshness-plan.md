@@ -24,7 +24,7 @@
 | где | что зашито |
 |---|---|
 | `core/domain/invariants.py:365` (`check_absence_dated`; на момент плана — `_CONFIRMED_REUSE_KINDS` в `evaluate.py`, снято фазой F3) | `❌` публикуется только если сервер ответил **в этом цикле** (сегодня — только если есть **датированный** носитель, I2d) |
-| `core/pipeline/corpus_coverage.py:210-233`, `core/pipeline/corpus_coverage.py:695` (на момент плана — по элементам сеанса; снято F1/F3) | полнота считалась по элементам **этого** сеанса, `observed_sources > 0` |
+| `core/pipeline/corpus_coverage.py:232-255`, `core/pipeline/corpus_coverage.py:855` (на момент плана — по элементам сеанса; снято F1/F3) | полнота считалась по элементам **этого** сеанса, `observed_sources > 0` |
 | `docs/status-dictionary.yaml`, `ReuseKind` | `reused`/`stale` — «сеть не трогалась», а не «наблюдалось тогда-то» |
 
 Поэтому «прогон по старым данным» сейчас неизбежно превращает `❌` в `❓`: не потому что данные
@@ -67,7 +67,7 @@
    `observed_how`, `actor`, `superseded_by` — append-only, как `crawl_policy` (план 19).
 2. `url_state` получает наблюдение: `observed_at`, `observed_how`, `capture_id`,
    `observed_actor`. Существующие `last_checked_at`/`last_changed_at` **не переиспользуются**:
-   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:1067-1084`).
+   `last_checked_at` пишется при любом исходе, включая отказ (`core/pipeline/corpus_ingest.py:1076-1084`).
 3. Ручные артефакты (`hound package state adopt`: `plan_adoption` — `core/pipeline/state_adopt.py:706`,
    `apply_adoption` — `core/pipeline/state_adopt.py:1491`, запись снятия —
    `core/pipeline/state_adopt.py:1630`) создают снятие с
@@ -393,11 +393,11 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 (`core/pipeline/evaluate.py:3280`) и **перенос ячейки из прошлого прогона**
 (`_carried_rules_hold`, `core/pipeline/evaluate.py:439`: перенесённый `❌` проходит то же
 правило, иначе carry-forward обходил бы F3);
-`core/pipeline/corpus_coverage.py:194` + источник `core/pipeline/corpus_coverage.py:695`
+`core/pipeline/corpus_coverage.py:368` + источник `core/pipeline/corpus_coverage.py:912`
 (`iter_crawl_session_items` — сеанс, не снятия);
 `core/domain/invariants.py:293` (`check_absence_coverage` + новый `check_absence_dated`);
-зеркало в `core/pipeline/report.py:2539` (`collect_crawl_truncation_anomalies`)/
-`core/pipeline/report.py:2426` (`collect_absence_undated_anomalies`);
+зеркало в `core/pipeline/report.py:2583` (`collect_crawl_truncation_anomalies`)/
+`core/pipeline/report.py:2470` (`collect_absence_undated_anomalies`);
 `docs/status-dictionary.yaml` (токен `absence_undated`;
 `reuse_unconfirmed` больше не объявлен в коде (словаря он не касался — жил константой
 `core/pipeline/evaluate.py`), но строки старых прогонов читаются как есть);
@@ -424,7 +424,7 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 То есть сегодняшнее поведение жёстче, чем предполагал текст плана: `frozen` не понижает `❌`
 до `❓`, а **теряет ячейки целиком**. Отказ идёт раньше правила `reuse_unconfirmed` —
 `no_sources` срабатывает на `observed_sources = 0`, потому что покрытие считается по
-элементам **сеанса** (`core/pipeline/corpus_coverage.py:194`), а у прохода без сети элементов нет. Снимок
+элементам **сеанса** (`core/pipeline/corpus_coverage.py:368`), а у прохода без сети элементов нет. Снимок
 при этом унаследовал то же удостоверяющее снятие (`complete=true`), и `corpus_as_of`
 совпал до микросекунды — провенанс был прав, а вердикт потерян. Перенос ячеек тоже
 отказывает (`cells_carried=0`), потому что `carry_forward` запинен на `coverage.complete`
@@ -600,6 +600,19 @@ run-DB утверждала «партиция на диске», хотя `comm
 берётся из `declared.crawl_config_digest` (резолв осей поднят **до** политики в `run`/`plan`/
 `crawl run`): второго расчёта `crawl_control_digest` нет.
 
+**Уточнение (вариант 3): носитель — пространство корня, а не пакета.** Глобальный
+`space_digest` (режимы всех корней + `crawl_config_digest` пакета) оказался слишком широким:
+измерено на `81dac2e`, где один site-ключ чужого продукта сдвинул пакетный отпечаток, все
+корни отчитались `space_matches=false`, `scheduled` вместо `reuse` сказал `refresh` и
+переобошёл чужой продукт. Теперь материал пространства строится **по корню**
+(`crawl_root_space_material`: режим этого корня + `root_limits_digest` резолвнутых лимитов
+этого адреса, `"scope": "root"`), `CrawlPolicyResolution.space_for_root` отдаёт его снятию, а
+`_persist_corpus_coverage` получает `declared_space_by_root`. Глобальный
+`crawl_config_digest` остаётся входом `run_id` и условием «пространство объявлено», но
+носителем I2d больше не является. Снятие прежней, **глобальной** формы не сравнивается
+(`space_matches`/`policy_matched = None`) и `complete` не теряет: смена формы записи — не
+смена пространства. `space_digest` пакета сохранён как провенанс (`crawl policy list`).
+
 **Версия.** STATE `11 → 12`: смысл колонки `capture.policy_digest` изменился, поэтому старые
 файлы отвергаются гейтом версии (шимов нет, решение владельца 01.11.2026), данные не
 мигрируются. `SCHEMA_VERSION` 3.20.0 не менялся: форма `roots_json` та же, значения — другие.
@@ -647,13 +660,13 @@ run-DB утверждала «партиция на диске», хотя `comm
 плана, — та, что действовала на момент написания. 20.11.2026 отказ `robots.txt` был
 разделён на «подача закрывает по адресу» / «усечение не закрывает», а 21.11.2026 решение
 владельца сняло вопрос совсем: **`robots` — объявленная граница сайта, а не потеря**, и
-корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1693`) — это
+корень исчерпан без неё: `_root_capture_complete` (`core/pipeline/corpus.py:1695`) — это
 `not incomplete and observed` (0.7.0: `incomplete = truncated or skipped_documents`,
 `observed` — прочитана страница либо был отказ `robots`). Поэтому писатель
 снятия обязан знать техническую неполноту (`truncated`, `skipped_documents`) и
 наблюдённость корня, а не должен ни вычитать отказы `robots`, ни переписывать `complete`
 после подачи
-(`_recompute_root_captures`, `core/pipeline/corpus.py:1724`, публикует лишь разрез
+(`_recompute_root_captures`, `core/pipeline/corpus.py:1726`, публикует лишь разрез
 `resolved_manually`). Подача остаётся входом **следующего** прогона и не подчиняется ни
 расписанию, ни `refresh_policy` (`13-manual-artifacts.md` §3.3).
 

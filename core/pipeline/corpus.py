@@ -157,6 +157,7 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import json
+import threading
 import time
 from collections.abc import (
     Callable,
@@ -291,6 +292,7 @@ from core.pipeline.corpus_state import CorpusCounters
 from core.pipeline.crawl_frontier import (
     CrawlLimits,
     Frontier,
+    browser_worker_bound,
     normalize_scope_host,
     resolve_crawl_limits,
 )
@@ -1785,6 +1787,7 @@ def _build_corpus(
     run_id: str | None = None,
     crawl_sources: CrawlSourcesConfig | None = None,
     crawlers: Mapping[str, CrawlerPort] | None = None,
+    browser_factory: Callable[[], CrawlerPort] | None = None,
     pollers: Mapping[str, PollPort] | None = None,
     session_id: str | None = None,
     executor: CrawlExecutorPort | None = None,
@@ -1902,6 +1905,12 @@ def _build_corpus(
     :param crawlers: опциональная карта ``engine → CrawlerPort``: активный краулер выбирается
         по ``target.engine`` (fallback — ``crawler``). Позволяет per-engine адаптеры без
         изменения сигнатуры ``crawler``.
+    :param browser_factory: ``Callable[[], CrawlerPort]`` — фабрика **своего** браузерного
+        движка на поток. Playwright sync-API привязан к потоку-создателю, поэтому
+        параллельный браузерный фетч возможен только так: каждый поток-воркер поднимает
+        свой движок лениво, при первом обращении, и переиспользует его до конца фазы.
+        ``None`` — прежнее поведение: общий движок из ``crawlers`` в одном потоке.
+        Размер пула — объявленная ось ``browser_workers`` (``None``/``1`` — один поток).
     :param pollers: Phase 5.2/D3 — карта ``kind → PollPort`` для источников-каталогов
         (``feed``/``channel``) и sitemap (``sitemap``): ``kind`` направления резолвится в
         pipeline, каталог/sitemap поллится, entries — ссылки; контент добывается обычным
@@ -2682,12 +2691,69 @@ def _build_corpus(
         applied_engines=applied_engines,
     )
     _local_fetch = partial(corpus_ingest.local_fetch, limiter=limiter, pacing=pacing)
+    # --- Браузерный маршрут: движок на поток -------------------------------- #
+    # Playwright sync-API не переносим между потоками, поэтому один общий движок
+    # обслуживает только последовательный маршрут. При объявленной оси ``browser_workers``
+    # каждый поток-воркер поднимает **свой** движок (thread-local, лениво) и живёт с ним до
+    # конца фазы; ``desc.active`` (движок, разрешённый на главном потоке) в этом режиме не
+    # используется вовсе — иначе ``_assert_owner_thread`` отказал бы всем потокам, кроме
+    # одного.
+    _browser_local = threading.local()
+    #: Движки, поднятые воркерами: ``thread_ident → crawler``. Нужны teardown'у — закрыть
+    #: каждый движок **на его потоке** (``_shutdown_browser_owner``).
+    _browser_engines: dict[int, Any] = {}
+    _browser_engines_lock = threading.Lock()
+
+    def _thread_browser() -> Any:
+        """Движок этого потока (поднимается при первом обращении, дальше переиспользуется)."""
+        crawler = getattr(_browser_local, "crawler", None)
+        if crawler is None:
+            if browser_factory is None:
+                # Инвариант: маршрут ``browser`` с фабрикой обязателен; без неё движок
+                # берётся из дескриптора (прежнее поведение) — см. ``_local_fetch_routed``.
+                raise AssertionError(
+                    "браузерный маршрут без фабрики движка: движок обязан быть на поток"
+                )
+            crawler = browser_factory()
+            _browser_local.crawler = crawler
+            with _browser_engines_lock:
+                _browser_engines[threading.get_ident()] = crawler
+        return crawler
+
+    def _local_fetch_routed(desc: corpus_ingest.LocalFetch) -> Any:
+        """Живой фетч по маршруту дескриптора: HTTP — как прежде, браузер — своим движком.
+
+        Разрешение движка для браузерного маршрута происходит **внутри воркера** (из
+        thread-local), а не на главном потоке: иначе все потоки взяли бы один движок и
+        Playwright отказал бы каждому, кроме владельца.
+        """
+        if desc.route == "browser" and _browser_factory_active:
+            return corpus_ingest.local_fetch(
+                desc,
+                limiter=limiter,
+                pacing=pacing,
+                crawler=_thread_browser(),
+            )
+        return _local_fetch(desc)
+
     _fetch_and_commit = partial(
         corpus_ingest.fetch_and_commit,
         limiter=limiter,
         commit_local=_commit_local,
         pacing=pacing,
     )
+
+    def _fetch_and_commit_routed(desc: corpus_ingest.LocalFetch) -> Any:
+        """Последовательный путь: фетч + коммит по маршруту дескриптора.
+
+        Последовательный путь исполняется на главном потоке (пула фетча нет), поэтому
+        браузерный маршрут берёт движок **этого** потока из thread-local — тот же
+        носитель, что у воркеров пула. Без фабрики (``browser_workers`` не объявлен)
+        путь прежний: ``desc.active`` из дескриптора.
+        """
+        if desc.route == "browser" and _browser_factory_active:
+            return _fetch_and_commit(desc, crawler=_thread_browser())
+        return _fetch_and_commit(desc)
     _local_prefetch = partial(
         corpus_ingest.local_prefetch,
         validators=_validators,
@@ -2711,7 +2777,7 @@ def _build_corpus(
         corpus_ingest.process_local,
         local_prefetch=_local_prefetch,
         commit_local=_commit_local,
-        fetch_and_commit=_fetch_and_commit,
+        fetch_and_commit=_fetch_and_commit_routed,
     )
     _submit_collect = partial(
         corpus_ingest.submit_collect,
@@ -3247,6 +3313,11 @@ def _build_corpus(
             raise AssertionError(
                 f"{plan.root_url}: план без продукта в когортном дренаже"
             )
+        # R1a: снятие пишется **в начале** — до первого шага дренажа. Прогон, упавший на
+        # первом корне, больше не выглядит так, будто корня не касались: датированное
+        # снятие с ``complete=False`` переживает падение, а финальная запись на границе
+        # корня перезапишет ``complete``/``finished_at`` той же строки.
+        _record_root_start(plan, str(product_id), _now_iso())
         return corpus_drain.root_lifecycle(
             plan,
             product=ctx.scope,
@@ -3358,10 +3429,12 @@ def _build_corpus(
         догоняется той же строкой (``record_capture`` обновляет дайджесты, не трогая
         ``started_at``): второй расчёт не появляется.
 
-        ``policy_digest`` — отпечаток **удостоверяемого пространства** прогона
-        (``crawl_policy.space_digest``: режимы + лимиты краула). Отпечаток поверхности
-        решений (``crawl_policy.digest``) остаётся входом ``run_id`` и носителем здесь не
-        является: «когда смотреть» не решает, «что исчерпано» (I2d).
+        ``policy_digest`` — отпечаток удостоверяемого пространства **этого корня**
+        (``crawl_policy.space_for_root``: режим корня + резолвнутые лимиты этого адреса).
+        Глобальный ``crawl_policy.space_digest`` носителем не является: он описывает пакет
+        и менялся бы от site-ключа чужого продукта. Отпечаток поверхности решений
+        (``crawl_policy.digest``) остаётся входом ``run_id``: «когда смотреть» не решает,
+        «что исчерпано» (I2d).
         """
         if state is None or run_id is None:
             return
@@ -3381,6 +3454,15 @@ def _build_corpus(
             frontier.fetched + frontier.revalidation_fetched + frontier.replayed > 0
             or bool(frontier.robots_refused_urls)
         )
+        # Пространство **по корню** (вариант 3): снятие несёт отпечаток и материал
+        # именно этого корня (режим корня + резолвнутые лимиты этого адреса), а не
+        # глобальный отпечаток пакета. Тогда добавление site-ключа чужого продукта не
+        # обесценивает состоявшееся снятие соседнего корня.
+        root_digest, root_material = (
+            (None, None)
+            if crawl_policy is None
+            else crawl_policy.space_for_root(product_id, plan.root_url)
+        )
         capture = CaptureRow(
             capture_id=_capture_id_for(product_id, plan.root_url, run_id),
             product_id=product_id,
@@ -3390,13 +3472,11 @@ def _build_corpus(
             finished_at=_now_iso(),
             complete=_root_capture_complete(incomplete=incomplete, observed=observed),
             observed_how=CAPTURE_OBSERVED_LIVE,
-            policy_digest=None if crawl_policy is None else crawl_policy.space_digest,
+            policy_digest=root_digest,
             # Материал того же пространства: отпечаток отвечает «совпало ли», материал —
             # «что разошлось». Без него смена формулы обхода читалась бы как другое
             # пространство и обнуляла состоявшееся снятие.
-            space_json=encode_space_material(
-                None if crawl_policy is None else crawl_policy.space_material
-            ),
+            space_json=encode_space_material(root_material),
         )
         try:
             state.record_capture(capture)
@@ -3409,6 +3489,62 @@ def _build_corpus(
             # Разрез подачи считается по записанной строке: отказы нужны только для него.
             root_captures[(product_id, snapshot_url_key(plan.root_url))] = (
                 _RootCaptureState(refused=refused)
+            )
+
+    def _record_root_start(
+        plan: corpus_drain.RootPlan, product_id: str, started_at: str
+    ) -> None:
+        """R1a: записать **начало** обхода корня до первого шага дренажа.
+
+        Зачем вторая запись той же строки: снятие писалось только на границе корня, а
+        граница наступает после обхода. Измерено на прогоне ``ru-pg-dbms-3a737f13962f``
+        (24.11.2026): первый проход одного корня убит OOM до записи снятия, возобновление
+        по расписанию увидело ``scheduled`` ⇒ ``reuse`` ⇒ корень **никогда** не получил
+        снятия, и ``bounded``-отсутствие (I2d) по нему недоказуемо (потолок 0.7735 вместо
+        0.9381).
+
+        Строка пишется с ``complete=False`` и ``finished_at=None``: обход **начат**, но не
+        исчерпан. Это не «удостоверение отсутствия», а датированный след касания: корень,
+        на котором прогон упал, теперь датирован, а не выглядит нетронутым.
+
+        ``capture_id`` тот же, что у финальной записи (детерминирован от
+        ``(product, root, run_id)``), поэтому ``_CAPTURE_UPSERT`` перезапишет
+        ``complete``/``finished_at`` на границе корня и **не** тронет ``started_at``:
+        порядок «сначала 0, потом реальное» — ровно то, что умеет эта формула.
+
+        Пространство (``policy_digest``/``space_json``) считается **той же** функцией, что
+        у финальной записи (``crawl_policy.space_for_root``): второй формулы «какое
+        пространство объявлено» нет. Преждевременная запись из-за этого даёт
+        ``space_matches=True`` при ``complete=0`` — это ожидаемо (пространство объявлено и
+        обход начат), а исчерпанием ``complete=0`` не читается нигде: I2d-предикат
+        (``_attests_declared_space``) требует ``complete``, а ``_root_capture_complete``
+        его только вычисляет.
+        """
+        if state is None or run_id is None or not plan.seed:
+            return
+        root_digest, root_material = (
+            (None, None)
+            if crawl_policy is None
+            else crawl_policy.space_for_root(product_id, plan.root_url)
+        )
+        capture = CaptureRow(
+            capture_id=_capture_id_for(product_id, plan.root_url, run_id),
+            product_id=product_id,
+            run_id=run_id,
+            root_url=plan.root_url,
+            started_at=started_at,
+            finished_at=None,
+            complete=False,
+            observed_how=CAPTURE_OBSERVED_LIVE,
+            policy_digest=root_digest,
+            space_json=encode_space_material(root_material),
+        )
+        try:
+            state.record_capture(capture)
+        except Exception as exc:  # noqa: BLE001 — снятие вторично к дренажу
+            errors.append(
+                f"{product_id}/{plan.root_url}: capture(start): "
+                f"{type(exc).__name__}: {exc}"
             )
 
     def _policy_skip(
@@ -5232,16 +5368,14 @@ def _build_corpus(
                     # F3: объявленные корни продукта + их снятия (``complete`` по снятиям).
                     declared_roots={product_id: product_roots},
                     captures={product_id: product_captures},
-                    # Объявленный отпечаток **удостоверяемого пространства** — тот же
-                    # объект, что несёт снятие (режимы + лимиты); поверхность решений
-                    # остаётся входом ``run_id`` и здесь не сверяется (I2d).
-                    declared_space_digest=(
-                        None if crawl_policy is None else crawl_policy.space_digest
-                    ),
-                    # Материал того же пространства — сторона сравнения для снятий,
-                    # записанных со схемой 14 (объясняет расхождение отпечатков).
-                    declared_space_material=(
-                        None if crawl_policy is None else crawl_policy.space_material
+                    # Пространство сверяется **по корню** (вариант 3): карта продукта,
+                    # ключ — ``snapshot_url_key(root_url)``. Снятие несёт отпечаток
+                    # своего корня, поэтому добавление site-ключа чужого продукта не
+                    # обесценивает соседние корни.
+                    declared_space_by_root=(
+                        None
+                        if crawl_policy is None
+                        else {product_id: crawl_policy.space_by_root_url(product_id)}
                     ),
                 )
                 # 16 §3.2: ``coverage_complete`` строки продукта — та же величина, что
@@ -5263,9 +5397,6 @@ def _build_corpus(
         ):
             try:
                 live_coverage_digest = coverage_digest(product_coverage)
-                live_policy_digest = (
-                    None if crawl_policy is None else crawl_policy.space_digest
-                )
                 live_doc_set_digest = product_doc_set_digest
                 for capture in product_captures:
                     if (
@@ -5273,6 +5404,16 @@ def _build_corpus(
                         or capture.observed_how != CAPTURE_OBSERVED_LIVE
                     ):
                         continue
+                    # Отпечаток пространства — **этого** корня (вариант 3): догон
+                    # дайджестов не переписывает носитель на глобальный, иначе правка
+                    # site-ключа чужого продукта снова обесценила бы снятие.
+                    live_policy_digest = (
+                        None
+                        if crawl_policy is None
+                        else crawl_policy.space_for_root(
+                            product_id, capture.root_url
+                        )[0]
+                    )
                     state.record_capture(
                         replace(
                             capture,
@@ -5451,10 +5592,26 @@ def _build_corpus(
     # останавливается. Иначе браузерный процесс висел бы до конца фазы (на хосте 6.9 GiB
     # это удерживаемые ~300 MB). Фаза без браузерного движка пул не заводит вовсе: потоку
     # нечего было бы владеть, а браузерный фетч без движка невозможен.
+    # Размер пула — объявленная ось ``browser_workers``: верхняя граница per-URL резолва
+    # (``browser_worker_bound``), потому что планы корней ленивые, а пул нужен до первого.
+    # ``None`` — ось не объявлена ни на одном слое: один поток, прежнее поведение.
+    _browser_workers = browser_worker_bound(
+        crawl_app if crawl_app is not None else CrawlConfig(),
+        crawl_defaults,
+        domain_profiles,
+    )
+    _browser_pool_width = 1 if _browser_workers is None else max(1, int(_browser_workers))
+    # Фабрика включается **только** при объявленном параллелизме (>1). Иначе поведение
+    # прежнее байт-в-байт: общий движок из ``crawlers``, один поток, тот же teardown —
+    # «один движок, один поток» не должен становиться другим движком из-за того, что
+    # фабрика просто существует.
+    _browser_factory_active = browser_factory is not None and _browser_pool_width > 1
     _browsers = _browser_engine_crawlers([crawler, *(crawlers or {}).values()])
     browser_pool = (
-        ThreadPoolExecutor(max_workers=1, thread_name_prefix="cohound-browser")
-        if _browsers
+        ThreadPoolExecutor(
+            max_workers=_browser_pool_width, thread_name_prefix="cohound-browser"
+        )
+        if (_browsers or _browser_factory_active)
         else None
     )
     try:
@@ -5463,11 +5620,12 @@ def _build_corpus(
             host_concurrency=None if _cohort_lane_axis <= 1 else _cohort_lane_axis,
             begin=_begin_root,
             lane_width=_lane_width,
-            local_fetch=_local_fetch,
+            local_fetch=_local_fetch_routed,
             timings_for=_timings_for,
             errors=errors,
             pool_factory=pool_factory,
             browser_pool=browser_pool,
+            browser_workers=_browser_workers,
             notes=lane_notes,
             on_root_done=_root_done,
             on_product_done=_close_product,
@@ -5491,7 +5649,12 @@ def _build_corpus(
     finally:
         if browser_pool is not None:
             _shutdown_browser_owner(
-                browser_pool, _browsers, errors=errors, label=" когорты"
+                browser_pool,
+                _browsers,
+                errors=errors,
+                label=" когорты",
+                per_thread=_browser_engines,
+                per_thread_lock=_browser_engines_lock,
             )
 
     # Конец прохода когорты: если краул закончился не в хвосте продукта (при объявленной
@@ -5645,13 +5808,16 @@ def _build_corpus(
                 # F3: объявленные корни и их снятия — второй предикат полноты нет.
                 declared_roots=url_map,
                 captures=coverage_captures,
-                declared_space_digest=(
-                    None if crawl_policy is None else crawl_policy.space_digest
-                ),
-                # Тот же материал, что на границе продукта: перезапись строки покрытия
-                # обязана сохранить объяснение расхождения отпечатков.
-                declared_space_material=(
-                    None if crawl_policy is None else crawl_policy.space_material
+                # Пространство **по корню** (вариант 3): та же карта по продуктам, что на
+                # границе продукта. Перезапись строки покрытия обязана сверять тем же
+                # пространством, иначе полное снятие корня теряло бы носителя.
+                declared_space_by_root=(
+                    None
+                    if crawl_policy is None
+                    else {
+                        pid: crawl_policy.space_by_root_url(pid)
+                        for pid in sorted(set(url_map) | set(products))
+                    }
                 ),
                 # Измеренные строки продуктов, которых это исполнение не обходило, не
                 # переписываются нулями (см. ``preserved_products``).
@@ -6256,6 +6422,8 @@ def _shutdown_browser_owner(
     *,
     errors: list[str],
     label: str = "",
+    per_thread: dict[int, Any] | None = None,
+    per_thread_lock: Any = None,
 ) -> None:
     """Закрыть браузерный движок **на его потоке** и остановить поток фазы.
 
@@ -6274,6 +6442,14 @@ def _shutdown_browser_owner(
 
     ``targets`` — уже отобранные :func:`_browser_engine_crawlers`: чужие транспорты из
     этого пула не трогаются (у Scrapy своё владение потоком).
+
+    ``per_thread`` — движки, поднятые воркерами браузерного маршрута
+    (``thread_ident → crawler``). Их закрывает **каждый свой поток**: поток-адресат у
+    ``ThreadPoolExecutor`` не выбирается, поэтому в пул подаётся по задаче на движок, и
+    задача закрывает ровно тот движок, чей поток её исполняет. Если после этого движки
+    остались (поток успел взять две задачи, а другой — ни одной), это **называется** в
+    ``errors``: незакрытый браузерный процесс живёт до конца процесса, и молчать о нём
+    нельзя — teardown не подменяет исход, но и не притворяется выполненным.
     """
     def _close_engines() -> list[str]:
         """Исполнить закрытие на потоке-владельце; вернуть строки сбоев (не бросать)."""
@@ -6293,5 +6469,69 @@ def _shutdown_browser_owner(
         )
     else:
         errors.extend(f"crawl{label}: close(браузер): {failure}" for failure in failures)
+    try:
+        if per_thread:
+            _close_per_thread_engines(pool, per_thread, per_thread_lock, errors, label)
     finally:
+        # Поток останавливается **всегда**: даже если закрытие движков не удалось,
+        # висящий поток пула — это утечка на всю оставшуюся фазу.
         pool.shutdown(wait=True)
+
+def _close_per_thread_engines(
+    pool: ThreadPoolExecutor,
+    registry: dict[int, Any],
+    lock: Any,
+    errors: list[str],
+    label: str,
+) -> None:
+    """Закрыть движки браузерного маршрута **на их потоках** (по одному на движок).
+
+    Поток-адресат у пула не выбирается, поэтому подаётся по задаче на каждый
+    зарегистрированный движок: задача закрывает только тот движок, чей поток её
+    исполняет. Остаток (если распределение сложилось неудачно) **называется**: молча
+    оставленный браузерный процесс — это сотни мегабайт до конца процесса.
+    """
+    def _close_own() -> str | None:
+        """Закрыть движок своего потока (``None`` — у этого потока движка нет)."""
+        with lock:
+            crawler = registry.pop(threading.get_ident(), None)
+        if crawler is None:
+            return None
+        try:
+            crawler.close()
+        except Exception as exc:  # noqa: BLE001 — teardown не подменяет исход
+            return f"{type(exc).__name__}: {exc}"
+        return None
+
+    # Раунды до опустошения реестра: поток-адресат не выбирается, поэтому одна задача
+    # может достаться потоку, у которого движка уже нет. Раунд без прогресса —
+    # единственный честный признак, что закрыть нечем: тогда остаток **называется**.
+    while True:
+        with lock:
+            remaining = len(registry)
+        if not remaining:
+            return
+        before = remaining
+        for _ in range(remaining):
+            try:
+                failure = pool.submit(_close_own).result()
+            except Exception as exc:  # noqa: BLE001 — пул мог не запустить поток
+                errors.append(
+                    f"crawl{label}: закрытие браузерного движка: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                break
+            if failure is not None:
+                errors.append(f"crawl{label}: close(браузер): {failure}")
+        with lock:
+            if len(registry) >= before:
+                # Ни одна задача раунда не попала на поток с движком: дальше пробовать
+                # нечего — распределение задач у пула не наше.
+                break
+    with lock:
+        leftovers = len(registry)
+    if leftovers:
+        errors.append(
+            f"crawl{label}: не закрыто браузерных движков: {leftovers} "
+            "(поток-владелец не получил задачу закрытия; процесс живёт до конца прогона)"
+        )

@@ -467,6 +467,7 @@ def _execute_crawl_locked(
             inputs,
             seed_config,
             crawl_config_digest=declared.crawl_config_digest,
+            deploy=deploy_config,
         )
     except CrawlPolicyConflict as exc:
         raise CliError(str(exc), code=exc.code, exit_code=EXIT_USAGE) from exc

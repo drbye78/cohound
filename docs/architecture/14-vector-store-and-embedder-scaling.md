@@ -130,7 +130,7 @@ Brute-force косинус, тот же код (`_cosine_scores`), 1024 dim. З�
 3. `for chunk_id, score in zip(...): meta = self._lookup(chunk_id)` — резолвер
    метаданных вызывается для **всех** 11 400 чанков, хотя нужны только `top_k=10`. В
    composition root это `chunk_lookup=store.get_chunk` (`core/cli/commands/run.py:416`,
-   `core/cli/context.py:2046`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
+   `core/cli/context.py:2066`) — то есть **11 400 запросов в SQLite на каждый поиск**. Замер
    point-lookup в БД прогона: 4 мкс ⇒ 42 ms на поиск.
 
 Сумма на один поиск при масштабе: 23.3 MB чтения + 27.8 ms конверсии + 4.5 ms матмула +
@@ -179,13 +179,13 @@ top-10 из 600** у близких соседей. Замер при едино
 
 Что осталось незакрытым и названо числом: `chunk_lookup` поштучный — 98 ms из 332 ms на
 600 запросов (30 %). Рычаг реализован, но не подключён: батч-чтение уже есть в порту
-(`StorePort.get_chunks(ids)`, `core/ports/store.py:705` — заведено ровно под гидратацию
+(`StorePort.get_chunks(ids)`, `core/ports/store.py:752` — заведено ровно под гидратацию
 ретривала, A1/Д-3) и в хранилище (`SqliteStore.get_chunks`,
 `core/store/sqlite_store.py:3373`; `IN (...)` пачками по `_CHUNK_ID_BATCH = 500`, `:3206`).
 `_resolve_top` по-прежнему зовёт `self._lookup(chunk_id)` на каждого кандидата
 (`core/adapters/vector_npy.py:374` и `:383`; тип резолвера — `:73`), а композиционный корень
 передаёт поштучный `store.get_chunk` (`core/cli/commands/run.py:416`,
-`core/cli/context.py:2046`). Это не дефект §6, а названный следующий шаг: цена
+`core/cli/context.py:2066`). Это не дефект §6, а названный следующий шаг: цена
 **5.29 ms/поиск** держится, пока батч не подключён.
 
 ## 4. Вывод по Qdrant
@@ -213,7 +213,7 @@ top-10 из 600** у близких соседей. Замер при едино
 | HNSW/IVF по 17 млн | **нет**: поиск продукт-скоупед, 108.6 тыс. на крупнейшей партиции — brute force быстрее ANN |
 | Квантование int8 (4× меньше) | частично: 93 GB → 23 GB, но fp16 уже даёт 2×, а диск не узкое место |
 | Фильтрация (payload) | **нет**: фильтр — это `product_id`, он и так задаёт партицию |
-| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2475`) |
+| Инкрементальный upsert чанка | **да, но** это ровно то, что делает per-chunk кэш векторов — ✅ сделан (`core/pipeline/embed_cache.py`, ключ `(content_hash, embed_model_id, embed_device, embed_precision)`; подключён в `core/cli/context.py:2495`) |
 | Общий индекс для нескольких нод | **да** — единственное настоящее преимущество, см. ниже |
 | Одновременные читатели/писатели | **нет**: у нас модель «иммутабельная сборка», читателей несколько, писатель один на прогон |
 
@@ -237,7 +237,7 @@ top-10 из 600** у близких соседей. Замер при едино
 **Статус на 2026-11-07:** порог 1 не срабатывает (108 614 против 200 000, запас 1.84×, §1);
 порог 2 — второго читателя индекса нет: индекс лежит в файловой партиции на одном хосте, а
 `split` разводит по зонам **краул и извлечение**, не индекс (`07-deployment-topology.md`
-§6, `core/pipeline/digests.py:157-171`); порог 3 на нужном масштабе не измерен — ❔ не
+§6, `core/pipeline/digests.py:171-185`); порог 3 на нужном масштабе не измерен — ❔ не
 проверено. Итого: решение держится на порогах 1–2 и не проверено по 3.
 
 **Что сделать вместо Qdrant — и это дешевле.** Порт уже правильной формы:
@@ -355,7 +355,7 @@ embed:
 `local`) держится **побочно** — дефолт и есть единственная реализация. Действует уже сейчас
 только кэш векторов по чанкам `core/pipeline/embed_cache.py` (ключ `(content_hash,
 embed_model_id, embed_device, embed_precision)`): подключён в
-`core/cli/context.py:2965-2967` и в раскладку `core/config/paths.py:79`.
+`core/cli/context.py:2985-2987` и в раскладку `core/config/paths.py:79`.
 
 Контракт `RemoteEmbedder` (реализуется за портом, `pipeline` его не видит):
 
@@ -383,10 +383,10 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 объявленной, ни отказа на пустой пин (правило 1 §5.0).
 Нормативная часть (смена `embed_model_id` классифицируется как `content_change`, а не
 `execution_change`) держится: `embed_model_id` в `EXECUTION_CONTRACT_FIELDS` не входит
-(`core/pipeline/digests.py:84-90`), то есть для внешнего инстанса дефект Д-8 остаётся
+(`core/pipeline/digests.py:86-92`), то есть для внешнего инстанса дефект Д-8 остаётся
 **открытым по построению** — закрыть его можно только пином, а пина нет.
 
-`digests.py:84-90` фиксирует решение: `embed_model_id` **не** входит в
+`digests.py:86-92` фиксирует решение: `embed_model_id` **не** входит в
 `EXECUTION_CONTRACT_FIELDS` — «смена видна через `pb`/`index_build_id` и попадает в класс
 `content_change`». Для локальной модели это защитимо: модель поставили вы, она не меняется.
 
@@ -398,7 +398,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
 Требование: `embed_model_id = f"{model_id}@{model_version}"`, где `model_version` берётся из
 ответа эндпоинта и **сверяется** с объявленной (расхождение — видимая ошибка, не тихое
 принятие). Прецедент в коде есть: `LiteEmbedder` уже даёт `repo@sha`
-(`core/cli/wiring.py:307-360`).
+(`core/cli/wiring.py:309-360`).
 
 ### Оговорка 2: оценщик начнёт ходить в сеть за векторами запроса
 
@@ -538,7 +538,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    устройство, на котором прогон не исполнялся);
 2. ось входит в `EXECUTION_CONTRACT_FIELDS`, а не в `embed_model_id`. Соблазн положить
    устройство в `embed_model_id` надо отклонить: `embed_model_id` классифицируется как
-   `content_change` (`core/pipeline/digests.py:84-90`), то есть смена прибора прочиталась бы
+   `content_change` (`core/pipeline/digests.py:86-92`), то есть смена прибора прочиталась бы
    как смена содержимого. У `pdf_device` прецедент верный — он входит в контракт через
    `extractor_stack`, то есть даёт `execution_change`;
 3. `vector_digest` в `_partition_reuse_reason` — «чужие векторы» становятся видимым отказом
@@ -625,7 +625,7 @@ if revision else model_id` (`core/adapters/embed_model2vec.py:113`; то же о
    (решение владельца 29.10.2026, `09` §14.1).
 
 Пункт 5 требует правки `_resolve_embedder()`: сейчас он выбирает backend **по факту
-установки** (`core/cli/wiring.py:2922`, вызов `:2797` — `model2vec_available()` →
+установки** (`core/cli/wiring.py:2998`, вызов `:2797` — `model2vec_available()` →
 `_module_installed("sentence_transformers")` → `None`). При появлении `deploy.embed`
 приоритет становится объявленным: `backend` из конфига, а наличие библиотек — предпосылка, а
 не решение. **Сверено 2026-11-07: не сделано** — логика прежняя; это же и есть **условие** §6 п. 5

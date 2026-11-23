@@ -290,6 +290,105 @@ def test_iter_items_order_and_filters(store: SqliteStore) -> None:
     assert [i.url for i in failed] == ["https://docs.test/p1/b"]
 
 
+def test_get_crawl_session_item_by_pk(store: SqliteStore) -> None:
+    store.upsert_crawl_session(_session())
+    store.upsert_crawl_session_item(
+        _item("https://docs.test/p1/a", CrawlItemStatus.FETCHED, engine="scrapy")
+    )
+    got = store.get_crawl_session_item("s1", "p1", "https://docs.test/p1/a")
+    assert got is not None
+    assert got.url == "https://docs.test/p1/a"
+    assert got.status is CrawlItemStatus.FETCHED
+    assert got.engine == "scrapy"
+    # Чужой продукт / чужой URL — строки нет (PK включает product_id).
+    assert store.get_crawl_session_item("s1", "p2", "https://docs.test/p1/a") is None
+    assert store.get_crawl_session_item("s1", "p1", "https://docs.test/p1/zzz") is None
+    assert store.get_crawl_session_item("s2", "p1", "https://docs.test/p1/a") is None
+
+
+def test_upsert_items_batch_writes_all_and_recounts_once(
+    store: SqliteStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.upsert_crawl_session(_session(status=CrawlSessionStatus.RUNNING))
+    calls: list[str] = []
+    original = store._recompute_crawl_session_counters
+
+    def _spy(session_id: str) -> None:
+        calls.append(session_id)
+        original(session_id)
+
+    monkeypatch.setattr(store, "_recompute_crawl_session_counters", _spy)
+
+    batch = [
+        _item("https://docs.test/p1/a", CrawlItemStatus.PENDING),
+        _item("https://docs.test/p1/b", CrawlItemStatus.FETCHED),
+        _item("https://docs.test/p1/c", CrawlItemStatus.FAILED),
+    ]
+    store.upsert_crawl_session_items(batch)
+
+    assert calls == ["s1"], "пересчёт агрегатов — один на пачку, не на строку"
+    assert _counts(store) == {
+        "pending": 1,
+        "running": 0,
+        "fetched": 1,
+        "failed": 1,
+        "cancelled": 0,
+    }
+    session = store.get_crawl_session("s1")
+    assert session is not None
+    assert (session.total, session.pending, session.fetched, session.failed) == (3, 1, 1, 1)
+    # Состав и порядок строк те же, что при трёх отдельных вызовах.
+    assert [i.url for i in store.iter_crawl_session_items("s1")] == [
+        "https://docs.test/p1/a",
+        "https://docs.test/p1/b",
+        "https://docs.test/p1/c",
+    ]
+
+
+def test_upsert_items_batch_matches_single_upserts(store: SqliteStore) -> None:
+    store.upsert_crawl_session(_session())
+    rows = [
+        _item("https://docs.test/p1/a", CrawlItemStatus.FETCHED),
+        _item("https://docs.test/p1/b", CrawlItemStatus.RUNNING),
+        _item("https://docs.test/p2/c", CrawlItemStatus.PENDING, product_id="p2"),
+    ]
+    store.upsert_crawl_session_items(rows)
+    batched = list(store.iter_crawl_session_items("s1"))
+    batched_counts = _counts(store)
+
+    other = SqliteStore(":memory:")
+    try:
+        other.create_run(RUN_ID, _cfg())
+        other.upsert_crawl_session(_session())
+        for row in rows:
+            other.upsert_crawl_session_item(row)
+        assert [(i.product_id, i.url, i.status) for i in batched] == [
+            (i.product_id, i.url, i.status) for i in other.iter_crawl_session_items("s1")
+        ]
+        assert batched_counts == _counts(other)
+    finally:
+        other.close()
+
+
+def test_upsert_items_empty_batch_is_noop(
+    store: SqliteStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.upsert_crawl_session(_session())
+    store.upsert_crawl_session_item(_item("https://docs.test/p1/a", CrawlItemStatus.PENDING))
+    before = _counts(store)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        store,
+        "_recompute_crawl_session_counters",
+        lambda session_id: calls.append(session_id),
+    )
+    store.upsert_crawl_session_items([])
+
+    assert calls == []
+    assert _counts(store) == before
+
+
 def test_item_unknown_session_violates_fk(store: SqliteStore) -> None:
     # Элемент без сеанса не пишется: FK-нарушение, строка не остаётся (атомарность).
     with pytest.raises(sqlite3.IntegrityError):

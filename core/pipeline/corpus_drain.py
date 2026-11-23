@@ -43,7 +43,7 @@ L5 шаг 3). Здесь — то, что делает работу **одног
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
 from functools import partial
@@ -102,6 +102,102 @@ from core.util.html_links import extract_links
 #: Канонический класс сбоя (``FailureKind.ATTEMPTS_EXHAUSTED``): отличает «попытки
 #: кончились» от сетевого/браузерного сбоя, не выходя за словарь §4.1.
 _MAX_ATTEMPTS_ERROR_KIND = FailureKind.ATTEMPTS_EXHAUSTED.value
+
+#: R1a: сколько постановок в очередь копится до записи пачкой.
+#:
+#: Число — цена одного flush'а, а не вкус: запись 256 ``pending``-строк одной
+#: транзакцией на сеансе 30 207 строк стоит ≈3.3 мс (118 транзакций = 387 мс, замер
+#: 24.11.2026, ``docs/reports/measurements/2026-11-24-durable-queue.md``), тогда как
+#: строка на транзакцию с пересчётом счётчиков — 9 с на 1000 строк, и это не константа
+#: (пересчёт читает таблицу целиком). Меньше пачка — больше транзакций на тот же объём;
+#: больше — дольше окно, в котором падение теряет уже поставленные URL.
+PENDING_FLUSH_EVERY = 256
+
+
+class _PendingQueueBuffer:
+    """R1a: durable очередь корня — постановки в ``crawl_session_items`` пачками.
+
+    Зачем: ``Frontier._queue``/``_seen`` живут в памяти, и «обнаружено, но не взято»
+    после падения процесса не существует. Измерено на прогоне
+    ``ru-pg-dbms-3a737f13962f``: 30 207 строк ``crawl_session_items`` и **ноль**
+    ``pending``, при ``queue_remaining=584`` в памяти — следующий прогон начинал BFS
+    заново.
+
+    **Почему пачками.** Каждая запись элемента в сторе пересчитывает счётчики сеанса
+    полным ``GROUP BY``; на 30 207 URL это дало бы O(n²). Здесь счётчики считаются
+    **на границе корня** (``final=True``), а строки пишутся пачками по
+    :data:`PENDING_FLUSH_EVERY`.
+
+    **Что пишется.** Только ``status``/``depth``/``first_seen`` (см.
+    ``StorePort.mark_crawl_pending``): терминальный исход уже известной строки не
+    понижается, а ``content_hash``/``raw_path``/``attempts`` сохраняются. Признак
+    ревалидации **не** персистится: в схеме для него нет колонки, а на подъёме он
+    восстанавливается из объявленного набора известных URL продукта
+    (``ProductDrainScope.revalidation_url_set`` + ``root.known_urls``) — тем же
+    источником, которым пользуется зарядка бюджета.
+
+    **Почему ошибка хранилища не роняет обход, но и не теряется.** Персистенция очереди —
+    провенанс, а не условие измерения: падение записи не имеет права уронить краул
+    (``errors`` фазы получает строку, счётчик отказов растёт). Пачка при отказе остаётся
+    в буфере и повторяется следующим flush'ом — иначе «запись не удалась» означало бы
+    «очередь потеряна», то есть ровно тот дефект, который здесь чинится.
+    """
+
+    def __init__(self, store: Any, session_id: str, product_id: str) -> None:
+        self._store = store
+        self._session_id = session_id
+        self._product_id = product_id
+        #: ``(depth, url, is_revalidation)`` в порядке поступления.
+        self._pending: list[tuple[int, str, bool]] = []
+        #: Отказов записи (точный счётчик) и сообщения (ограниченные вызывающим).
+        self.flush_failures = 0
+        self.last_error: str | None = None
+        #: Сколько постановок ушло в стор и сколько отвергнуто подъёмом — провенанс.
+        self.persisted = 0
+
+    def __len__(self) -> int:
+        return len(self._pending)
+
+    def add(self, depth: int, url: str, is_revalidation: bool) -> None:
+        """Хук ``Frontier.on_enqueue``: копит постановку и пишет пачку по размеру."""
+        self._pending.append((depth, url, is_revalidation))
+        if len(self._pending) >= PENDING_FLUSH_EVERY:
+            self.flush()
+
+    def flush(self, *, final: bool = False) -> None:
+        """Записать накопленное; ``final`` — граница корня (с пересчётом счётчиков).
+
+        ``final=True`` вызывается и с пустым буфером: пересчёт счётчиков обязан пройти
+        на границе корня, иначе ``crawl_sessions.total``/``pending`` остались бы с
+        момента последней пачки.
+        """
+        if not self._pending and not final:
+            return
+        batch = self._pending
+        now = _now_iso()
+        items = [
+            CrawlSessionItem(
+                session_id=self._session_id,
+                product_id=self._product_id,
+                url=url,
+                status=CrawlItemStatus.PENDING,
+                depth=depth,
+                first_seen=now,
+            )
+            for depth, url, _ in batch
+        ]
+        try:
+            self._store.mark_crawl_pending(
+                self._session_id, items, recount=final
+            )
+        except Exception as exc:  # noqa: BLE001 — очередь вторична к обходу
+            self.flush_failures += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            # Пачка остаётся в буфере: следующая попытка (или граница корня) повторит
+            # запись. Память ограничена очередью корня, которая уже лежит в ``Frontier``.
+            return
+        self.persisted += len(batch)
+        self._pending = []
 
 @dataclass
 class _WaveEntry:
@@ -185,16 +281,18 @@ class RootPlan:
 
 @dataclass(frozen=True)
 class WaveRequest:
-    """Задания волны, готовые к отправке, и маршрут её не-poolable части.
+    """Задания волны, готовые к отправке, и маршрут её браузерной части.
 
-    ``entries`` — записи в порядке отправки (FIFO). ``non_poolable`` сообщает, что в
-    волне есть живой фетч не-poolable маршрута (browser): он исполняется **отдельным
-    пулом из одного потока**, а не на потоке драйвера, — иначе один браузерный фетч
-    остановил бы все полосы (F4).
+    ``entries`` — записи в порядке отправки (FIFO). ``browser`` сообщает, что в волне есть
+    живой фетч **браузерного** маршрута: он исполняется пулом браузерных движков
+    (``browser_workers`` потоков, по движку на поток), а не на потоке драйвера — иначе
+    один браузерный фетч остановил бы все полосы (F4). Записи без живого фетча
+    (resume/reject/browser-guard/терминальный класс) не отправляются вовсе и маршрута не
+    имеют.
     """
 
     entries: list[_WaveEntry]
-    non_poolable: bool = False
+    browser: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,13 +309,13 @@ class WavePlan:
     (волна без живого фетча: блэклист/исчерпанные попытки/resume) не пересекается ни с
     чем и допускается всегда.
 
-    ``non_poolable`` — в волне есть живой фетч не-poolable маршрута (browser): ему нужен
-    пул из **одного** потока (см. :func:`_dispatch_wave`), и драйвер обязан его дать.
+    ``browser`` — в волне есть живой фетч браузерного маршрута: ему нужен пул браузерных
+    движков (см. :func:`_dispatch_wave`), и драйвер обязан его дать.
     """
 
     entries: list[_WaveEntry]
     hosts: frozenset[str] = frozenset()
-    non_poolable: bool = False
+    browser: bool = False
 
 
 def _wave_plan(entries: list[_WaveEntry]) -> WavePlan:
@@ -227,29 +325,27 @@ def _wave_plan(entries: list[_WaveEntry]) -> WavePlan:
     обязан совпадать с ключом вежливости (``limiter.wait_reserved(desc.host, …)``), иначе
     полосы пейсили бы один сайт двумя независимыми бюджетами.
 
-    ``non_poolable`` повторяет условие ветки :func:`_dispatch_wave` (живой фетч вне пула
-    фетча): resume/reject/browser-guard/терминальный класс живого фетча не делают.
-    Расхождение с :func:`_dispatch_wave` — это не тихая ошибка: там сработает
-    ``AssertionError`` «не-poolable маршрут без своего пула».
+    ``browser`` повторяет условие ветки :func:`_dispatch_wave` (живой фетч браузерного
+    маршрута): resume/reject/browser-guard/терминальный класс живого фетча не делают и
+    маршрута не имеют. Расхождение с :func:`_dispatch_wave` — это не тихая ошибка: там
+    сработает ``AssertionError`` «браузерный маршрут без своего пула».
     """
     hosts = {
         entry.desc.host
         for entry in entries
         if entry.kind == "fetch" and entry.desc is not None and entry.desc.host
     }
-    non_poolable = any(
+    browser = any(
         entry.kind == "fetch"
         and entry.desc is not None
-        and not entry.desc.poolable
+        and entry.desc.route == "browser"
         and entry.desc.resume is None
         and entry.desc.reject is None
         and not entry.desc.browser_blocked
         and not entry.desc.terminal
         for entry in entries
     )
-    return WavePlan(
-        entries=entries, hosts=frozenset(hosts), non_poolable=non_poolable
-    )
+    return WavePlan(entries=entries, hosts=frozenset(hosts), browser=browser)
 
 
 @dataclass(frozen=True)
@@ -276,23 +372,23 @@ def _dispatch_wave(
     entries: list[_WaveEntry],
     *,
     pool: Executor | None,
-    non_poolable_pool: Executor | None,
+    browser_pool: Executor | None,
     local_fetch: Callable[[LocalFetch], RawPage],
 ) -> WaveRequest:
-    """Отправка волны: живой фетч — в пул, браузерный — в пул из **одного** потока.
+    """Отправка волны: живой HTTP-фетч — в пул фетча, браузерный — в пул движков.
 
     Мутаций состояния сеанса/корпуса здесь нет (как и в прежнем ``_commit_wave``):
     отправляется только ``local_fetch`` — чистый сетевой вызов. Разделение с
     :func:`_commit_wave_results` — по владению: отправка и коммит остаются на главном
     потоке корня, ожидание — работа драйвера.
 
-    Не-poolable маршрут (браузерный фетч) идёт в **отдельный однопоточный** пул. Прежний
-    путь исполнял его на потоке драйвера, и при полосах один браузерный фетч остановил бы
-    все полосы. Поток-владелец при этом сохранён: ``BrowserCrawler`` водит единственную
-    ``_page`` без лока, поэтому у маршрута ровно один поток — он и есть владелец. Коммит
+    Маршрут берётся у дескриптора **явно** (``LocalFetch.route``), а не выводится из
+    «не poolable»: браузерный живой фетч идёт в свой пул (``browser_workers`` потоков),
+    и каждый его поток владеет своим движком. Записи без живого фетча
+    (resume/reject/browser-guard/терминальный класс) не отправляются вовсе. Коммит
     исхода остаётся на главном потоке (T5: мутации пишет только драйвер).
     """
-    non_poolable = False
+    browser = False
     for entry in entries:
         if entry.kind != "fetch":
             continue
@@ -300,14 +396,7 @@ def _dispatch_wave(
         if desc is None:
             # Инвариант ``_WaveEntry``: не-attempts/не-блэклист запись несёт ``desc``.
             raise AssertionError(f"{entry.pid}/{entry.wu}: запись волны без desc")
-        if desc.poolable:
-            if pool is None:
-                # Инвариант ветки: ``poolable`` выставляется только при созданном пуле.
-                raise AssertionError(
-                    f"{desc.pid}/{desc.wu}: poolable без пула фетча"
-                )
-            entry.future = pool.submit(local_fetch, desc)
-        elif (
+        if (
             desc.resume is not None
             or desc.reject is not None
             or desc.browser_blocked
@@ -315,16 +404,36 @@ def _dispatch_wave(
         ):
             # resume/reject/browser-guard/терминальный класс: живого фетча нет.
             continue
-        else:
-            if non_poolable_pool is None:
-                # Инвариант ветки: волна живёт только при созданном пуле фетча, а он
-                # создаётся вместе с пулом не-poolable маршрута.
+        if desc.poolable:
+            if desc.route != "fetch":
+                # Инвариант маршрута: в пул фетча идёт только HTTP-фетч. Браузерный
+                # фетч там оказался бы без своего движка (``desc.active`` разрешён на
+                # главном потоке и не переносим).
                 raise AssertionError(
-                    f"{desc.pid}/{desc.wu}: не-poolable маршрут без своего пула"
+                    f"{desc.pid}/{desc.wu}: poolable с маршрутом {desc.route!r}"
                 )
-            entry.future = non_poolable_pool.submit(local_fetch, desc)
-            non_poolable = True
-    return WaveRequest(entries=entries, non_poolable=non_poolable)
+            if pool is None:
+                # Инвариант ветки: ``poolable`` выставляется только при созданном пуле.
+                raise AssertionError(
+                    f"{desc.pid}/{desc.wu}: poolable без пула фетча"
+                )
+            entry.future = pool.submit(local_fetch, desc)
+            continue
+        if desc.route != "browser":
+            # Живой фетч обязан назвать маршрут: «не poolable и не браузерный» —
+            # состояние, которого у ``local_prefetch`` не бывает.
+            raise AssertionError(
+                f"{desc.pid}/{desc.wu}: живой фетч без маршрута ({desc.route!r})"
+            )
+        if browser_pool is None:
+            # Инвариант ветки: волна с браузерным маршрутом живёт только при созданном
+            # пуле движков, а он создаётся вместе с пулом фетча.
+            raise AssertionError(
+                f"{desc.pid}/{desc.wu}: браузерный маршрут без своего пула"
+            )
+        entry.future = browser_pool.submit(local_fetch, desc)
+        browser = True
+    return WaveRequest(entries=entries, browser=browser)
 
 
 def _await_wave(
@@ -1332,6 +1441,83 @@ class PhaseDrainOperations:
     stored_bytes_for: Callable[..., Any] | None = None
 
 
+#: Сколько примеров отвергнутых подъёмом URL держится в провенансе корня. Счётчик
+#: точный; примеры ограничены, иначе отказ на 100k URL стал бы отчётом о хранилище.
+LIFT_REJECTED_EXAMPLES_MAX = 10
+
+
+def pending_queue_for(
+    phase: PhaseDrainScope, product_id: str
+) -> _PendingQueueBuffer | None:
+    """R1a: буфер durable очереди корня или ``None``, если сеанса нет.
+
+    Без сеанса durable-краул выключен: очередь живёт только в памяти, хук не ставится
+    вовсе, и поведение остаётся байт-в-байт прежним (стор не вызывается ни разу).
+    """
+    if phase.session_id is None:
+        return None
+    return _PendingQueueBuffer(phase.store, phase.session_id, product_id)
+
+
+def lift_pending_queue(
+    frontier: Frontier,
+    *,
+    store: Any,
+    session_id: str,
+    product_id: str,
+    owner_root: Callable[[str], str | None],
+    root_url: str,
+    skip: Iterable[str] = (),
+) -> tuple[int, int, list[str]]:
+    """R1a: поднять durable ``pending`` продукта в ``frontier`` этого корня.
+
+    Возвращает ``(поднято, отвергнуто, примеры отвергнутых)``. Отказ (scope/блэклист/
+    глубина/чужой корень) — **решение**, а не потеря, но он обязан быть назван числом:
+    молчаливый дроп поднятого URL — тот же класс дефекта, что тихий обход path-prefix.
+
+    ``skip`` — адреса, у которых **свой** путь постановки (авторский seed, известные URL
+    ревалидации, заряженные resume-страницы): подъём не отнимает у них бюджетное решение
+    (например, при закрытом бюджете корень ставится ревалидацией, а не discovery).
+
+    Сначала **читаем** (адрес и глубина — по ~100 байт вместо 3.6 KB на элемент), и только
+    потом ставим: запись в ту же таблицу внутри открытого курсора итератора была бы гонкой
+    чтения/записи на одном соединении, а материализация элементов стоила бы 107 MB на
+    30 207 URL (замер ``session_items``).
+
+    Глубина ``None`` (строка прежнего производителя) читается как 0: иначе URL выпал бы по
+    сравнению с ``max_depth``, то есть «неизвестно» стало бы отказом.
+
+    Признак ревалидации **не** переносится: в схеме для него нет колонки, а подъём ставит
+    URL путём discovery — ревалидация восстанавливается из ``root.known_urls`` своим путём.
+    """
+    skip_set = set(skip)
+    candidates: list[tuple[str, int]] = []
+    for item in store.iter_crawl_session_items(
+        session_id, product_id=product_id, status=CrawlItemStatus.PENDING
+    ):
+        url = item.url
+        if url in skip_set:
+            continue
+        # Чей это корень: при нескольких корнях на host URL в scope двух корней, и поднимать
+        # его дважды значило бы дать двум корням один элемент очереди. Владелец — самый
+        # специфичный ``root_path_prefix`` (тот же предикат, что у зарядки бюджета).
+        owner = owner_root(url)
+        if owner is not None and owner != root_url:
+            continue
+        candidates.append((url, 0 if item.depth is None else int(item.depth)))
+    lifted = 0
+    rejected = 0
+    examples: list[str] = []
+    for url, depth in candidates:
+        if frontier.discover(url, depth):
+            lifted += 1
+            continue
+        rejected += 1
+        if len(examples) < LIFT_REJECTED_EXAMPLES_MAX:
+            examples.append(url)
+    return lifted, rejected, examples
+
+
 def root_lifecycle(
     root: RootPlan,
     *,
@@ -1452,6 +1638,12 @@ def root_lifecycle(
         if phase.run_id is None or not root.seed
         else capture_id_for(product.pid, root_url, phase.run_id)
     )
+    # R1a: очередь корня переживает падение процесса. Без сеанса durable-краул выключен
+    # (``session is None``) — хук не ставится вовсе, и поведение остаётся байт-в-байт
+    # прежним: очередь живёт только в памяти.
+    pending_queue = pending_queue_for(phase, product.pid)
+    if pending_queue is not None:
+        frontier.on_enqueue = pending_queue.add
     # D3/дефект B (I17): ``<loc>`` sitemap — кандидаты **этого** корня; scope-фильтр
     # применяется до дедупа ``(pid, loc)``. Дедуп-пометка — не здесь, а по факту
     # приёма в очередь (F12, см. цикл ``extra_seeds`` ниже). Без sitemap
@@ -1575,6 +1767,43 @@ def root_lifecycle(
         charged_urls.append(iurl)
     frontier.note_consumed(consumed)
     charged_set = set(charged_urls)
+    # R1a: поднять durable ``pending`` этого продукта в frontier — «обнаружено, но не
+    # взято» переживает падение процесса. Подъём идёт **до** постановки seeds и **до**
+    # расширения BFS: иначе ссылка, переоткрытая обходом, дала бы второй GET на уже
+    # поставленный URL (дедуп ``_seen`` работает только по тому, что уже в памяти).
+    #
+    # Три набора URL подъём **пропускает**: авторский seed, известные URL ревалидации и
+    # заряженные resume-страницы. У них свой путь постановки ниже, и он решает больше
+    # (например, при закрытом бюджете корень ставится ревалидацией, а не discovery) —
+    # подъём здесь отнял бы у них это решение, вернув URL в очередь как обычный узел.
+    # Их durable-строки при этом не теряются: они либо перезаписываются исходом, либо
+    # остаются ``pending`` (и поднимутся следующим прогоном).
+    pending_lifted = 0
+    pending_rejected_count = 0
+    pending_rejected: list[str] = []
+    if pending_queue is not None and phase.session_id is not None:
+        own_paths = (
+            {root_url}
+            | set(revalidate)
+            | charged_set
+            # Известные URL ревалидации продукта — их ставит свой путь
+            # (``add_revalidate_seed``) и бюджет они не расходуют; подъём как discovery
+            # вернул бы им бюджетное решение, которого у них нет.
+            | set(product.revalidation_url_set)
+        )
+        pending_lifted, pending_rejected_count, pending_rejected = lift_pending_queue(
+            frontier,
+            store=phase.store,
+            session_id=phase.session_id,
+            product_id=product.pid,
+            owner_root=product.owner_root,
+            root_url=root_url,
+            skip=own_paths,
+        )
+    if pending_queue is not None:
+        frontier.pending_lifted = pending_lifted
+        frontier.pending_lift_rejected = pending_rejected_count
+        frontier.pending_lift_rejected_examples = pending_rejected
     if seed and not frontier.has_capacity and root_url in charged_set:
         # A2 (F3 плана 17): бюджет закрыт resume-зарядкой ⇒ как discovery seed его
         # никто не изымет (``next`` откажет). Но байты корня уже ретенированы и
@@ -1651,7 +1880,13 @@ def root_lifecycle(
         (seed_blacklisted or budget_closed or seed_shard_blocked)
         and revalidation_queued == 0
         and charged_queued == 0
+        and pending_lifted == 0
     ):
+        if pending_queue is not None:
+            # Граница корня: пересчёт счётчиков и запись хвоста буфера обязаны пройти
+            # и на раннем выходе — иначе ``crawl_sessions.total`` остался бы с момента
+            # последней пачки, а последние URL не дошли бы до стора.
+            pending_queue.flush(final=True)
         operations.emit()
         return frontier, list(sitemap.skipped)
 
@@ -1985,37 +2220,68 @@ def root_lifecycle(
         phase.errors.append(_backpressure_line(event))
         return "extract_backlog_full" if event.gave_up else None
 
+    # R1a: голова очереди (seeds/подъём/известные URL) пишется **до** первого шага:
+    # падение процесса во время обхода не должно уносить и то, что было поставлено
+    # подготовкой. Дальше пишут пачки по размеру (``PENDING_FLUSH_EVERY``).
+    if pending_queue is not None:
+        pending_queue.flush()
     # F4b: шаги корня — генератор. Отправку волны и ожидание исполняет драйвер
     # (:mod:`core.pipeline.corpus_driver`): «отправить и дождаться» не может быть
     # работой корня, потому что допуск волны (право на host'ы) решается до отправки.
-    return (yield from root_steps(
-        product.pid,
-        root_url,
-        frontier,
-        limits=limits,
-        items=phase.items,
-        errors=phase.errors,
-        emit=operations.emit,
-        mark=operations.mark,
-        commit_local=operations.commit_local,
-        local_prefetch=local_prefetch,
-        process_local=process_local,
-        submit_collect=operations.submit_collect,
-        work_item=operations.work_item,
-        resolve_target=operations.resolve_target,
-        max_attempts=phase.max_attempts,
-        max_waves=phase.max_waves,
-        wave_items=phase.wave_items,
-        robots_enabled=robots_enabled,
-        timings=phase.timings_for(product.pid),
-        executor=phase.executor,
-        pool=pool,
-        max_workers=max_workers,
-        sitemap_skips=sitemap.skipped,
-        _has_fetch_capacity=_has_fetch_capacity,
-        _skip_document_prefetch=_skip_document_prefetch,
-        _commit=_commit_outcome,
-        _await_disk=_await_disk,
-        _await_backlog=_await_backlog,
-        capture_id=root_capture_id,
-    ))
+    #
+    # R1a: очередь пишется на **границе корня** и в ``finally`` — иначе последние URL
+    # терялись бы ровно так же, как терялись все: буфер меньше ``PENDING_FLUSH_EVERY``
+    # до стора не доходил бы. ``finally`` покрывает и обрыв (исключение посреди обхода),
+    # и отмену драйвером: «поставлено и не взято» обязано пережить и это.
+    try:
+        return (
+            yield from root_steps(
+                product.pid,
+                root_url,
+                frontier,
+                limits=limits,
+                items=phase.items,
+                errors=phase.errors,
+                emit=operations.emit,
+                mark=operations.mark,
+                commit_local=operations.commit_local,
+                local_prefetch=local_prefetch,
+                process_local=process_local,
+                submit_collect=operations.submit_collect,
+                work_item=operations.work_item,
+                resolve_target=operations.resolve_target,
+                max_attempts=phase.max_attempts,
+                max_waves=phase.max_waves,
+                wave_items=phase.wave_items,
+                robots_enabled=robots_enabled,
+                timings=phase.timings_for(product.pid),
+                executor=phase.executor,
+                pool=pool,
+                max_workers=max_workers,
+                sitemap_skips=sitemap.skipped,
+                _has_fetch_capacity=_has_fetch_capacity,
+                _skip_document_prefetch=_skip_document_prefetch,
+                _commit=_commit_outcome,
+                _await_disk=_await_disk,
+                _await_backlog=_await_backlog,
+                capture_id=root_capture_id,
+            )
+        )
+    finally:
+        if pending_queue is not None:
+            pending_queue.flush(final=True)
+            # Отказы записи пачки и отказы хука — один носитель провенанса
+            # (``Frontier.note_enqueue_failure``) и одна строка в ``errors`` фазы:
+            # очередь — провенанс, а не условие измерения, поэтому обход не роняется,
+            # но «потеряли очередь» не имеет права остаться тишиной.
+            if pending_queue.flush_failures:
+                for _ in range(pending_queue.flush_failures):
+                    frontier.note_enqueue_failure(
+                        f"flush: {pending_queue.last_error}"
+                    )
+            if frontier.enqueue_hook_failures:
+                phase.errors.append(
+                    f"{product.pid}/{root_url}: durable queue: "
+                    f"{frontier.enqueue_hook_failures} enqueue(s) not persisted, last: "
+                    f"{frontier.enqueue_hook_errors[-1]}"
+                )

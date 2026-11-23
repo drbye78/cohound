@@ -2210,40 +2210,137 @@ class SqliteStore:
         В **одной** транзакции пишет строку элемента и пересчитывает агрегаты сеанса
         (полный recount из элементов) — прогресс не имеет разрывов. Требует существующего
         сеанса (FK на ``crawl_sessions``).
+
+        Реализация — пачка из одной строки: формула записи живёт в одном месте
+        (:meth:`upsert_crawl_session_items`), а не дублируется.
         """
+        self.upsert_crawl_session_items([item])
+
+    def upsert_crawl_session_items(self, items: Sequence[CrawlSessionItem]) -> None:
+        """Upsert пачки элементов: одна транзакция, один пересчёт агрегатов сеанса.
+
+        Пересчёт счётчиков — полный ``GROUP BY`` по сеансу, поэтому вызов его на каждую
+        строку давал бы O(n²) при постановке в очередь (R1a). Здесь он один на пачку,
+        и цена записи линейна по числу строк.
+
+        Пачка предполагается в пределах **одного** сеанса (счётчики пересчитываются для
+        ``items[0].session_id``); смешение сеансов в одной пачке — ошибка вызывающего,
+        а не молчаливо поддержанный случай. Пустая последовательность — no-op.
+        """
+        if not items:
+            return
         placeholders = ", ".join("?" for _ in self._CRAWL_ITEM_COLUMNS)
-        values = (
-            item.session_id,
-            item.product_id,
-            item.url,
-            _as_text(item.status),
-            item.attempts,
-            item.depth,
-            item.engine,
-            item.kind,
-            item.fetch_mode,
-            item.extract_route,
-            item.strategy,
-            item.http_status,
-            item.content_type,
-            item.lang,
-            item.content_hash,
-            item.doc_hash,
-            item.raw_path,
-            item.error_kind,
-            item.error,
-            item.first_seen,
-            item.last_attempt,
-            item.fetch_started_at,
-            item.fetch_ms,
+        sql = (
+            f"INSERT OR REPLACE INTO crawl_session_items"  # noqa: S608 - имена из _CRAWL_ITEM_COLUMNS, значения — bind
+            f" ({', '.join(self._CRAWL_ITEM_COLUMNS)}) VALUES ({placeholders})"
         )
         with self.conn:
-            self.conn.execute(
-                f"INSERT OR REPLACE INTO crawl_session_items"  # noqa: S608 - имена из _CRAWL_ITEM_COLUMNS, значения — bind
-                f" ({', '.join(self._CRAWL_ITEM_COLUMNS)}) VALUES ({placeholders})",
-                values,
-            )
-            self._recompute_crawl_session_counters(item.session_id)
+            for item in items:
+                self.conn.execute(
+                    sql,
+                    (
+                        item.session_id,
+                        item.product_id,
+                        item.url,
+                        _as_text(item.status),
+                        item.attempts,
+                        item.depth,
+                        item.engine,
+                        item.kind,
+                        item.fetch_mode,
+                        item.extract_route,
+                        item.strategy,
+                        item.http_status,
+                        item.content_type,
+                        item.lang,
+                        item.content_hash,
+                        item.doc_hash,
+                        item.raw_path,
+                        item.error_kind,
+                        item.error,
+                        item.first_seen,
+                        item.last_attempt,
+                        item.fetch_started_at,
+                        item.fetch_ms,
+                    ),
+                )
+            self._recompute_crawl_session_counters(items[0].session_id)
+
+    def mark_crawl_pending(
+        self,
+        session_id: str,
+        items: Sequence[CrawlSessionItem],
+        *,
+        recount: bool = True,
+    ) -> None:
+        """R1a: durable постановка в очередь — ``pending``-строка без затирания известного.
+
+        Пишет **только** поля постановки (``status``/``depth``/``first_seen``) и только
+        тогда, когда строка ещё не несёт терминального исхода. Отличие от
+        :meth:`upsert_crawl_session_items` — не в скорости, а в смысле: та формула пишет
+        **факт об URL** (полную строку, ``INSERT OR REPLACE``), а здесь пишется
+        **намерение его взять**, и оно не имеет права стереть уже известное
+        (``content_hash``/``raw_path``/``attempts``/``first_seen``/``doc_hash``).
+        Измеренная цена замены на ``INSERT OR REPLACE``: понижение ``fetched`` до
+        ``pending`` отнимало бы у resume зарядку бюджета (``resume_retained`` считает
+        ``FETCHED``/``FAILED``), то есть ``max_documents`` начинался бы заново.
+
+        Поэтому конфликт обновляет строку **только** в состоянии ``pending``/``running``
+        (``running`` — брошенная попытка падением процесса: возврат в очередь — ровно то,
+        что делает ``recover_crawl_session`` при открытии). ``fetched``/``failed``/
+        ``cancelled`` не понижаются: переоткрытый известный URL получает свой исход по
+        обычному пути (``mark_session``), а durable-очередь не переписывает историю.
+
+        ``recount=False`` — счётчики сеанса не пересчитываются: полный ``GROUP BY`` на
+        каждую пачку из 256 строк стоил бы дороже самих вставок (замер 24.11.2026 на
+        сеансе 30 207 строк: 387 мс с пересчётом один раз против 1 691 мс с пересчётом на
+        пачку — ×4.4; ``docs/reports/measurements/2026-11-24-durable-queue.md``).
+        Пересчёт делает **вызывающий** на границе корня (``recount=True`` с пустой
+        пачкой — вызов «только пересчёт»), иначе ``crawl_sessions.total`` врал бы.
+        """
+        if not items and not recount:
+            return
+        sql = (
+            "INSERT INTO crawl_session_items"
+            " (session_id, product_id, url, status, depth, first_seen)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id, product_id, url) DO UPDATE SET"
+            " status = excluded.status,"
+            " depth = COALESCE(excluded.depth, depth)"
+            " WHERE crawl_session_items.status IN ('pending', 'running')"
+        )
+        with self.conn:
+            for item in items:
+                self.conn.execute(
+                    sql,
+                    (
+                        session_id,
+                        item.product_id,
+                        item.url,
+                        CrawlItemStatus.PENDING.value,
+                        item.depth,
+                        item.first_seen,
+                    ),
+                )
+            if recount:
+                self._recompute_crawl_session_counters(session_id)
+
+    def get_crawl_session_item(
+        self, session_id: str, product_id: str, url: str
+    ) -> CrawlSessionItem | None:
+        """Элемент сеанса по PK; ``None`` — строки нет.
+
+        Конвертер — тот же ``_row_to_crawl_item``, что у итератора: второй разбор строки
+        разошёлся бы с первым молча.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM crawl_session_items"
+            " WHERE session_id = ? AND product_id = ? AND url = ?",
+            (session_id, product_id, url),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_crawl_item(row)
 
     def iter_crawl_session_items(
         self,

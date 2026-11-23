@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -151,7 +152,7 @@ from core.pipeline.digests import (
 from core.pipeline.evaluation_policy import evaluation_policy_spec
 from core.pipeline.manual_artifacts import load_manual_artifacts
 from core.pipeline.normalize import RunInputs
-from core.pipeline.report import crawl_control_digest
+from core.pipeline.report import crawl_control_digest, declared_root_limits
 from core.pipeline.retrieve import RetrievalProfile
 
 __all__ = [
@@ -176,6 +177,7 @@ __all__ = [
     "add_serp_rounds_flag",
     "add_tool_axis_flags",
     "contract_flag_values",
+    "declared_root_limits_for",
     "declared_status_dict_version",
     "extractor_stack_version",
     "identity_flag_values",
@@ -213,6 +215,10 @@ CRAWL_AXIS_DESTS: tuple[str, ...] = (
     "pdf_pipeline",
     "document_timeout_s",
     "host_concurrency",
+    # Параллелизм браузерного фетча: N движков, каждый в своём потоке (Playwright
+    # sync-API не переносим между потоками). Ось — условие измерения (нагрузка на хост и
+    # wall time), поэтому объявление меняет ``crawl_config_digest`` (``execution_change``).
+    "browser_workers",
     "extract_backlog_mb",
     # Дренаж корня: у названных корней ``max_documents`` снимается, ``max_depth``
     # заменяется на ``drain_max_depth``. Ось меняет состав корпуса ⇒ ``execution_change``.
@@ -413,6 +419,20 @@ def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "сколько host'ов процесс краула ведёт одновременно "
             "(дефолт: последовательно, как сегодня; ось входит в run_id при объявлении)"
+        ),
+    )
+    # Параллелизм браузерного фетча: N движков, каждый в своём потоке. ``None`` —
+    # сегодняшнее поведение (один движок, один поток). Ось входит в ``run_id`` при
+    # объявлении: параллельная нагрузка на хост и wall time — условие измерения.
+    parser.add_argument(
+        "--browser-workers",
+        dest="browser_workers",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "сколько браузерных движков (потоков) обслуживают браузерный фетч "
+            "(дефолт: один, как сегодня; ось входит в run_id при объявлении)"
         ),
     )
     # F6 (план 17, §4.3): watermark бэклога конверсии. Не «для безопасности»: предел
@@ -1235,6 +1255,43 @@ def _run_layer_overrides(run_crawl: Any, overrides: dict[str, Any]) -> Any:
         return run_crawl
     base = run_crawl if run_crawl is not None else CrawlRunConfig()
     return base.model_copy(update=dict(overrides))
+
+
+def declared_root_limits_for(
+    args: argparse.Namespace,
+    inputs: Any,
+    deploy: Any,
+    roots: Sequence[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Резолвнутые лимиты каждого объявленного корня для сверки пространства (вариант 3).
+
+    Одна формула с ``run_id``: операторские оси (:func:`_crawl_axis_overrides`)
+    накладываются на **run-слой** (:func:`_run_layer_overrides`) ровно так, как это делает
+    исполнение и :func:`resolve_declared_axes`, — иначе объявленное пространство корня
+    разошлось бы со снятым по причине «флаг применили в другом месте».
+
+    ``overrides`` в :func:`declared_root_limits` **не** передаётся: там он кладётся поверх
+    разрешённой цепочки, то есть сделал бы флаг сильнее per-site профиля, тогда как
+    исполнение (``model_copy`` на run-слое) оставляет профиль сильнее. Две стороны
+    сравнения разошлись бы, и следующий прогон без флага объявил бы другое пространство
+    на неизменном корпусе. Одна формула — один слой применения.
+
+    :param deploy: resolved ``DeployConfig``; ``None`` допустим — :func:`declared_root_limits`
+        подставит дефолтный ``CrawlConfig``.
+    :param roots: ``(product_id, host, path)`` объявленных корней.
+    """
+    config = deploy
+    axis_overrides = _crawl_axis_overrides(args)
+    run_crawl = getattr(getattr(inputs, "run", None), "crawl", None)
+    return declared_root_limits(
+        run_crawl=_run_layer_overrides(run_crawl, axis_overrides),
+        app=getattr(config, "crawl", None),
+        profiles=getattr(inputs, "domain_profiles", None),
+        roots=roots,
+        product_axes=getattr(
+            getattr(inputs, "crawl_policy", None), "product_axes", None
+        ),
+    )
 
 
 def _manual_artifacts_digest(args: argparse.Namespace) -> str:

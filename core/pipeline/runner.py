@@ -264,6 +264,13 @@ class Ports:
     search: SearchAdapterPort | None = None
     crawler: CrawlerPort | None = None
     crawlers: Mapping[str, CrawlerPort] | None = None
+    #: Фабрика **своего** браузерного движка на поток (``Callable[[], CrawlerPort]``).
+    #: Playwright sync-API привязан к потоку-создателю, поэтому параллельный браузерный
+    #: фетч невозможен с одним общим движком: каждый поток-воркер поднимает свой лениво.
+    #: ``None`` — прежнее поведение: общий движок из ``crawlers`` в одном потоке.
+    #: Фабрика — проводка composition root'а, а не порт: она строит адаптер тем же
+    #: способом, что и ``crawlers``.
+    browser_crawler_factory: Callable[[], CrawlerPort] | None = None
     executor: CrawlExecutorPort | None = None
     pollers: Mapping[str, PollPort] | None = None
     extractor: ExtractorPort | None = None

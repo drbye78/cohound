@@ -426,6 +426,55 @@ class StorePort(Protocol):
         """
         ...
 
+    def upsert_crawl_session_items(self, items: Sequence[CrawlSessionItem]) -> None:
+        """Upsert **пачки** элементов: одна транзакция, один пересчёт агрегатов сеанса.
+
+        Зачем отдельный метод: :meth:`upsert_crawl_session_item` пересчитывает счётчики
+        сеанса полным recount'ом на **каждую** строку. При постановке в очередь (R1a)
+        это дало бы O(n²) на продукт — 100k URL означали бы 100k полных ``GROUP BY``.
+        Здесь recount один на пачку, поэтому цена записи линейна по числу строк.
+
+        Пустая последовательность — no-op без записи: «нечего писать» не должно
+        открывать транзакцию и не должно трогать счётчики.
+        """
+        ...
+
+    def get_crawl_session_item(
+        self, session_id: str, product_id: str, url: str
+    ) -> CrawlSessionItem | None:
+        """Элемент сеанса по PK ``(session_id, product_id, url)``; ``None`` — строки нет.
+
+        Точечное чтение существует ради отказа от полной карты сеанса в памяти:
+        измерено на run-DB 23.11.2026 — ``SELECT`` по PK стоит 22.8 мкс, тогда как
+        загрузка 30 207 элементов в ``dict`` — 107 MB RSS (3.63 KB/строка).
+        """
+        ...
+
+    def mark_crawl_pending(
+        self,
+        session_id: str,
+        items: Sequence[CrawlSessionItem],
+        *,
+        recount: bool = True,
+    ) -> None:
+        """R1a: durable постановка в очередь — ``pending`` без затирания известного.
+
+        Пишет только поля постановки (``status``/``depth``/``first_seen``) и только
+        поверх ``pending``/``running``: терминальный исход (``fetched``/``failed``/
+        ``cancelled``) не понижается, иначе resume потерял бы зарядку бюджета
+        (``resume_retained`` считает ``FETCHED``/``FAILED``) и ``max_documents``
+        начинался бы заново. ``content_hash``/``raw_path``/``attempts``/``doc_hash``/
+        ``first_seen`` уже известной строки сохраняются (carry-forward).
+
+        ``recount=False`` — счётчики сеанса не пересчитываются: полный ``GROUP BY`` на
+        каждую пачку дороже самих вставок (замер 24.11.2026 на сеансе 30 207 строк:
+        387 мс с пересчётом один раз против 1 691 мс с пересчётом на пачку —
+        ``docs/reports/measurements/2026-11-24-durable-queue.md``). Пересчёт делает
+        вызывающий на границе корня: ``recount=True`` с пустой пачкой — вызов «только
+        пересчёт», без него ``crawl_sessions.total`` врал бы.
+        """
+        ...
+
     def iter_crawl_session_items(
         self,
         session_id: str,

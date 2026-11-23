@@ -217,9 +217,9 @@ PostgreSQL 10, не позволяют реализовать такую дву�
 реализовано в двух местах по-разному.
 
 **Исправлено** (решение владельца 20.11.2026): `_root_capture_complete`
-(`core/pipeline/corpus.py:1693`) зовётся дважды — на границе корня (подача ещё не известна,
+(`core/pipeline/corpus.py:1695`) зовётся дважды — на границе корня (подача ещё не известна,
 значение тождественно прежней формуле) и на границе продукта после подачи
-(`_recompute_root_captures`, `core/pipeline/corpus.py:1724`), переписывая **ту же** строку
+(`_recompute_root_captures`, `core/pipeline/corpus.py:1726`), переписывая **ту же** строку
 снятия. Фронтьер держит адреса отказов, а не только число
 (`Frontier.robots_refused_urls`, `core/pipeline/crawl_frontier.py:1461`). Закрытое число
 публикуется разрезом по корню (`CorpusRootCoverage.resolved_manually`).
@@ -272,7 +272,7 @@ PostgreSQL 10, не позволяют реализовать такую дву�
 * добавлен `PROVIDABLE_FAILURE_KINDS = BLOCKING_FAILURE_KINDS | {ROBOTS_DISALLOW}` — им
   пользуется `artifacts_gap`: рабочий список подачи **не сузился** там, где подача
   незаменима;
-* `_root_capture_complete` (`core/pipeline/corpus.py:1693`) = `not (truncated or
+* `_root_capture_complete` (`core/pipeline/corpus.py:1695`) = `not (truncated or
   skipped_documents)` — формула 0.6.0; в 0.7.0 к ней добавлен множитель `observed` (§11);
   `_recompute_root_captures` (`:1724`) снятие больше **не переписывает**
   и публикует только разрез `resolved_manually`;
@@ -320,7 +320,7 @@ PostgreSQL 10, не позволяют реализовать такую дву�
 
 1. **Снятие удостоверяет исчерпание, только если корень наблюдался.**
    `complete = not incomplete and observed` (`_root_capture_complete`,
-   `core/pipeline/corpus.py:1693`), `observed` — прочитана хоть одна страница (discovery или
+   `core/pipeline/corpus.py:1695`), `observed` — прочитана хоть одна страница (discovery или
    ревалидация) либо сайт отказал по своей границе `robots`. Дефект измерен 21.11.2026 на
    `wiki.astralinux.ru/tandocs/`: сид ответил 403 (`failed/source_unavailable`),
    `pages_fetched=0`, а снятие записывалось `complete=1`.

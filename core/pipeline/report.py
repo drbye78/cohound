@@ -899,6 +899,52 @@ def crawl_control_digest(
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return short_hash(material, 24)
 
+def declared_root_limits(
+    *,
+    run_crawl: Any,
+    app: Any,
+    profiles: Mapping[str, Any] | None,
+    roots: Iterable[tuple[str, str, str]],
+    overrides: Mapping[str, Any] | None = None,
+    product_axes: Mapping[str, Any] | None = None,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Резолвнутые лимиты **каждого** объявленного корня (вариант 3).
+
+    Пространство сравнивается по корню: режим этого корня плюс лимиты **этого** адреса.
+    Здесь лимиты разрешаются той же цепочкой app < run < product < site, что и
+    :func:`crawl_control_digest`, — второго правила нет, иначе объявленное и снятое
+    пространство разошлись бы по формуле, а не по факту.
+
+    :param roots: ``(product_id, host, path)`` объявленных корней; ``path`` может быть
+        пустой строкой (весь host).
+    :param overrides: операторский слой осей (``--max-depth``/``--pdf-pipeline`` и пр.):
+        значения применяются к **разрешённому** словарю поверх app < run < product < site,
+        как в :func:`crawl_control_digest`.
+    :param product_axes: продуктовый слой лимитов PDF (``crawl_policy.yaml: product_axes``,
+        ключ — ``product_id``). Берётся **ось этого продукта**, а не вся карта: цепочка
+        лимитов разрешается для одного адреса одного продукта.
+    :returns: ``{(product_id, host, path): лимиты.as_dict()}``.
+    """
+    from core.config.deploy import CrawlConfig
+
+    app_config = app if isinstance(app, CrawlConfig) else CrawlConfig()
+    operator = {key: _axis_value(value) for key, value in (overrides or {}).items()}
+    axes_by_product = dict(product_axes or {})
+    resolved: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for product_id, host, path in roots:
+        url = f"https://{host}{path or ''}"
+        payload = dict(
+            resolve_crawl_limits(
+                url,
+                app=app_config,
+                run=run_crawl,
+                profiles=profiles,
+                product=axes_by_product.get(str(product_id)),
+            ).as_dict()
+        )
+        payload.update(operator)
+        resolved[(str(product_id), str(host), str(path or ""))] = payload
+    return resolved
 
 
 def compact_search_effort(facts: Any) -> dict[str, Any] | None:

@@ -264,7 +264,7 @@ _SEMANTICS = re.compile(r'("semantics":\s*")[^"]*(")')
 #: дренаж): ``replayed`` в ``effective_limits.roots[]`` и ``pages_replayed`` на уровне
 #: провенанса вошли в литералы трёх ``UPDATE crawl_sessions``. Состав и порядок операторов
 #: прежние (**211/170**), новых чтений нет.
-EXPECTED_WRITE_DIGEST = "dd3fd7b4ff672e13a4c17e2c034cbc0c7135b5b4a66605c87c718da301c1fdeb"
+EXPECTED_WRITE_DIGEST = "52bbbfb6082f8518edce5183fb66a79a57a0f039d3e1a2c583fd2ffe8927c599"
 
 #: Дайджест **полного** трассированного следа, включая ``SELECT``. Второй пин, а не первый:
 #: он видит то, чего пин записей не видит по построению, — появление нового чтения (N+1) и
@@ -377,7 +377,22 @@ EXPECTED_WRITE_DIGEST = "dd3fd7b4ff672e13a4c17e2c034cbc0c7135b5b4a66605c87c718da
 #: **состав и порядок операторов прежние (211/170)**, новых чтений нет — ``EXPECTED_SEQUENCE``
 #: не менялся, и это проверяется отдельно. Ключи — провенанс, не identity: в
 #: ``crawl_config_digest``/``run_id`` они не входят.
-EXPECTED_TRACE_DIGEST = "316c6d80cfec5213ad97bdbca83f5798fba48cae227e7b1166e2fb149449fca4"
+#:
+#: **Пересобран 2026-11-24** вместе с писательским пином и по той же причине (R1a:
+#: durable очередь обхода). ``Frontier`` теперь сообщает о **каждой принятой постановке**
+#: (``on_enqueue``), а дренаж пишет её ``pending``-строкой в ``crawl_session_items``:
+#: заголовок очереди — до первого шага, остальное — на границе корня. Отсюда ровно
+#: аддитивные операторы: **+8** ``INSERT crawl_session_items`` (8 поставленных и не взятых
+#: URL харнесса: 1 в голове + 7 на границе), **+2** ``BEGIN``/``COMMIT`` (две пачки, а не
+#: по строке на транзакцию), **+1** ``SELECT status, COUNT(*)`` + **+1**
+#: ``UPDATE crawl_sessions`` (пересчёт счётчиков **один раз** на границе корня) и **+1**
+#: ``SELECT * FROM crawl_session_items`` — чтение подъёма ``pending`` перед расширением BFS
+#: (``lift_pending_queue``). Операторов 226 против 211, записей 183 против 170.
+#: **Порядок прежних операторов не сдвинулся**: старый след 211/170 — подпоследовательность
+#: нового (проверено ``SequenceMatcher``, перестановок нет), поэтому это не «поехал
+#: порядок», а новая работа того же порядка. Очередь — провенанс, не identity: в
+#: ``run_id`` ничего из этого не входит.
+EXPECTED_TRACE_DIGEST = "5d765a90eb8f0ba72c0403eed12c123388ac98f03b05cf713bf916e3f42bf255"
 
 #: Глаголы, меняющие данные или схему. Транзакционные границы входят в пин записей: без них
 #: «две записи в одной транзакции» и «две записи в разных» дали бы один дайджест.
@@ -412,6 +427,10 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'BEGIN'),
     (1, 'INSERT run_product'),
     (1, 'COMMIT'),
+    (1, 'SELECT *'),
+    (1, 'BEGIN'),
+    (1, 'INSERT crawl_session_items'),
+    (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'INSERT crawl_session_items'),
     (1, 'SELECT status,'),
@@ -456,6 +475,11 @@ EXPECTED_SEQUENCE: tuple[tuple[int, str], ...] = (
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'INSERT extract_queue'),
+    (1, 'COMMIT'),
+    (1, 'BEGIN'),
+    (7, 'INSERT crawl_session_items'),
+    (1, 'SELECT status,'),
+    (1, 'UPDATE crawl_sessions'),
     (1, 'COMMIT'),
     (1, 'BEGIN'),
     (1, 'UPDATE crawl_sessions'),

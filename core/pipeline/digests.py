@@ -80,15 +80,29 @@ __all__ = [
     "corpus_snapshot_product_id",
     "coverage_digest",
     "crawl_policy_digest",
+    "crawl_root_space_digest",
+    "crawl_root_space_material",
     "execution_contract_digest",
     "manual_artifacts_digest",
     "passports_digest",
     "render_modes_digest",
     "retrieved_doc_set_digest",
+    "root_limits_digest",
     "scoring_policy_version",
     "seeds_digest",
     "snapshot_url_key",
 ]
+
+#: Дискриминатор **формата** материала пространства: пространство удостоверяется **по
+#: корню**, а не глобальным дайджестом всего пакета (вариант 3).
+#:
+#: До этой формы материал (``crawl_space_material``) нёс **список всех** корней пакета и
+#: глобальный ``crawl_config_digest``; поэтому добавление site-ключа чужого продукта в
+#: ``domain_profiles.yaml`` меняло отпечаток у всех корней сразу, ``scheduled`` решал
+#: ``refresh`` вместо ``reuse`` и переобходился чужой продукт (измерено на ``81dac2e``).
+#: Ключ ``scope`` различает записи: снятие с ним — per-root, без него — legacy-форма, и
+#: сравнивать их между собой нельзя (разный формат, а не разное пространство).
+ROOT_SPACE_SCOPE = "root"
 
 #: Поля execution contract (§12.5, методология 2.4.0). Порядок — документационный; хеш
 #: канонический (``sort_keys=True``), поэтому порядок входа на результат не влияет.
@@ -700,6 +714,86 @@ def crawl_space_digest(
         ),
         _DIGEST_LEN,
     )
+
+
+def crawl_root_space_material(
+    *,
+    product_id: str,
+    scope_kind: str,
+    host: str | None,
+    path: str | None,
+    mode: str,
+    limits_digest: str | None,
+    semantics: str | None = None,
+) -> dict[str, Any]:
+    """Материал удостоверяемого пространства **одного** корня (вариант 3).
+
+    Пространство сравнивается по своему корню: режим **этого** корня плюс резолвнутые
+    лимиты **этого** адреса (``root_limits_digest``), а не глобальный отпечаток пакета.
+    Поэтому добавление site-ключа другого продукта не меняет пространство соседних
+    корней — дефект ``81dac2e`` (один ключ ``support.huaweicloud.com`` сдвинул
+    ``crawl_config_digest`` у всего пакета) здесь невозможен по построению.
+
+    ``crawl_space`` — список из **одной** строки: форма ``space_attests`` сравнивает
+    именно его, а не число корней. ``scope`` — дискриминатор формата (:data:`ROOT_SPACE_SCOPE`),
+    ``space_attests`` лишние ключи игнорирует, поэтому новая форма совместима с ним без
+    правки сравнения.
+
+    ``semantics`` — версия правил обхода: в сравнение не входит, хранится затем, чтобы
+    расхождение отпечатка при смене формулы было объяснимо (A3), а не выдавалось за
+    смену пространства.
+    """
+    return {
+        "scope": ROOT_SPACE_SCOPE,
+        "crawl_space": [[str(product_id), str(scope_kind), host, path, str(mode)]],
+        "crawl_config_digest": limits_digest,
+        "semantics": semantics,
+    }
+
+
+def crawl_root_space_digest(
+    *,
+    product_id: str,
+    scope_kind: str,
+    host: str | None,
+    path: str | None,
+    mode: str,
+    limits_digest: str | None,
+) -> str:
+    """Отпечаток удостоверяемого пространства **одного** корня, 24 hex.
+
+    Формула — тот же материал, что у :func:`crawl_root_space_material`, и те же два
+    слагаемых, что сравнивает :func:`core.pipeline.corpus_coverage.space_attests`
+    (``crawl_space`` и ``crawl_config_digest``). ``semantics`` в отпечаток не входит:
+    правила обхода решают *как* идёт обход, а не *что* он покрывает.
+    """
+    material = crawl_root_space_material(
+        product_id=product_id,
+        scope_kind=scope_kind,
+        host=host,
+        path=path,
+        mode=mode,
+        limits_digest=limits_digest,
+    )
+    return short_hash(
+        _canonical(
+            {
+                "crawl_space": material["crawl_space"],
+                "crawl_config_digest": material["crawl_config_digest"],
+            }
+        ),
+        _DIGEST_LEN,
+    )
+
+
+def root_limits_digest(limits: Mapping[str, Any]) -> str:
+    """Отпечаток **резолвнутых** лимитов одного корня (``CrawlLimits.as_dict()``).
+
+    Одна формула на объявление и на снятие: снятие несёт отпечаток этих лимитов, а
+    следующий прогон считает его из той же цепочки app < run < product < site, поэтому
+    «то же пространство» не зависит от того, кто именно его считал.
+    """
+    return short_hash(_canonical(dict(limits)), _DIGEST_LEN)
 
 
 def execution_contract_digest(values: Mapping[str, Any]) -> str:

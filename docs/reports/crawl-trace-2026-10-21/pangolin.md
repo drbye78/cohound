@@ -170,7 +170,7 @@ https://sbertech.ru/strapi/api/media/PSQ_8_2_0_exploitation_1988c54bf3.zip
 
 Что можно утверждать по коду: единственные пути, оставляющие seed **без строки**,
 это ранние возвраты в `_drain_root` — `seed_blacklisted`/`seed_truncated`
-(`core/pipeline/corpus_drain.py:1460-1465`), `continue` по `max_attempts` (нужен
+(`core/pipeline/corpus_drain.py:1817-1822`), `continue` по `max_attempts` (нужен
 `prior_item`, его нет) и `_expand_directory` (все ветки пишут `FAILED`). Оба ранних
 возврата требуют условия, которое статически не воспроизводится: блэклист ложен, а
 `seed_truncated` требует `frontier.fetched >= 10` на момент `add_seed`, тогда как

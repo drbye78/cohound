@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
@@ -231,6 +232,7 @@ __all__ = [
     "WiringError",
     "assert_embedder_matches_build",
     "build_adapters",
+    "build_browser_crawler_factory",
     "build_discovery_llm",
     "build_evaluator_llm",
     "build_extraction_pool",
@@ -1960,9 +1962,7 @@ def build_scout_crawler(
             domain_profiles=domain_profiles,
             cache=cache,
         )
-        return BrowserCrawler(
-            **_browser_crawler_kwargs(config), cache=cache, robots=robots
-        )
+        return _build_browser_crawler(config, cache=cache, robots=robots)
     # Недостижимо: имя сверено с ``SUPPORTED_SCOUT_CRAWLERS`` выше. Явный отказ, а не
     # «молча вернуть хоть что-то»: добавленное в кортеж имя без ветки сборки обязано
     # падать здесь, а не подменять объявленный движок другим.
@@ -1970,6 +1970,82 @@ def build_scout_crawler(
         f"{ENV_SCOUT_CRAWLER}: краулер {name!r} объявлен в "
         f"{SUPPORTED_SCOUT_CRAWLERS}, но ветки сборки у него нет"
     )
+
+
+def _build_browser_crawler(
+    config: DeployConfig,
+    *,
+    cache: ContentAddressedCache | None,
+    robots: Any,
+) -> CrawlerPort:
+    """Собрать :class:`BrowserCrawler` — **одна** формула на все места сборки.
+
+    Формула конфигурации живёт в :func:`_browser_crawler_kwargs`; здесь — только её
+    применение. Копия вызова в трёх местах (``build_scout_crawler``,
+    ``build_scout_crawlers``, фабрика на поток) разошлась бы молча: движок, собранный
+    фабрикой, обязан быть **тем же** движком, что и в карте ``crawlers``, иначе
+    ``engine_version`` в провенансе описывал бы не то исполнение.
+    """
+    return BrowserCrawler(**_browser_crawler_kwargs(config), cache=cache, robots=robots)
+
+
+def build_browser_crawler_factory(
+    *,
+    deploy: DeployConfig | None = None,
+    cache: ContentAddressedCache | None = None,
+    domain_profiles: Mapping[str, DomainProfile] | None = None,
+    run_crawl: CrawlRunConfig | None = None,
+    cli_max_depth: int | None = None,
+) -> Callable[[], CrawlerPort]:
+    """Фабрика **своего** браузерного движка на поток (параллельный браузерный фетч).
+
+    Зачем фабрика, а не один движок: Playwright sync-API привязан к потоку-создателю
+    (``_PlaywrightBackend._assert_owner_thread``), поэтому N потоков не могут делить
+    один движок — каждый поднимает свой, лениво, в своём потоке. Фабрика нужна именно
+    потому, что движок нельзя создать заранее «на будущий поток»: владельцем становится
+    тот, кто первым вызвал ``open``.
+
+    Конфигурация — та же, что у движка в карте ``crawlers``
+    (:func:`_browser_crawler_kwargs` через :func:`_build_browser_crawler`); ``robots``
+    резолвится тем же :func:`_crawler_robots`, поэтому гейт ``robots.txt`` у
+    параллельного фетча тот же, что у последовательного.
+
+    Память — цена этого решения: каждый движок это свой браузерный процесс (сотни МБ).
+    Сколько их поднято, решает объявленная ось ``browser_workers``, а сколько реально
+    работало одновременно, публикует наблюдение ``browser_in_flight_max``.
+
+    Ограничение, названное здесь, а не обнаруженное в проде: при объявленном
+    ``crawl.browser.user_data_dir`` (persistent-профиль) второй движок на том же каталоге
+    получит отказ Chromium — профиль занят. Параллельный фетч предполагает либо
+    временные профили, либо CDP-подключение; ``cdp_url`` тоже общий на все движки.
+
+    **Конфигурация и гейт ``robots`` резолвятся при первом вызове, а не здесь.** Прогон без
+    браузерного движка (и без объявленной оси) фабрику не зовёт вовсе, и он обязан
+    остаться байт-в-байт прежним: ни лишнего ``HttpCrawler`` для гейта, ни чтения
+    конфигурации. Гейт строится один раз и делится движками — так ``robots.txt`` у
+    параллельного фетча тот же, что у последовательного (один кэш на когорту, а не по
+    копии на движок).
+    """
+    resolved: dict[str, Any] = {}
+    lock = threading.Lock()
+
+    def _engine() -> CrawlerPort:
+        with lock:
+            if not resolved:
+                config = deploy if deploy is not None else load_deploy_config(None)
+                resolved["config"] = config
+                resolved["robots"] = _crawler_robots(
+                    config,
+                    run_crawl=run_crawl,
+                    cli_max_depth=cli_max_depth,
+                    domain_profiles=domain_profiles,
+                    cache=cache,
+                )
+        return _build_browser_crawler(
+            resolved["config"], cache=cache, robots=resolved["robots"]
+        )
+
+    return _engine
 
 
 def _crawler_robots(
@@ -2103,8 +2179,8 @@ def build_scout_crawlers(
             build_errors["scrapy"] = f"{type(exc).__name__}: {exc}"
     if "browser" in referenced:
         try:
-            crawlers["browser"] = BrowserCrawler(
-                **_browser_crawler_kwargs(config), cache=cache, robots=robots
+            crawlers["browser"] = _build_browser_crawler(
+                config, cache=cache, robots=robots
             )
         except (WiringError, ImportError, CrawlError) as exc:
             build_errors["browser"] = f"{type(exc).__name__}: {exc}"
@@ -3110,6 +3186,7 @@ def _build_local_ports(
     package: str | None,
     crawler: CrawlerPort | None = None,
     crawlers: Mapping[str, CrawlerPort] | None = None,
+    browser_crawler_factory: Callable[[], CrawlerPort] | None = None,
     pollers: Mapping[str, PollPort] | None = None,
     store: StorePort | None = None,
     chunk_lookup: ChunkLookup | None = None,
@@ -3301,6 +3378,9 @@ def _build_local_ports(
         crawler=crawler,
         # Lane A/L3a: карта ``engine → CrawlerPort`` для per-engine выбора в Ш5.
         crawlers=crawlers,
+        # Параллельный браузерный фетч: фабрика своего движка на поток (``None`` —
+        # прежнее поведение, общий движок из карты в одном потоке).
+        browser_crawler_factory=browser_crawler_factory,
         # Phase 5.1: карта ``kind → PollPort`` для опроса фидов/каналов в Ш5.
         pollers=pollers,
         # B3: спуск в контейнеры — читатель по голове файла (stdlib zip / py7zr / rarfile).
@@ -3814,6 +3894,17 @@ def build_adapters(
             package=package,
             crawler=local_crawler,
             crawlers=crawlers,
+            # Параллельный браузерный фетч: фабрика движка **на поток**. Playwright
+            # sync-API не переносим между потоками, поэтому один общий движок из карты
+            # обслуживает только последовательный маршрут; при объявленной оси
+            # ``browser_workers`` каждый поток поднимает свой.
+            browser_crawler_factory=build_browser_crawler_factory(
+                deploy=deploy,
+                cache=cache,
+                domain_profiles=domain_profiles,
+                run_crawl=run_crawl,
+                cli_max_depth=cli_max_depth,
+            ),
             pollers=pollers,
             store=store,
             chunk_lookup=chunk_lookup,

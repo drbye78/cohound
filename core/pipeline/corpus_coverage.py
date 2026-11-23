@@ -29,7 +29,7 @@ from core.domain import (
     FailureKind,
     RunProductStatus,
 )
-from core.pipeline.digests import snapshot_url_key
+from core.pipeline.digests import ROOT_SPACE_SCOPE, snapshot_url_key
 from core.ports.state import CaptureRow
 
 
@@ -39,6 +39,10 @@ def _root_coverages(
     declared_space_digest: str | None = None,
     resolved_manually_by_root: Mapping[str, int] | None = None,
     declared_space_material: Mapping[str, Any] | None = None,
+    declared_space_by_root: Mapping[
+        str, tuple[str | None, Mapping[str, Any] | None]
+    ]
+    | None = None,
 ) -> list[CorpusRootCoverage]:
     """Снятия объявленных корней продукта: по одному блоку на корень (план 20 §11.2).
 
@@ -98,9 +102,15 @@ def _root_coverages(
             continue
         key = snapshot_url_key(capture.root_url)
         current = newest.get(key)
+        root_digest, root_material = _declared_space_for(
+            key,
+            declared_space_digest,
+            declared_space_material,
+            declared_space_by_root,
+        )
         if current is None or _capture_rank(
-            capture, declared_space_digest, declared_space_material
-        ) > _capture_rank(current, declared_space_digest, declared_space_material):
+            capture, root_digest, root_material
+        ) > _capture_rank(current, root_digest, root_material):
             newest[key] = capture
     declared: dict[str, str] = {}
     for raw in declared_roots:
@@ -113,15 +123,27 @@ def _root_coverages(
         chosen = newest.get(key)
         capture_policy = None if chosen is None else chosen.policy_digest
         policy_matched: bool | None = None
+        root_digest, root_material = _declared_space_for(
+            key,
+            declared_space_digest,
+            declared_space_material,
+            declared_space_by_root,
+        )
         if chosen is not None:
             # Пространство сверяется по материалу, когда он записан; ``None`` — «неизвестно»
             # (снятие прежней схемы без материала и разошедшийся отпечаток).
-            policy_matched = space_attests(
-                capture_material=parse_space_material(chosen.space_json),
-                declared_material=declared_space_material,
-                capture_digest=chosen.policy_digest,
-                declared_digest=declared_space_digest,
-            )
+            capture_material = parse_space_material(chosen.space_json)
+            if not _space_formats_comparable(root_material, capture_material):
+                # Legacy-снятие (глобальная форма) против per-root объявления: формат
+                # другой, а не пространство. ``complete`` не обнуляется (A3).
+                policy_matched = None
+            else:
+                policy_matched = space_attests(
+                    capture_material=capture_material,
+                    declared_material=root_material,
+                    capture_digest=chosen.policy_digest,
+                    declared_digest=root_digest,
+                )
         complete = False if chosen is None else bool(chosen.complete)
         if policy_matched is False:
             # Обход шёл в другом пространстве (другие режимы/лимиты): исчерпание одного
@@ -225,6 +247,60 @@ def space_attests(
     return capture_digest == declared_digest
 
 
+def _declared_space_for(
+    key: str,
+    declared_space_digest: str | None,
+    declared_space_material: Mapping[str, Any] | None,
+    declared_space_by_root: Mapping[
+        str, tuple[str | None, Mapping[str, Any] | None]
+    ]
+    | None,
+) -> tuple[str | None, Mapping[str, Any] | None]:
+    """Пространство объявленного корня: per-root при наличии, иначе глобальные параметры.
+
+    ``declared_space_by_root`` — карта ``{snapshot_url_key(root_url): (digest, material)}``
+    (вариант 3): пространство сравнивается по своему корню. Отсутствие ключа — вызов не
+    передал per-root карту; тогда действует прежняя сторона сравнения (глобальные
+    параметры), и поведение прежних вызовов сохраняется байт-в-байт.
+    """
+    if declared_space_by_root is not None:
+        entry = declared_space_by_root.get(key)
+        if entry is not None:
+            return entry
+    return declared_space_digest, declared_space_material
+
+
+def _space_formats_comparable(
+    declared_material: Mapping[str, Any] | None,
+    capture_material: Mapping[str, Any] | None,
+) -> bool:
+    """Совместимы ли **форматы** материалов пространства.
+
+    Per-root объявление (``"scope": "root"``) несёт режим и лимиты одного корня, а
+    legacy-снятие — глобальный список всех корней. Сравнивать их между собой нельзя:
+    это другой формат, а не другое пространство, и ``False`` здесь обнулил бы ``complete``
+    у состоявшегося снятия только из-за смены формы записи. Поэтому несовместимость
+    читается как «неизвестно» (``None``), а не «разошлось».
+
+    **Снятие без материала тоже несравнимо с per-root объявлением**, и это не
+    осторожность, а арифметика: его ``policy_digest`` посчитан **глобальной** формулой
+    (список всех корней пакета), а объявленный — формулой корня, поэтому отпечатки
+    разойдутся у любого такого снятия независимо от того, менялось ли пространство.
+    Запасное правило «оба отпечатка известны и различны ⇒ ``False``» верно только когда
+    обе стороны считались одной формулой, то есть для глобального объявления.
+    """
+    if declared_material is None:
+        # Объявление не передано — прежнее правило по отпечаткам (как до материала).
+        return True
+    if declared_material.get("scope") != ROOT_SPACE_SCOPE:
+        # Глобальное объявление: обе стороны одной формулы, сравнимы по отпечатку.
+        return True
+    return (
+        capture_material is not None
+        and capture_material.get("scope") == ROOT_SPACE_SCOPE
+    )
+
+
 def _attests_declared_space(
     capture: CaptureRow,
     declared_space_digest: str | None,
@@ -244,8 +320,11 @@ def _attests_declared_space(
     """
     if not capture.complete:
         return False
+    capture_material = parse_space_material(capture.space_json)
+    if not _space_formats_comparable(declared_space_material, capture_material):
+        return None
     return space_attests(
-        capture_material=parse_space_material(capture.space_json),
+        capture_material=capture_material,
         declared_material=declared_space_material,
         capture_digest=capture.policy_digest,
         declared_digest=declared_space_digest,
@@ -308,6 +387,10 @@ def derive_corpus_coverage(
     captures: Iterable[CaptureRow] = (),
     declared_space_digest: str | None = None,
     declared_space_material: Mapping[str, Any] | None = None,
+    declared_space_by_root: Mapping[
+        str, tuple[str | None, Mapping[str, Any] | None]
+    ]
+    | None = None,
     manual_urls: Iterable[str] = (),
     partial_docs: Iterable[str] = (),
     resolved_manually_by_root: Mapping[str, int] | None = None,
@@ -503,6 +586,7 @@ def derive_corpus_coverage(
         declared_space_digest,
         resolved_manually_by_root,
         declared_space_material,
+        declared_space_by_root,
     )
     roots_ok = bool(roots) and all(root.complete for root in roots)
     # Сеансовые условия действуют, только когда сеанс **есть** (есть элементы): у прохода
@@ -724,6 +808,10 @@ def _persist_corpus_coverage(
     captures: Mapping[str, Iterable[CaptureRow]] | None = None,
     declared_space_digest: str | None = None,
     declared_space_material: Mapping[str, Any] | None = None,
+    declared_space_by_root: Mapping[
+        str, Mapping[str, tuple[str | None, Mapping[str, Any] | None]]
+    ]
+    | None = None,
     skip_products: Iterable[str] | None = None,
 ) -> dict[str, CorpusCoverage]:
     """Вычисляет и персистит покрытие **каждого** продукта плана (Ф0, O3).
@@ -796,6 +884,15 @@ def _persist_corpus_coverage(
     входом ``run_id``. ``None`` — сверять не с чем (незнание не выдаётся за несовпадение,
     A3).
 
+    ``declared_space_by_root`` — ``product_id → {snapshot_url_key(root_url):
+    (digest, material)}``: пространство сравнивается **по своему корню** (вариант 3), а
+    глобальные ``declared_space_digest``/``declared_space_material`` остаются стороной
+    сравнения только для корней, которых в карте нет. Карта разрезана по продукту: один
+    ``host``+``path`` у двух продуктов — разные корни, и сливать их в один ключ значило бы
+    сверять чужое пространство. Снятие, записанное legacy-формой (глобальный список
+    корней), с per-root объявлением **не сравнивается** (``policy_matched=None``,
+    ``complete`` не обнуляется): это другой формат записи, а не другое пространство.
+
     :returns: ``product_id → CorpusCoverage`` — ровно те строки, которые записаны. Нужен
         писателю ``run_product`` (16 §3.2): ``coverage_complete`` — та же величина, что
         легла в ``corpus_coverage``, а не второй её расчёт (два носителя одной величины
@@ -842,6 +939,10 @@ def _persist_corpus_coverage(
             # Материал того же пространства: по нему расхождение отпечатков объясняется
             # (смена формулы обхода ≠ смена лимитов), а не обесценивает снятие целиком.
             declared_space_material=declared_space_material,
+            # Пространство **по корню** (вариант 3): карта продукта, ключ —
+            # ``snapshot_url_key(root_url)``. ``None`` у продукта — прежняя сторона
+            # сравнения (глобальные параметры выше).
+            declared_space_by_root=(declared_space_by_root or {}).get(product_id),
             # 13-manual-artifacts §3.3: URL, чей материал предъявлен артефактом.
             manual_urls=(resolved_manually or {}).get(product_id, ()),
             # Тот же факт разрезом по корню — видимость подачи в блоке ``roots``.
