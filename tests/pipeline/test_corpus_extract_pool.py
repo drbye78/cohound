@@ -307,6 +307,24 @@ def _recording_factory(created: list[_FakePool], **kw: Any):
     return factory
 
 
+def _recycling_factory(created: list[_FakePool], **kw: Any):
+    """Та же запись, но с ``max_tasks_per_child``: фабрика пути рециклинга (P4/OOM)."""
+
+    def factory(
+        n: int,
+        level: Any = None,
+        pdf_pipeline: Any = None,
+        *,
+        max_tasks_per_child: int | None = None,
+    ) -> _FakePool:
+        pool = _FakePool(n, **kw)
+        pool.max_tasks_per_child = max_tasks_per_child
+        created.append(pool)
+        return pool
+
+    return factory
+
+
 def _build(
     tmp_path: Path,
     *,
@@ -652,6 +670,113 @@ def test_extract_window_bounds_inflight(tmp_path: Path) -> None:
     assert 1 < fake.max_inflight <= 2  # окно реально используется и не превышено
     # Доводка строго FIFO: порядок ``result()`` = порядок submit.
     assert [r.url for r in fake.submitted_requests] == fake.completions
+
+
+# --------------------------------------------------------------------------- #
+# (3b) Пин: окно — провенанс, а не измерение. Состав корпуса при W=1 и W=4 один
+# --------------------------------------------------------------------------- #
+
+
+def _chunk_snapshot(store: SqliteStore, result: Any) -> list[tuple[str, str]]:
+    """Чанки партиции продукта в порядке записи: ``(chunk_id, text)``.
+
+    Адрес — ``partition_build_id`` (у ``corpus_chunks`` нет ``run_id``), источник —
+    стор: ``IndexBuild`` документов и чанков не несёт (Д-2/A4).
+    """
+    (entry,) = _build_of(result).entries
+    return [
+        (chunk.chunk_id, chunk.text)
+        for chunk in store.iter_chunks(entry.partition_build_id)
+    ]
+
+
+def test_extract_window_one_and_four_give_identical_corpus(tmp_path: Path) -> None:
+    """Окно — провенанс: при окне 1 и окне 4 корпус совпадает по составу **и порядку**.
+
+    Рециклинг больше не задаёт окно (он — жизненный цикл воркера), поэтому ширина пула
+    свободна. Проверяется не число, а идентичность: адреса чанков, их тексты, порядок
+    документов и ``index_build_id`` — окно не имеет права менять ни один из них.
+    """
+    pages = _site_dup()
+    store_one, store_four = SqliteStore(":memory:"), SqliteStore(":memory:")
+    try:
+        for store in (store_one, store_four):
+            _make_run(store)
+        created: list[_FakePool] = []
+        pool = ExtractionPool(
+            pool_factory=_recycling_factory(created),
+            worker=_reconstruct_worker,
+            supports_worker_recycling=True,
+        )
+        one = _build(
+            tmp_path / "w1",
+            pages=pages,
+            store=store_one,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1, extract_workers=1, extract_max_tasks_per_child=3
+            ),
+            extraction_pool=pool,
+        )
+        four = _build(
+            tmp_path / "w4",
+            pages=pages,
+            store=store_four,
+            run_id=RUN_ID,
+            crawl_defaults=CrawlRunConfig(
+                max_depth=1, extract_workers=4, extract_max_tasks_per_child=3
+            ),
+            extraction_pool=pool,
+        )
+
+        # Окно = ширина пула: 1 против 4 (рециклинг задан в обоих случаях — и не решает).
+        assert [fake.size for fake in created] == [1, 4]
+        assert created[0].max_inflight == 1
+        assert 1 < created[1].max_inflight <= 4
+        # FIFO не сломан: доводка идёт в порядке подачи при обоих окнах.
+        for fake in created:
+            assert [r.url for r in fake.submitted_requests] == fake.completions
+        # Один и тот же набор запросов — один и тот же корпус, в том же порядке.
+        assert _chunk_snapshot(store_one, one) == _chunk_snapshot(store_four, four)
+        assert [(d.url, d.content_hash) for d in _docs(store_one)] == [
+            (d.url, d.content_hash) for d in _docs(store_four)
+        ]
+        assert _build_of(one).index_build_id == _build_of(four).index_build_id
+        assert one.errors == four.errors == []
+    finally:
+        store_one.close()
+        store_four.close()
+
+
+def test_recycling_without_declared_width_is_one_unit(tmp_path: Path) -> None:
+    """Рециклинг без объявленной ширины: пул ради рециклинга, окно — одна единица.
+
+    Пул нужен, иначе ось рециклинга не действует вовсе; но окно он не задаёт. Ширина не
+    объявлена (ось ``extract_workers`` не задана и не выведена) ⇒ одна единица в полёте —
+    минимум, при котором пул работает, и он же прежнее поведение до разъединения.
+    """
+    pages = _site_dup()
+    baseline = _build(tmp_path / "base", pages=pages, crawl_defaults=BFS1)
+    created: list[_FakePool] = []
+    pool = ExtractionPool(
+        pool_factory=_recycling_factory(created),
+        worker=_reconstruct_worker,
+        supports_worker_recycling=True,
+    )
+    result = _build(
+        tmp_path / "recycle",
+        pages=pages,
+        crawl_defaults=CrawlRunConfig(max_depth=1, extract_max_tasks_per_child=3),
+        extraction_pool=pool,
+    )
+
+    assert len(created) == 1
+    assert created[0].size == 1
+    assert created[0].max_inflight == 1
+    assert created[0].max_tasks_per_child == 3
+    # Окно 1 здесь не деградация: диагностика молчит, корпус идентичен inline-эталону.
+    assert result.errors == []
+    assert _build_of(result).index_build_id == _build_of(baseline).index_build_id
 
 
 # --------------------------------------------------------------------------- #

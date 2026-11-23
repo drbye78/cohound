@@ -296,10 +296,16 @@ def chunk_row_id(doc_version_id: str, chunker_version: str, chunk_no: int) -> st
 
     Это **durable**-пространство идентификаторов (state.db). Run-level ``chunk_id``
     (``core.pipeline.corpus_index._chunk_id``) — другое пространство
-    ``f"{product_id}:{doc_hash}:{chunk_no}"``: он адресует чанк внутри конкретного
+    ``f"{product_id}:{doc_version_id}:{chunk_no}"``: он адресует чанк внутри конкретного
     прогона/партиции, тогда как ``chunk_meta.chunk_id`` переживает прогоны и различает
     версии чанкера. Смешивать их нельзя — одинаковый текст при разных
     ``chunker_version`` обязан дать разные durable-строки.
+
+    **Выводимость — не косметика.** Id считается из версии, поэтому пере-штамповка
+    ``chunker_version`` обязана пере-штамповать и его: строка с прежним id противоречила бы
+    собственной формуле, и следующий писатель создал бы для того же куска вторую строку
+    (``iter_doc_chunks`` вернул бы оба набора). Это делает
+    ``scripts/migrate_chunker_version.py`` в одной транзакции с ``chunk_ids_digest``.
     """
     key = _FIELD_SEP.join((doc_version_id, chunker_version, str(int(chunk_no))))
     return short_hash(key, 24)

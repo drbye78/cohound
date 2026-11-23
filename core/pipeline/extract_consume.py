@@ -868,49 +868,79 @@ def _reuse_kind_for(item: ExtractQueueItem) -> ReuseKind:
 
 
 def _row_window(limits: CrawlLimits, scope: ConsumerScope, label: str) -> int | None:
-    """Окно экстракции одной строки: ось ``extract_workers`` либо рециклинг.
+    """Окно экстракции одной строки = **ширина пула**; рециклинг его не задаёт.
 
-    Ровно прежняя формула (``root_lifecycle`` до F5), но применённая к **строке**: окно —
-    свойство объявленных осей того URL, а не очереди. ``None`` — экстракция inline.
+    Две вещи, которые были склеены (``root_lifecycle`` до F5, план 24 §1.3), разведены:
 
-    Ось — провенанс, а не измерение: она не входит в ``CrawlLimits.as_dict()``, поэтому
-    её значение не может сдвинуть ``run_id``; публикуется она в
+    * **ширина пула** — сколько единиц в полёте. Единственный носитель числа — ось
+      ``crawl.extract_workers``, разрешённая на этот URL (объявленная на ``app<run<site>``
+      либо выведенная из бюджета памяти, F0). Это ровно то число, с которым пул и
+      строится: ``pool_factory(n, …)`` получает окно, а ``ProcessPoolExecutor`` берёт его
+      в ``max_workers`` (``core/cli/wiring.py``, ``_local_extract_pool_factory``). Второго
+      носителя нет: ширина пула и окно — одно число, поэтому отдельного поля «размер» у
+      :class:`~core.pipeline.extraction_runtime.ExtractionPool` не заводится — оно
+      повторяло бы окно и разошлось бы с ним при первом же расхождении.
+    * **рециклинг воркера** (``crawl.extract_max_tasks_per_child``) — жизненный цикл:
+      ``ProcessPoolExecutor`` сам пересоздаёт процесс после N заданий. Он **не** требует
+      последовательной подачи и окна не меняет; его роль здесь только одна — он требует
+      *существования* пула там, где ось ширины не объявлена (иначе экстракция пошла бы
+      inline, то есть без рециклинга вовсе).
+
+    Правило: ``None`` — пула нет, экстракция inline; ось ``>1`` — окно = ось; иначе (ось
+    ``None``/``1``, пул есть ради рециклинга) — одна единица в полёте, ровно как до
+    разъединения, но теперь это названный минимум, а не следствие рециклинга.
+
+    Окно — **провенанс, а не измерение**: оно не входит в ``CrawlLimits.as_dict()``,
+    поэтому не может сдвинуть ``run_id``; публикуется оно в
     ``metrics.json.resources.scheduling`` (:func:`core.pipeline.corpus_ingest.
-    note_scheduling`).
+    note_scheduling`). Состав корпуса от него не зависит — это запинено тестом
+    ``test_extract_window_one_and_four_give_identical_corpus``.
 
-    Несовпадение оси и пула — **не тихо** (:func:`_note_window_diagnostics`): раньше эту
-    проверку делал корень, а окно теперь резолвится здесь, на строке.
+    Несовпадение оси и пула — **не тихо** (:func:`_note_window_diagnostics`).
     """
-    axis = (
-        int(limits.extract_workers)
-        if limits.extract_workers is not None and int(limits.extract_workers) > 1
-        else None
+    width = (
+        int(limits.extract_workers) if limits.extract_workers is not None else None
     )
-    _note_window_diagnostics(limits, axis, scope, label)
-    if axis is not None:
-        return axis
-    recycle = limits.extract_max_tasks_per_child
+    if width is not None and width < 1:
+        # ``0`` — «по бюджету не помещается» (preflight превращает это в отказ), а не
+        # ширина пула: пул нулевой ширины не существует.
+        width = None
+    _note_window_diagnostics(limits, width, scope, label)
+    if scope.extraction_pool is None:
+        # Пул не сконфигурирован: экстракция inline, окна нет (ось при этом не действует —
+        # сказано в диагностике выше).
+        return None
+    if width is not None and width > 1:
+        return width
     if (
-        recycle is not None
-        and scope.extraction_pool is not None
+        limits.extract_max_tasks_per_child is not None
         and scope.extraction_pool.supports_worker_recycling
     ):
-        return 1
+        # Пул нужен рециклингу; окно — объявленная ширина, а если ось не объявлена —
+        # минимум, при котором пул вообще работает.
+        return 1 if width is None else width
     return None
 
 
 def _note_window_diagnostics(
     limits: CrawlLimits,
-    axis: int | None,
+    width: int | None,
     scope: ConsumerScope,
     label: str,
 ) -> None:
     """Назвать несовпадение объявленной оси экстракции и фазового пула (один раз на причину).
 
-    Три случая, каждый — потеря объявленного измерения, если промолчать: ось задана без
-    пула (экстракция пойдёт inline, то есть не с той параллельностью), рециклинг задан без
-    пула, рециклинг задан на пуле, который его не умеет (``split`` — потоковый пул).
+    ``width`` — разрешённая ось ``crawl.extract_workers`` (``None`` — не объявлена и не
+    выведена), а не окно: окно из неё считается в :func:`_row_window`, и диагностика не
+    имеет права утверждать, что его задаёт рециклинг.
+
+    Три случая, каждый — потеря объявленного измерения, если промолчать: ось ``>1``
+    задана без пула (экстракция пойдёт inline, то есть не с той параллельностью),
+    рециклинг задан без пула, рециклинг задан на пуле, который его не умеет (``split`` —
+    потоковый пул). Рециклинг без объявленной ширины сюда не входит: окно 1 там —
+    названный минимум пула, а не деградация.
     """
+    axis = width if width is not None and width > 1 else None
     if axis is not None and scope.extraction_pool is None:
         _note_window_once(
             scope,
@@ -933,7 +963,8 @@ def _note_window_diagnostics(
             scope,
             "recycle_not_supported",
             f"{label}: crawl.extract_max_tasks_per_child={recycle} поддерживается "
-            "только процессным пулом (local) — ось игнорируется",
+            "только процессным пулом (local) — ось рециклинга игнорируется, "
+            "окно резолвится по ширине пула (crawl.extract_workers)",
         )
 
 
@@ -2021,7 +2052,9 @@ def consume(
     ``attempts += 1`` и видимой записью: «взял и умер» не теряет документ и не требует
     ручного вмешательства.
 
-    **Окно экстракции** резолвится по строке (:func:`_row_window`), а пул — фазовый по ключу
+    **Окно экстракции** резолвится по строке (:func:`_row_window`): это ширина пула, то
+    есть разрешённая ось ``crawl.extract_workers`` (или одна единица, если объявлен только
+    рециклинг воркера), а пул — фазовый по ключу
     ``(уровень, механизм PDF, окно)``. Ожидание — FIFO: ``future.result`` вызывается в
     порядке строк, поэтому порядок записи документов не зависит от того, какой воркер
     ответил первым.

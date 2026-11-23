@@ -152,6 +152,9 @@ class ExtractionPool:
     :param supports_worker_recycling: профиль умеет рециклинг воркеров по счётчику заданий
         (``ProcessPoolExecutor(max_tasks_per_child=N)``). ``False`` (``split``/потоки) —
         ось ``extract_max_tasks_per_child`` не действует (не тихо: запись в ``errors``).
+        Рециклинг — **жизненный цикл**, а не конкурентность: окно равно ширине пула
+        (``pool_factory`` получает её первым аргументом), и последовательной подачи
+        ``max_tasks_per_child`` не требует.
     :param worker_rss_dir: F0 — каталог стока пика памяти воркеров
         (``{runs}/{run_id}/workers``). Каждый воркер-процесс после задания пишет туда свой
         ``ru_maxrss`` (файл на ``pid``), родитель читает максимум
