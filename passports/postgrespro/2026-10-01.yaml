@@ -48,11 +48,4 @@ satellites:
     relationship_evidence:
       url: "https://postgrespro.ru/products/postgrespro"
       quote: "AQO (адаптивная оптимизация)"
-  # Только имя в технологическом стеке; роль источником не определена → draft.
-  - role: unknown
-    state: draft
-    component: "Proxima"
-    origin: in_house
-    relationship: bundled
-    evidence_state: claimed
 snapshot_date: 2026-10-01

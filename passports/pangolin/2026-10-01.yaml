@@ -50,19 +50,4 @@ satellites:
     relationship_evidence:
       url: "https://pangolin.sbertech.ru"
       quote: "CopyWala (бэкапы с FUSE)"
-  # Только имя и версия в стеке; роль ha_orchestrator источником не подтверждена → draft.
-  - role: ha_orchestrator
-    state: draft
-    component: "Patroni"
-    origin: third_party
-    relationship: bundled
-    evidence_state: claimed
-  # Упомянут в группе Platform V; роль in_memory_cache выведена из «In-memory кэширование»
-  # (не из прямой фразы про Ignite) → claimed/draft.
-  - role: in_memory_cache
-    state: draft
-    component: "Ignite"
-    origin: unknown
-    relationship: bundled
-    evidence_state: claimed
 snapshot_date: 2026-10-01
