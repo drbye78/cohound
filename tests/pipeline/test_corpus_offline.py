@@ -51,7 +51,8 @@ from core.pipeline.corpus_ingest import (
     OfflineReuseReport,
 )
 from core.pipeline.crawl_session import default_session_id
-from core.ports.state import UrlStateRow
+from core.pipeline.manual_artifacts import ManualArtifact, ManualArtifacts
+from core.ports.state import ContainerStateRow, UrlStateRow
 from core.ports.types import (
     Chunk,
     ExtractedDoc,
@@ -389,9 +390,7 @@ def test_offline_reuses_known_root_and_page_without_any_network_call(
             build = _build_of(result)
             assert build.chunk_count == 1
             # 4. Счётчики честные: документ переиспользован, а не «новый».
-            assert build.doc_counters == {
-                "p1": {"total": 1, "new": 0, "reused": 1}
-            }
+            assert build.doc_counters == {"p1": {"total": 1, "new": 0, "reused": 1}}
             # 5. Элементов сеанса нет: ``crawl_session_items`` — учёт фетчей.
             assert _session_items(store) == []
             # 6. ``url_state`` не переписан: наблюдения не было, провенанс не подменяется.
@@ -442,9 +441,7 @@ def test_offline_unknown_root_is_a_visible_error_not_a_fetch(tmp_path: Path) -> 
             assert crawler.calls == [], "неизвестный корень не повод сходить в сеть"
             assert _docs(store) == []
             assert any(
-                ROOT in error
-                and "p1" in error
-                and OFFLINE_UNKNOWN_ROOT_TEXT in error
+                ROOT in error and "p1" in error and OFFLINE_UNKNOWN_ROOT_TEXT in error
                 for error in result.errors
             ), f"нет видимой ошибки о неизвестном корне: {result.errors}"
             # Причина zero-source названа политикой, а не «нет seed'ов».
@@ -475,7 +472,9 @@ def test_offline_known_url_without_version_is_visible_and_excluded(
         result, store, crawler = _offline_run(tmp_path, state, roots=[ROOT])
         try:
             assert crawler.calls == []
-            assert _docs(store) == [], "нечего переиспользовать — документа в корпусе нет"
+            assert _docs(store) == [], (
+                "нечего переиспользовать — документа в корпусе нет"
+            )
             assert any(
                 OFFLINE_NO_VERSION_TEXT in error and ROOT in error
                 for error in result.errors
@@ -592,9 +591,9 @@ def test_offline_run_is_complete_by_capture_and_names_its_own_reason(
             assert coverage.expected_sources == 0
             # Отчёт говорит об оффлайне строкой, а не только структурой.
             notes = [e for e in result.log_entries if isinstance(e, str)]
-            assert any("offline" in note and "сеть не трогалась" in note for note in notes), (
-                notes
-            )
+            assert any(
+                "offline" in note and "сеть не трогалась" in note for note in notes
+            ), notes
             # И ``docs`` прогона — переиспользованные, а не «наблюдённые».
             events = _offline_events(result)
             assert events[0]["offline"]["reused_docs"] == 1
@@ -605,8 +604,145 @@ def test_offline_run_is_complete_by_capture_and_names_its_own_reason(
 
 
 # --------------------------------------------------------------------------- #
+# Три вида «версии нет», которые не являются недостачей подложки (23.11.2026)
+# --------------------------------------------------------------------------- #
+
+
+def test_offline_refused_url_is_counted_by_recorded_cause_not_as_no_version(
+    tmp_path: Path,
+) -> None:
+    """``robots_disallow`` — граница сайта (0.6.0), а не потерянный документ.
+
+    Измерено 23.11.2026 на стенде: 841 URL без версии, из них 287 ``robots_disallow``
+    и 531 ``source_unavailable``. Печатать их одной строкой «переиспользовать нечего —
+    документ не вошёл в корпус» значит выдавать ответ сайта за недостачу подложки.
+    """
+    with SqliteStateStore(":memory:") as state:
+        state.upsert_url_state(
+            UrlStateRow(
+                product_id="p1",
+                url=ROOT,
+                normalized_url=ROOT,
+                last_error_kind="robots_disallow",
+            )
+        )
+        result, store, crawler = _offline_run(tmp_path, state, roots=[ROOT])
+        try:
+            assert crawler.calls == []
+            events = _offline_events(result)
+            offline = events[0]["offline"]
+            assert offline["refused"] == {"robots_disallow": 1}
+            assert offline["no_version"] == [], "причина записана — это не недостача"
+            assert not any(OFFLINE_NO_VERSION_TEXT in error for error in result.errors)
+        finally:
+            store.close()
+
+
+def test_offline_container_url_is_not_reported_as_missing_version(
+    tmp_path: Path,
+) -> None:
+    """Контейнер — не документ: версии у него нет по построению.
+
+    Члены переиспользуются по своим URL, поэтому ``no_version`` о контейнере — ложная
+    недостача. Измерено 23.11.2026: 161 такой URL на стенде, все с записью
+    ``container_state``.
+    """
+    archive = "https://docs.test/p1/bundle.zip"
+    with SqliteStateStore(":memory:") as state:
+        state.upsert_url_state(
+            UrlStateRow(product_id="p1", url=archive, normalized_url=archive)
+        )
+        state.record_container_state(
+            ContainerStateRow(
+                product_id="p1",
+                url=archive,
+                normalized_url=archive,
+                archive_content_hash="deadbeef",
+                raw_path=str(tmp_path / "deadbeef.bin"),
+                status="descended",
+                first_seen_run_id=RUN_ID,
+                last_seen_run_id=RUN_ID,
+                first_seen_at=TS,
+                last_seen_at=TS,
+            )
+        )
+        result, store, crawler = _offline_run(tmp_path, state, roots=[archive])
+        try:
+            assert crawler.calls == []
+            offline = _offline_events(result)[0]["offline"]
+            assert offline["containers"] == [archive]
+            assert offline["no_version"] == []
+            assert not any(OFFLINE_NO_VERSION_TEXT in error for error in result.errors)
+        finally:
+            store.close()
+
+
+def test_offline_provided_artifact_is_not_reported_as_missing_version(
+    tmp_path: Path,
+) -> None:
+    """Объявленная подача входит в корпус **позже в этом же прогоне** — не потеря.
+
+    Порядок фаз: оффлайн-проход на границе продукта → подача объявленных файлов → Pass B.
+    Поэтому «версии нет» о таком URL — утверждение о моменте, а не о корпусе. Измерено
+    23.11.2026: все 17 объявленных подач `jatoba` попадали в ``no_version`` и
+    одновременно в корпус.
+    """
+    page = "https://docs.test/p1/provided.pdf"
+    payload = tmp_path / "provided.pdf"
+    payload.write_bytes(b"%PDF-1.4 provided bytes")
+    artifact = ManualArtifact(
+        product_id="p1",
+        url=page,
+        path=payload,
+        declared_path="provided.pdf",
+        sha256=content_hash(payload.read_bytes()),
+        size=payload.stat().st_size,
+    )
+    with SqliteStateStore(":memory:") as state:
+        state.upsert_url_state(
+            UrlStateRow(product_id="p1", url=page, normalized_url=page)
+        )
+        result, store, crawler = _offline_run(
+            tmp_path,
+            state,
+            roots=[ROOT],
+            manual_artifacts=ManualArtifacts(entries=(artifact,)),
+        )
+        try:
+            assert crawler.calls == []
+            offline = _offline_events(result)[0]["offline"]
+            assert offline["provided"] == [page]
+            assert offline["no_version"] == []
+            assert not any(OFFLINE_NO_VERSION_TEXT in error for error in result.errors)
+        finally:
+            store.close()
+
+
+# --------------------------------------------------------------------------- #
 # Единица: отчёт и тексты причин
 # --------------------------------------------------------------------------- #
+
+
+def test_offline_report_note_names_expected_absences_and_causes() -> None:
+    """Строка продукта называет ожидаемое отдельно от недостачи.
+
+    Контейнер, объявленная подача и записанный отказ — три разных факта; «переиспользовать
+    нечего» о них было бы одним словом на три причины.
+    """
+    report = OfflineReuseReport(
+        no_version=("https://docs.test/a",),
+        containers=("https://docs.test/b.zip",),
+        provided=("https://docs.test/c.pdf",),
+        refused={"robots_disallow": 2, "source_unavailable": 3},
+    )
+    note = report.note("p1")
+    assert "переиспользовать нечего 1" in note
+    assert "контейнеров 1 (не документы: члены — по своим URL)" in note
+    assert "объявлено подачей 1 (войдут позже в этом прогоне)" in note
+    assert (
+        "без версии по записанной причине (robots_disallow=2, source_unavailable=3)"
+        in note
+    )
 
 
 def test_offline_report_note_names_both_facts() -> None:
@@ -646,7 +782,10 @@ def test_offline_does_not_respect_revalidate_cap_axis(tmp_path: Path) -> None:
     extra = "https://docs.test/p1/print"
     with SqliteStateStore(":memory:") as state:
         _seed_substrate(
-            tmp_path, state, pages={ROOT: BODY, extra: b"second body"}, roots=[ROOT, extra]
+            tmp_path,
+            state,
+            pages={ROOT: BODY, extra: b"second body"},
+            roots=[ROOT, extra],
         )
         result, store, crawler = _offline_run(
             tmp_path,

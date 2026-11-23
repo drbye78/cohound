@@ -18,6 +18,7 @@ import pytest
 
 from core.domain.enums import IncrementalKind, ProductMode, RefreshPolicy
 from core.pipeline.corpus_ingest import plan_incremental_items
+from core.pipeline.crawl_frontier import CrawlLimits, Frontier
 from core.ports.state import UrlStateRow
 
 ROOT = "https://p1.test/docs/"
@@ -53,9 +54,7 @@ def _state() -> _FakeState:
     )
 
 
-def _items(
-    *, mode: ProductMode, policy: RefreshPolicy
-) -> list[Any]:
+def _items(*, mode: ProductMode, policy: RefreshPolicy) -> list[Any]:
     return plan_incremental_items(
         "p1",
         [ROOT],
@@ -90,3 +89,71 @@ def test_network_work_set_keeps_revalidation_for_incremental_mode() -> None:
 
     assert [item.normalized_url for item in items] == [KNOWN]
     assert items[0].kind is IncrementalKind.REVALIDATE
+
+
+# --------------------------------------------------------------------------- #
+# Объявленное пространство: url_state хранит и выведенные корни (23.11.2026)
+# --------------------------------------------------------------------------- #
+
+RETIRED = "https://edu.p1.test/docs/old.html"
+
+
+def _state_with_retired_root() -> _FakeState:
+    """Строка ``url_state``, чей корень выведен из пакета, но запись осталась."""
+    return _FakeState(
+        [
+            UrlStateRow(
+                product_id="p1",
+                url=KNOWN,
+                normalized_url=KNOWN,
+                doc_version_id="dv_known",
+            ),
+            UrlStateRow(
+                product_id="p1",
+                url=RETIRED,
+                normalized_url=RETIRED,
+                doc_version_id="dv_retired",
+            ),
+        ]
+    )
+
+
+def test_no_network_work_set_drops_urls_outside_declared_space() -> None:
+    """Под политикой без сети набор ограничен **объявленным** пространством.
+
+    Дефект: под сетью URL вне scope отсекает ``Frontier``, а под ``offline``/``frozen``
+    Frontier не вызывается вовсе — и материал выведенного корня возвращался в корпус.
+    Измерено 23.11.2026: 163 документа `edu.postgrespro.ru` вошли в прогон
+    `ru-pg-dbms-902c0b71c419`, тогда как предыдущий их не содержал.
+    """
+    dropped: list[tuple[str, str]] = []
+    items = plan_incremental_items(
+        "p1",
+        [ROOT],
+        state=_state_with_retired_root(),
+        policy=RefreshPolicy.OFFLINE,
+        product_modes={"p1": ProductMode.FULL.value},
+        planned_validators={},
+        errors=[],
+        scopes=[(ROOT, Frontier(ROOT, CrawlLimits()))],
+        dropped=dropped,
+    )
+
+    assert [item.normalized_url for item in items] == [KNOWN]
+    assert dropped == [(RETIRED, "out_of_declared_space")]
+
+
+def test_declared_space_filter_is_noop_for_network_policies() -> None:
+    """Под сетью фильтр не применяется: там пространство держит ``Frontier``."""
+    items = plan_incremental_items(
+        "p1",
+        [ROOT],
+        state=_state_with_retired_root(),
+        policy=RefreshPolicy.AUTO,
+        product_modes={"p1": ProductMode.INCREMENTAL.value},
+        planned_validators={},
+        errors=[],
+        scopes=[(ROOT, Frontier(ROOT, CrawlLimits()))],
+    )
+
+    assert {item.normalized_url for item in items} == {KNOWN, RETIRED}

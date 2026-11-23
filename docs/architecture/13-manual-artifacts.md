@@ -476,14 +476,14 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:354` — единственный writer, зовут
-   `core/pipeline/corpus.py:5673` и `core/pipeline/report.py:4296`; человеческая строка —
+   `core/pipeline/corpus.py:5719` и `core/pipeline/report.py:4296`; человеческая строка —
    `core/pipeline/artifacts_gap.py:213`, сбор — `core/pipeline/artifacts_gap.py:267`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
    существующая цепочка I19; `origin` в `corpus_docs`; аннотация покрытия
    `resolved_manually`; доля в манифесте; `manual_artifacts_digest` в контракт
    (загрузчик — `core/pipeline/manual_artifacts.py:225`, запись — `core/pipeline/manual_artifacts.py:108-127`; подача —
-   `core/pipeline/corpus.py:5673`; `origin` — `core/store/sqlite.py:323`;
+   `core/pipeline/corpus.py:5719`; `origin` — `core/store/sqlite.py:323`;
    `resolved_manually` — `core/domain/models.py:3059` + `core/pipeline/corpus_coverage.py:301`;
    доля — `core/pipeline/phases.py:1835`; дайджест — `core/pipeline/digests.py:206`, материал
    `core/pipeline/digests.py:458`).
@@ -582,11 +582,11 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   (`core/pipeline/manual_artifacts.py:202`), сверка `sha256` (`core/pipeline/manual_artifacts.py:308`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5606`), и `report` (`core/pipeline/report.py:4214`); форма —
+  (`core/pipeline/corpus.py:5652`), и `report` (`core/pipeline/report.py:4214`); форма —
   `core/pipeline/artifacts_gap.py:267` (`collect_artifact_gaps`), человеческая строка —
   `core/pipeline/artifacts_gap.py:213` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:133`); подача
-  живёт внутри `corpus` (`core/pipeline/corpus.py:4450`), т.е. §5 исполнен буквально.
+  живёт внутри `corpus` (`core/pipeline/corpus.py:4490`), т.е. §5 исполнен буквально.
 - ✅ **Идентичность** — `manual_artifacts_digest` в контракте (`core/pipeline/digests.py:179`,
   материал `(product_id, url, sha256)` — `core/pipeline/digests.py:432`), считается даже
   при пустом наборе.

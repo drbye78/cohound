@@ -355,7 +355,7 @@ per-site (`core/pipeline/crawl_frontier.py:843`) — два уровня одн�
   и это правильно: устройство — объявленная ось прогона, а не свойство адаптера, которое
   можно у него спросить (спрашивание и есть дефект `14` оговорки 5). Значение протаскивается
   **явным параметром**: `core/pipeline/phases.py:1373-1374` → `core/pipeline/corpus.py:1688`
-  (объявление оси) и `core/pipeline/corpus.py:4686`/`core/pipeline/corpus.py:4761`
+  (объявление оси) и `core/pipeline/corpus.py:4726`/`core/pipeline/corpus.py:4801`
   (передача рядом с `embed_model_id`), там же, где уже идёт `embed_model_id`
   (`core/pipeline/corpus.py:2293` — единственный источник этого значения).
 
@@ -451,7 +451,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 (`core/pipeline/corpus_index.py:911-923`; сегодня ключей **восемь**: шесть прежних плюс
 `embed_device` и `embed_precision`).
 
-`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4680`, а в тестах — с явными kwargs
+`_derive_partition_build_id` вызывается из `core/pipeline/corpus.py:4720`, а в тестах — с явными kwargs
 (`tests/pipeline/test_corpus_phase_boundary.py:153-163`,
 `tests/pipeline/test_document_levels.py:574-585`): новый **обязательный** аргумент даёт там
 `TypeError`, поэтому параметр вводится со значением по умолчанию либо тесты правятся в той
@@ -745,8 +745,8 @@ O6) рядом с `embed_precision`, той же природой, что `extra
      durable-элементы для дренажа». ✅ **As-built** (`core/pipeline/corpus_drain.py:1616-1632`:
      `charged_urls` → `add_revalidate_seed`, комментарий называет дефект 3 и `09` §6.3).
      Плюс приписывание владельцу — тем же предикатом, что
-     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5229-5263`, вызов —
-     `core/pipeline/corpus.py:2573-2574`: побеждает самый специфичный
+     `group_revalidation_items` (`core/pipeline/corpus_ingest.py:5386`, вызов —
+     `core/pipeline/corpus.py:3906`: побеждает самый специфичный
      `root_path_prefix`), а не «кто первый» (дефект 1); продукт-wide множество
      `resume_counted` (`core/pipeline/corpus.py:3529`) остаётся — меняется правило
      приписывания.

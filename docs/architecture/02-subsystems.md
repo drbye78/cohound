@@ -252,7 +252,7 @@ products × doc_domains
 | ось (`CrawlLimits`) | что регулирует | где создаётся | масштаб |
 |---|---|---|---|
 | `max_workers` | **сетевой** fetch-пул (`httpx`) | в `_open` — открытии полосы корня (`core/pipeline/corpus_driver.py:495-522`); ширину даёт `lane_width` (`core/pipeline/corpus_drain.py:1127-1142`), `None`/`1` ⇒ пула нет | **на seed-root**, не на прогон |
-| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5394-5421`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
+| `extract_workers` | **экстракция** (CPU: docling/trafilatura) | фазовый пул по ключу `(DocumentLevel, extract_window)` — `new_extract_pool` (`core/pipeline/corpus_ingest.py:5734`), кэшируется `pools.executor` | один на прогон, переиспользуется всеми корнями/продуктами |
 | `extract_max_tasks_per_child` | рециклинг воркер-процесса после N заданий | тот же процессный пул (`recycle_tasks` в `new_extract_pool`) | на воркер |
 | `document_level` | `off` / `text` / `layout` / `layout_tables` / `full` | резолвится **на seed-root** (один корень = один уровень) | на корень |
 | `robots` | эффективная egress-политика `robots.txt` | вычисляется ядром **на корень** (явная ось переопределяет автодетект) | на корень |

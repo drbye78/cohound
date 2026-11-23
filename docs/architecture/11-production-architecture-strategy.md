@@ -296,7 +296,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 - Хвост фазы durable: провенанс спуска по контейнеру, а не в конце. **Дизайн согласован
   (совет 2026-10-24, три полосы независимо + синтез).** `archive_observations`/
   `corpus_members` копились в памяти (`core/pipeline/corpus.py:2799,3042`) и писались пачкой
-  (`core/pipeline/corpus.py:5619-5624`) ⇒ SIGKILL терял всё. Лечение — write-through:
+  (`core/pipeline/corpus.py:5919-5926`) ⇒ SIGKILL терял всё. Лечение — write-through:
   `ArchiveDescentWalker` получает два необязательных колбэка (`persist_observation`,
   `persist_member`), `None` — прежнее поведение байт-в-байт. Точки: наблюдение — `_record`
   (`core/pipeline/archive_descent.py:514`, вызовы `642`/`686`/`708`/`1059`), член — `_settle`
@@ -413,7 +413,7 @@ peak=1563 MB, parent floor=500 MB → workers=0`, отказ **до** фаз. Ф
 
 > 🟡 **частично (сверено 08.11.2026).** Пакет стадий собран: 9 модулей `core/pipeline/corpus_*.py`
 > (30.10–01.11), `corpus.py` — 5870 строк фасада с публичной `build_corpus`
-> (`core/pipeline/corpus.py:5897`); `IndexBuild.docs` снят (докстринг
+> (`core/pipeline/corpus.py:5943`); `IndexBuild.docs` снят (докстринг
 > `core/pipeline/index_build.py:30-33` объясняет, почему документы не едут в результате);
 > эмбеддинг батчами по `EMBED_BATCH_CHUNKS = 64` (`core/pipeline/corpus_index.py:79`).
 > **Нет** `memmap`-записи партиции и документного `pb`: `product_content_token` по-прежнему

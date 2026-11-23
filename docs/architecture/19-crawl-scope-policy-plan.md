@@ -63,7 +63,7 @@ per-host статуса и без различения дискавери и о�
 | per-host[+path] оси и их digest в `run_id` | `core/config/domain_profiles.py:49`, `core/pipeline/report.py:802` | **не знает продукта** |
 | `product → host+path` слои | `core/config/crawl_sources.py:51`, `core/config/crawl_sources.py:77`, `core/config/crawl_sources.py:89` | digest информационный (`core/pipeline/crawl_session.py:134`) |
 | операторская запись в `state.db` (lock, append-only, `--dry-run`) | `hound package profile attest` (`core/cli/package/commands.py:2912`) | — образец для CLI политики |
-| видимые отказы корня/продукта | `out_of_scope_subdomains` (`core/pipeline/crawl_frontier.py:1566`), `product_skipped` (`core/pipeline/corpus.py:5456`), `incomplete_reasons` (`core/pipeline/corpus_coverage.py:609`) | нет токена «запрещено политикой» |
+| видимые отказы корня/продукта | `out_of_scope_subdomains` (`core/pipeline/crawl_frontier.py:1566`), `product_skipped` (`core/pipeline/corpus.py:5502`), `incomplete_reasons` (`core/pipeline/corpus_coverage.py:609`) | нет токена «запрещено политикой» |
 | готовый канал «корень выпал, покрытие неполно» | `HOST_OUT_OF_SHARD_REASON` → `truncated_products` (`core/pipeline/corpus.py:3806`, `core/pipeline/corpus.py:3810`; `core/pipeline/corpus_coverage.py:445`) | переиспользуется политическими пропусками |
 
 **Ни один носитель не даёт «продукт × хост × путь» без ложной идентичности:**
@@ -241,7 +241,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   (`core/pipeline/corpus_drain.py:171`, `core/pipeline/corpus_drain.py:174`), а не один enum. `bytes` исполняется осью прогона
   (`--refresh frozen --frozen-source bytes`, P3), а не значением `RootPlan`: объявленное
   значение без исполнения дало бы ложный `execution_change`.
-- ✅ `chunks`-корень проходит обобщённый offline-путь (`core/pipeline/corpus_ingest.py:4070`, «продукт →
+- ✅ `chunks`-корень проходит обобщённый offline-путь (`core/pipeline/corpus_ingest.py:4138`, «продукт →
   корень»), а не второй проход; `url_state`/`document_version` не переписываются.
 - ✅ **Пропуск по политике — переиспользование, а не неполнота** (0.7.0, решение владельца
   21.11.2026): `crawl_policy_skipped` больше не идёт в `incomplete_reasons` и
@@ -252,7 +252,7 @@ CREATE INDEX crawl_policy_scope ON crawl_policy (product_id, scope_kind, host, p
   полный обход, ни как `failed`. До 0.7.0 он шёл каналом `HOST_OUT_OF_SHARD_REASON`
   (`core/pipeline/corpus_commit.py:105`) и объявлял корпус неполным, из-за чего `bounded
   ❌` терял датированный носитель на переиспользованном корпусе.
-- ✅ Политический пропуск **не** идёт через zero-source: ветка `core/pipeline/corpus.py:5321` его исключает, поэтому
+- ✅ Политический пропуск **не** идёт через zero-source: ветка `core/pipeline/corpus.py:5367` его исключает, поэтому
   `RunProductStatus.BLOCKED` («измерение не состоялось») не ставится.
 - ✅ `--refresh-scope`: единый регистратор `add_refresh_scope_flag`
   (`core/cli/execution_axes.py:208`), паритет `plan`/`run`/`crawl run` по построению; значение
@@ -278,16 +278,16 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`core/pipeline/corpus_ingest.py:4686`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
-  `core/pipeline/corpus_ingest.py:3803`, им же пользуется фолбэк переиспользования). Ключ `extract_cache` — хеш **сырых байтов**
+  (`core/pipeline/corpus_ingest.py:4791`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
+  `core/pipeline/corpus_ingest.py:3871`, им же пользуется фолбэк переиспользования). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
 - ✅ **Дрейф пере-извлечения виден, а объявленное пере-извлечение — нет (план 26 O35).**
   Промах кэша с другим `content_hash` при **том же** штампе движка → токен
-  `frozen_reextract_mismatch` (`core/pipeline/corpus_ingest.py:5035`), документ **не публикуется** и в
+  `frozen_reextract_mismatch` (`core/pipeline/corpus_ingest.py:5140`), документ **не публикуется** и в
   `document_version` не попадает: ложного `document_id`, ложного дедупа и другого
   `doc_set_digest` не возникает. Если штамп **другой** (`pdf_pipeline`/`document_level`
   объявлены входом прогона), текст расходится по построению: документ публикуется, а факт
-  называется `reextract_engine_changed` (`core/pipeline/corpus_ingest.py:4578`). До правки
+  называется `reextract_engine_changed` (`core/pipeline/corpus_ingest.py:4680`). До правки
   09.11.2026 оба случая читались как дрейф: `--pdf-pipeline text_layer --refresh frozen`
   выбросил **153 PDF** — из них **87 документов / 16 327 страниц** попали в корпус после
   правки, остальные 66 — дубли текста (их хеш совпадает с документом под каноническим

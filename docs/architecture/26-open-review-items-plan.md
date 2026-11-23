@@ -2394,7 +2394,7 @@ p95 45 439 / p99 231 158.6 / max 7 726 772, **9 документов (0.5 %) д�
   `stats()`;
 - бюджет **доезжает до воркеров**: `cache_max_bytes` в `ExtractionRequest`
   (`core/pipeline/extraction_runtime.py:116`) → `ExtractionCache(..., max_bytes=…)` (`:386`),
-  и его передают все три потребителя (`extract_consume.py:814,1108`, `core/pipeline/corpus_ingest.py:5601`);
+  и его передают все три потребителя (`extract_consume.py:814,1108`, `core/pipeline/corpus_ingest.py:5706`);
 - **на 15.11.2026 до правки его никто не задавал**: сборка `ExtractionCache`
   (`core/cli/context.py:2936-2943`) вызывалась без `max_bytes`, в `config/deploy.yaml`
   секции кэша не было (поверхность добавлена ниже, блок «Сделано»). Сейчас тот же
@@ -3366,7 +3366,7 @@ EPUB/`split` дают `no_page_map`, реестровые и ручные цит
 Что при этом **уже в main** — инструментовка F0, и это меняет оценку O33:
 `ExtractionPool.worker_rss_dir`/`peak_worker_rss_mb()` (`core/pipeline/extraction_runtime.py:145-172`,
 файл-сток `ru_maxrss` на `pid`, атомарная запись), публикация в
-`ResourcesObservation.workers_peak_rss_mb` (`core/pipeline/corpus.py:5814`), каталог
+`ResourcesObservation.workers_peak_rss_mb` (`core/pipeline/corpus.py:5860`), каталог
 `{runs}/{run_id}/workers` (`core/cli/context.py:2738`). То есть O33 — не «написать прибор», а
 «прогнать и разложить», и это дешевле, чем записано в плане.
 

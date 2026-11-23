@@ -3451,6 +3451,8 @@ def plan_incremental_items(
     product_modes: Mapping[str, str] | None,
     planned_validators: dict[tuple[str, str], tuple[str | None, str | None]],
     errors: list[str],
+    scopes: Sequence[tuple[str, Frontier]] = (),
+    dropped: list[tuple[str, str]] | None = None,
 ) -> list[IncrementalItem]:
     """Дополнительный work-set инкрементального продукта (09 §6.3, MVP-3b).
 
@@ -3476,6 +3478,18 @@ def plan_incremental_items(
     продукта (онбординг, полнота снимка) не должен его отменять. Иначе проход без сети
     видит только авторские корни и **молча** теряет всё, что найдено прошлым краулом
     (измерено на стенде плана 19 §P5: 2 документа из 9).
+
+    **``url_state`` не является объявленным пространством.** Строка живёт вечно, а корень
+    можно вывести из пакета. Под сетью это безвредно: URL вне scope не пройдёт
+    ``Frontier``. Под политикой без сети Frontier не вызывается вовсе — и материал
+    выведенного корня **возвращался в корпус**: измерено 23.11.2026 на стенде — 163
+    документа выведенного корня вошли в корпус прохода без сети, тогда как корпус
+    предыдущего прогона их не содержал. Поэтому при ``scopes`` набор фильтруется тем же
+    предикатом, что у краула
+    (:meth:`Frontier.scope_admission`: объявленный host + path-prefix + SSRF), а
+    отброшенные отдаются в ``dropped`` с причиной ``out_of_declared_space`` — видимо, а не
+    молча. Терминальный артефакт вне префикса остаётся в наборе: он не продолжает
+    навигацию, но был скачан законно (P6b).
 
     Ремонт провалов (``--only-failed``) идёт **не** этим путём: он не зависит от режима
     продукта и не выводится из ``url_state`` целиком — см. :func:`plan_repair_items`.
@@ -3515,6 +3529,19 @@ def plan_incremental_items(
                 item.last_modified,
             )
         extra.append(item)
+    if no_network and scopes:
+        # Один предикат на оба прохода: допуск тот же, что у краула, — объявленный host,
+        # path-prefix по границе сегмента, SSRF, traversal-guard.
+        admitted: list[IncrementalItem] = []
+        for item in extra:
+            if any(
+                frontier.scope_admission(item.url) != SCOPE_OUT
+                for _root, frontier in scopes
+            ):
+                admitted.append(item)
+            elif dropped is not None:
+                dropped.append((item.url, "out_of_declared_space"))
+        extra = admitted
     return extra
 
 
@@ -3713,6 +3740,28 @@ class OfflineReuseReport:
     no_version: tuple[str, ...] = ()
     unknown_roots: tuple[str, ...] = ()
     urls: tuple[str, ...] = ()
+    #: URL контейнеров (``zip``/``7z``/``rar``): у них **нет** версии документа по
+    #: построению — ``document_version`` описывает извлечённый текст, а архив им не
+    #: является. Их члены переиспользуются по своим URL, поэтому «версии нет» здесь —
+    #: не потеря корпуса, и называть её :data:`OFFLINE_NO_VERSION_TEXT` значило бы
+    #: выдавать ожидаемое за недостачу (правило уже действовало у ``frozen``, §E.7;
+    #: у ``offline`` ветки не было, и 161 такой URL печатался как «документ не вошёл»).
+    containers: tuple[str, ...] = ()
+    #: URL, объявленные ручной подачей (``sources/manual_artifacts.yaml``): байты
+    #: предъявляются **позже в этом же прогоне** (порядок «после дренажа, до Pass B»),
+    #: поэтому «переиспользовать нечего» о них — утверждение о моменте, а не о корпусе.
+    #: Измерено 23.11.2026 на стенде: 17 URL `jatoba` (все объявленные подачи) попадали
+    #: в ``no_version`` и одновременно в корпус — то есть ошибка была ложной.
+    provided: tuple[str, ...] = ()
+    #: Счётчик «версии нет **по записанной причине**», по виду отказа: ``robots_disallow``,
+    #: ``source_unavailable``, ``not_found``, ``payload_too_large``, ``parser_failed``,
+    #: ``empty_document``. Отдельно от :attr:`no_version` намеренно: там версия
+    #: отсутствует **без объяснения** (это и есть недостача подложки), здесь причина
+    #: записана наблюдением — сайт отказал, сервер не ответил, документ не разобран.
+    #: Смешивать их значило бы выдавать ``robots_disallow`` (граница сайта, 0.6.0) за
+    #: «документ потерян»: измерено 23.11.2026 на стенде — 841 URL без версии, из них
+    #: 287 ``robots_disallow`` и 531 ``source_unavailable``.
+    refused: dict[str, int] = field(default_factory=dict)
     #: URL, пропущенные, потому что строка корпуса этого прогона уже есть (E.6):
     #: живое наблюдение побеждает копию по построению, а второй проход не повторяет
     #: работу первого (иначе ``duplicates`` считал бы схлопывание, которого не было).
@@ -3736,13 +3785,32 @@ class OfflineReuseReport:
             else f", уже в корпусе этого прогона {len(self.skipped_present)} "
             "(не переиспользуется)"
         )
+        # Контейнер и объявленная подача — не «нечего переиспользовать»: у первого
+        # версии документа нет по построению, у второй она появится в этом же прогоне.
+        # Хвосты добавляются только когда есть что назвать: нулевой факт читался бы как
+        # «искали и не нашли».
+        extra = ""
+        if self.containers:
+            extra += (
+                f", контейнеров {len(self.containers)} (не документы: члены — по своим URL)"
+            )
+        if self.provided:
+            extra += (
+                f", объявлено подачей {len(self.provided)} (войдут позже в этом прогоне)"
+            )
+        if self.refused:
+            # Причина записана наблюдением — это не недостача подложки, а её ответ.
+            reasons = ", ".join(
+                f"{kind}={count}" for kind, count in sorted(self.refused.items())
+            )
+            extra += f", без версии по записанной причине ({reasons})"
         return (
             f"corpus: {self.label} {product_id} — переиспользовано документов "
             f"{self.reused} (чанков {self.chunks}), пересобрано из байтов "
             f"{self.rebuilt} (чанков {self.rebuilt_chunks}), переиспользовать нечего "
             f"{len(self.no_version)}, байтов нет {len(self.no_bytes)}, "
             f"корней вне состояния {len(self.unknown_roots)}"
-            f"{skipped}; "
+            f"{skipped}{extra}; "
             f"reused={self.reused} rebuilt={self.rebuilt} "
             f"chunks={self.chunks + self.rebuilt_chunks} no_bytes={len(self.no_bytes)}; "
             "сеть не трогалась, наблюдений этого прогона нет "
@@ -4283,6 +4351,7 @@ def offline_reuse_product(
     | None = None,
     label: str = "offline",
     skip_urls: Sequence[str] = (),
+    provided_urls: Sequence[str] = (),
 ) -> OfflineReuseReport:
     """Оффлайн-проход продукта: корпус из durable-субстрата, **ноль сетевых вызовов**.
 
@@ -4372,6 +4441,9 @@ def offline_reuse_product(
     unknown_roots: list[str] = []
     touched: list[str] = []
     skipped_present: list[str] = []
+    containers: list[str] = []
+    provided: list[str] = []
+    refused: dict[str, int] = {}
     seen_urls: set[str] = set()
     capture_pairs: list[tuple[str, str, str]] = []
     #: Экстракторы по ключу ``(уровень, механизм PDF)`` — один на условие прохода
@@ -4382,6 +4454,12 @@ def offline_reuse_product(
     #: попадёт в собственную видимую ошибку ниже.
     skip_keys = {
         key for url in skip_urls if (key := _state_url_key(url)) is not None
+    }
+    #: Объявленная подача — тот же адрес-ключ, но **другой факт**: строка корпуса
+    #: появится позже в этом прогоне (`feed_manual_artifact`), поэтому говорить «версии
+    #: нет, документ не вошёл» о таком URL — утверждение о моменте, а не о корпусе.
+    provided_keys = {
+        key for url in provided_urls if (key := _state_url_key(url)) is not None
     }
 
     # Порядок: авторские корни (порядок входа) → известные URL (порядок планировщика).
@@ -4412,8 +4490,25 @@ def offline_reuse_product(
             # предыдущего прохода): вторая строка на тот же URL не появляется.
             skipped_present.append(url)
             continue
+        if key in provided_keys:
+            # Байты предъявит `feed_manual_artifact` позже в этом прогоне: «версии нет»
+            # здесь означало бы «потеряно», хотя документ ещё войдёт в корпус.
+            provided.append(url)
+            continue
         seen_urls.add(key)
         touched.append(url)
+
+        # План 19 §E.7, та же ветка, что у ``frozen``: контейнер — **не** документ
+        # (``document_version`` описывает извлечённый текст), поэтому проверка идёт
+        # **до** ``no_version``. Иначе архив навсегда остаётся «URL без версии», и
+        # ожидаемое печатается как недостача. Члены переиспользуются по своим URL: у
+        # них есть и версия, и chunk-set.
+        container = _prior_container_state(
+            product_id, key, url, state=state, errors=errors
+        )
+        if container is not None:
+            containers.append(url)
+            continue
 
         # Версия берётся из durable-субстрата **напрямую** (:func:`reuse_plan`), а не через
         # :func:`reuse_not_modified`: у того классификация ``304``-специфична
@@ -4431,6 +4526,13 @@ def offline_reuse_product(
         if prior_doc is None or prior_doc.status != _DOC_STATUS_ACTIVE:
             # Нет версии (либо она вытеснена живым прогоном): пересобирать не из чего,
             # а воскрешать ``superseded`` значило бы вернуть в корпус вытесненное.
+            # Причина, если она записана наблюдением, публикуется как причина, а не как
+            # недостача: ``robots_disallow`` — граница сайта (0.6.0), а не потерянный
+            # документ; ``source_unavailable``/``payload_too_large`` — ответ сервера.
+            kind = prior.last_error_kind or ""
+            if kind:
+                refused[kind] = refused.get(kind, 0) + 1
+                continue
             no_version.append(url)
             errors.append(f"{product_id}/{url}: {_reason(OFFLINE_NO_VERSION_TEXT)}")
             continue
@@ -4631,6 +4733,9 @@ def offline_reuse_product(
         unknown_roots=tuple(unknown_roots),
         urls=tuple(touched),
         skipped_present=tuple(skipped_present),
+        containers=tuple(containers),
+        provided=tuple(provided),
+        refused=dict(refused),
         capture_docs=tuple(
             CapturedDocRow(
                 doc_hash=doc_hash,

@@ -511,6 +511,25 @@ a no-network pass descends those bytes with the same `ArchiveDescentWalker` inli
 no `crawl_session_items`) and names what it could not replay (`frozen_container_unreadable`/
 `frozen_container_empty`, or `stored_bytes_missing`).
 
+**`url_state` is not the declared space, so the work set is filtered by it.** A `url_state`
+row lives forever, while a root can be withdrawn from the package — and under a no-network
+policy `Frontier` is never called (there is no BFS), so withdrawn material came back into the
+corpus. Measured 23.11.2026: arm v7 of the evaluator A/B carried **302 documents of 23 827**
+outside the declared space against **1** in arm v6 — the whole `postgrespro` growth (163
+documents) was the `edu.postgrespro.ru` root withdrawn on 14.11.2026, and 137 `pangolin`
+documents were *other versions* of the docs tree (6.4.0–6.7.0, 7.1.0, 8.3.0) under the
+declared `/docs/public/PSQ/8.1.0/` prefix. `plan_incremental_items` now filters the set with
+the same predicate as the crawl (`Frontier.scope_admission`) and publishes the count plus the
+top-5 hosts; under a network policy the filter is a no-op (there `Frontier` does the work).
+The same pass also stopped calling three expected absences a loss: a **container** has no
+document version by construction (members replay by their own URLs), a **declared manual
+artifact** is fed later in the same run, and a **recorded refusal** (`robots_disallow` — the
+site's own boundary —, `source_unavailable`, …) is the substrate's answer, not its gap.
+Measured 23.11.2026: of the 1 585 «no active version» lines of `ru-pg-dbms-902c0b71c419`,
+**811 were recorded refusals, 755 out-of-declared-space, 17 declared provisions, 1 container,
+1 later-versioned — and not one was a genuine substrate gap**
+(`2026-11-23-substrate-reuse-census.md`, instrument `scripts/measure_substrate_reuse.py`).
+
 `network_denied` is a **network policy, not product exclusion**: the product stays on the
 map, the corpus comes from what is already stored (`chunks`/`bytes`), and the skip is named
 (`crawl_policy_skipped` + `crawl_network_denied`) as **provenance**, never `failed` and never

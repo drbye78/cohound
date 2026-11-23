@@ -3838,7 +3838,36 @@ def _build_corpus(
                 )
             )
         else:
-            incremental_items = _plan_incremental_items(product_id, product_roots)
+            #: URL ``url_state`` вне объявленного пространства (host + path-prefix):
+            #: строка живёт вечно, а корень может быть выведен из пакета. Под сетью их
+            #: отсекает Frontier; под политикой без сети Frontier не вызывается, и без
+            #: этого фильтра материал выведенного корня возвращался в корпус (измерено
+            #: 23.11.2026 на стенде: 163 документа выведенного корня в корпусе прохода
+            #: без сети при нуле в предыдущем прогоне).
+            dropped_space: list[tuple[str, str]] = []
+            incremental_items = _plan_incremental_items(
+                product_id,
+                product_roots,
+                scopes=owner_scopes,
+                dropped=dropped_space,
+            )
+            if dropped_space:
+                by_host: dict[str, int] = {}
+                for url, _reason in dropped_space:
+                    host = (urlsplit(url).hostname or "").lower()
+                    by_host[host] = by_host.get(host, 0) + 1
+                hosts = ", ".join(
+                    f"{host}={count}"
+                    for host, count in sorted(
+                        by_host.items(), key=lambda kv: (-kv[1], kv[0])
+                    )[:5]
+                )
+                repair_notes.append(
+                    f"corpus: {product_id}: известных URL вне объявленного "
+                    f"пространства {len(dropped_space)} ({hosts}) — не переиспользуются; "
+                    "их корни не объявлены в пакете (пространство задаёт пакет, а "
+                    "url_state хранит и выведенные корни)"
+                )
         if repair_urls:
             # Честность покрытия (I2/I2c): ремонт наблюдал только проваленные URL —
             # «complete» на нём означало бы «сайт прочитан», а не «ремонт выполнен».
@@ -4167,6 +4196,17 @@ def _build_corpus(
                     limits_for=_limits_for(ctx.product_id),
                     extractor_factory=extractor_factory,
                     label=pass_label,
+                    # Байты объявленных подач предъявит `feed_manual_artifact` позже в
+                    # этом же прогоне (порядок «после дренажа, до Pass B»): «версии нет»
+                    # о таком URL — утверждение о моменте, а не о корпусе.
+                    provided_urls=[
+                        entry.url
+                        for entry in (
+                            manual_artifacts.for_product(ctx.product_id)
+                            if manual_artifacts is not None
+                            else ()
+                        )
+                    ],
                 )
                 offline_notes.append(ctx.offline_report.note(ctx.product_id))
             else:
@@ -4833,6 +4873,12 @@ def _build_corpus(
                         "no_bytes": list(offline_report.no_bytes),
                         "no_version": list(offline_report.no_version),
                         "unknown_roots": list(offline_report.unknown_roots),
+                        # Ожидаемое, а не недостача: у контейнера версии документа нет по
+                        # построению, у объявленной подачи она появится позже в этом же
+                        # прогоне, у отказа сайта причина записана наблюдением.
+                        "containers": list(offline_report.containers),
+                        "provided": list(offline_report.provided),
+                        "refused": dict(offline_report.refused),
                     }
                 ),
                 # План 19 §P3: пере-извлечение сохранённых байтов — отдельный факт, а не
