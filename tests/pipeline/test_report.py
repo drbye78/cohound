@@ -288,6 +288,15 @@ def _artifact_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _sheet_names(path: Path) -> list[str]:
+    """Имена листов XLSX (пусто для CSV: листов там нет по определению)."""
+    if path.suffix != ".xlsx":
+        return []
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.load_workbook(path, read_only=True)
+    return list(workbook.sheetnames)
+
+
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as fh:
         return list(csv.DictReader(fh))
@@ -748,7 +757,7 @@ def test_battle_card_written_with_sufficient_coverage(store: SqliteStore, tmp_pa
 
 
 def test_battle_card_matrix_renders_rich_cell(tmp_path: Path) -> None:
-    """Матрица несёт обоснование, primary citation, «+N источников» и сателлиты."""
+    """Матрица несёт обоснование, primary citation и «+N источников»."""
     store = SqliteStore(":memory:")
     store.create_run(RUN_ID, _cfg())
     _save(store, [_cell(PRODUCT_A, "param.ok", Status.OK)])
@@ -762,7 +771,6 @@ def test_battle_card_matrix_renders_rich_cell(tmp_path: Path) -> None:
             status=Status.OK,
             justification="обоснование-1",
             evidence=[_Ev("src.a", "цитата-a"), _Ev("src.b", "цитата-b")],
-            satellites=[_Sat("role.1", "approved", "third_party", "integrated", "verified")],
         )
     ]
     path = render_battle_card(bundle, views, _catalog(), tmp_path / "battle_card.xlsx")
@@ -771,7 +779,9 @@ def test_battle_card_matrix_renders_rich_cell(tmp_path: Path) -> None:
     assert "обоснование-1" in text
     assert "src.a" in text
     assert "+1 источников" in text
-    assert "role.1" in text
+    # Листа ``satellites`` нет: сателлиты объявлены в паспорте, а не в ячейке (``Cell``
+    # такой колонки не имеет), и пустой лист утверждал бы «сателлитов нет» без поиска.
+    assert "satellites" not in _sheet_names(path)
     store.close()
 
 
@@ -2070,17 +2080,8 @@ class _Ev:
 
 
 @dataclass
-class _Sat:
-    role: str
-    state: str
-    origin: str
-    relationship: str
-    evidence_state: str
-
-
-@dataclass
 class _CellView:
-    """Ячейка-представление с обоснованием/сателлитами (доменная ``Cell`` их не несёт)."""
+    """Ячейка-представление с обоснованием (доменная ``Cell`` его не несёт)."""
 
     product_id: str
     param_id: str
@@ -2089,7 +2090,6 @@ class _CellView:
     evidence: list[Any] = field(default_factory=list)
     absence_evidence: list[Any] = field(default_factory=list)
     justification: str = ""
-    satellites: list[Any] = field(default_factory=list)
 
 
 def test_max_response_bytes_is_execution_axis_and_changes_digest() -> None:

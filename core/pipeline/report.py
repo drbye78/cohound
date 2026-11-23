@@ -880,6 +880,22 @@ def crawl_control_digest(
     # и два разных состава корпуса жили бы под одной идентичностью (§13).
     for product_id, axes in sorted(dict(product_axes or {}).items()):
         payload[f"product:{product_id}"] = _resolved("", {}, axes)
+    # Ось дренажа корня (``run.yaml:crawl.drain_roots``/``--drain-root``): объявленное
+    # **перечисление** корней — отдельным ключом. Оно не выводится из разрешённых
+    # лимитов: ``CrawlLimits`` — оси **одного** адреса, и корень, которого нет в
+    # ``domain_profiles``, иначе не попал бы в дайджест ни одним ключом — прогон
+    # сменил бы состав корпуса под прежним ``run_id``. Ключ появляется только при
+    # объявлении (прогоны без оси сохраняют дайджест байт-в-байт); значение
+    # сортировано, поэтому порядок флагов идентичность не меняет. Одна глубина без
+    # корней — не объявление: дренировать нечего, состав корпуса измениться не может,
+    # а пустая правка не должна давать ``execution_change`` (§6.1).
+    drain_roots = getattr(run_crawl, "drain_roots", None)
+    drain_max_depth = getattr(run_crawl, "drain_max_depth", None)
+    if drain_roots:
+        payload["__drain__"] = {
+            "roots": sorted(str(root) for root in (drain_roots or ())),
+            "max_depth": drain_max_depth,
+        }
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return short_hash(material, 24)
 
@@ -2029,23 +2045,13 @@ def _battle_card_sheets(
             ]
         )
 
-    satellite_rows: list[list[Any]] = [
-        ["product", "param", "role", "state", "origin", "relationship", "evidence_state"]
-    ]
-    for cell in cells:
-        for satellite in getattr(cell, "satellites", None) or []:
-            satellite_rows.append(
-                [
-                    str(cell.product_id),
-                    str(cell.param_id),
-                    _attr(satellite, "role"),
-                    _attr(satellite, "state"),
-                    _attr(satellite, "origin"),
-                    _attr(satellite, "relationship"),
-                    _attr(satellite, "evidence_state"),
-                ]
-            )
-
+    # Листа ``satellites`` здесь **нет**, и это не упущение. Сателлиты объявлены в
+    # паспорте продукта (:class:`core.domain.models.Passport.satellites`), а не в ячейке:
+    # ``Cell`` такой колонки не имеет. Прежний код собирал строки из
+    # ``getattr(cell, "satellites", None)`` — в прогоне это всегда пусто, и лист выходил с
+    # одной шапкой, то есть утверждал «сателлитов нет» там, где их никто не искал.
+    # Публиковать объявленный состав из паспорта здесь нельзя без передачи паспортов в
+    # отчёт (их нет на этом слое), поэтому лист убран, а не оставлен пустым.
     module_rows: list[list[Any]] = [
         ["module", "score", "coverage", "weight", "applicable_weight"]
     ]
@@ -2070,18 +2076,9 @@ def _battle_card_sheets(
     return [
         ("header", header_rows),
         ("matrix", matrix_rows),
-        ("satellites", satellite_rows),
         ("modules", module_rows),
         ("sensitivity", sensitivity_rows),
     ]
-
-
-def _attr(obj: Any, name: str) -> Any:
-    """Значение атрибута/slug для сателлита (строкой), безопасно для dict/объекта."""
-    value = obj.get(name) if isinstance(obj, Mapping) else getattr(obj, name, None)
-    if value is None:
-        return ""
-    return value.value if hasattr(value, "value") and not isinstance(value, str) else str(value)
 
 
 def _battle_card_records(sheets: list[tuple[str, list[list[Any]]]]) -> list[dict[str, Any]]:
