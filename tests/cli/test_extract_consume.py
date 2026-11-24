@@ -335,3 +335,74 @@ def test_cli_consume_prints_numbers_for_a_human(
     assert "pending: 0" in out
     assert "backlog: backlog_bytes=" in out
     assert "free_bytes=" in out
+# --------------------------------------------------------------------------- #
+# (5) durable-состояние доезжает до фаз
+# --------------------------------------------------------------------------- #
+
+def test_consume_passes_durable_state_to_phases(
+    tmp_path: Path,
+    isolated_state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``extract consume`` открывает ``state.db`` и передаёт его фазам.
+
+    Тот же дефект, что у ``crawl run``: фаза корпуса без ``state`` не пишет
+    ``document_version``/``url_state``, то есть конвертированные документы остаются
+    только в ``corpus_docs``, а durable-подложка версий — пустой.
+
+    Проверка не косвенная: подменённый ``_open_state_store`` обязан быть позван с
+    ``create=True``, его результат — доехать до ``_resolve_phases``, а после прохода в
+    ``state.db`` обязаны появиться версии документов.
+    """
+    import sqlite3
+
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    urls = _urls_file(tmp_path)
+    db = tmp_path / "st5.db"
+    assert (
+        main(
+            _crawl_argv(
+                package, run_id="ex-state", db=db, urls=urls, extra=("--crawl-only",)
+            ),
+            ports=_ports(_RecordingCrawler()),
+        )
+        == EXIT_OK
+    )
+    capsys.readouterr()
+
+    from core.cli.commands import extract as extract_commands
+    from core.cli.context import _open_state_store as _real_open
+
+    opened: list[tuple[bool, object]] = []
+
+    def _open(args: object, *, create: bool = False) -> object:
+        store = _real_open(args, create=create)  # type: ignore[arg-type]
+        opened.append((create, store))
+        return store
+
+    seen: dict[str, object] = {}
+    real_phases = extract_commands._resolve_phases
+
+    def _capture(*args: object, **kwargs: object) -> object:
+        seen["state"] = kwargs.get("state")
+        return real_phases(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(extract_commands, "_open_state_store", _open)
+    monkeypatch.setattr(extract_commands, "_resolve_phases", _capture)
+
+    assert main(
+        _consume_argv(package, run_id="ex-state", db=db), ports=_ports(_RecordingCrawler())
+    ) == EXIT_OK
+    capsys.readouterr()
+
+    assert opened and opened[0][0] is True, "state.db не открыт с create=True"
+    assert seen["state"] is opened[0][1], "state не доехал до фаз"
+    assert seen["state"] is not None
+
+    state_db = isolated_state_dir / package.name / "state.db"
+    assert state_db.exists(), "state.db не создан"
+    with sqlite3.connect(f"file:{state_db}?mode=ro", uri=True) as conn:
+        versions = conn.execute("SELECT COUNT(*) FROM document_version").fetchone()[0]
+    assert versions > 0, "версии документов не записаны — state не дошёл до фазы"

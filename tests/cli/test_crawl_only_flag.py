@@ -284,3 +284,101 @@ def test_full_run_does_not_declare_crawl_only(
 
     assert code == EXIT_USAGE
     assert "--crawl-only" in capsys.readouterr().err
+# --------------------------------------------------------------------------- #
+# (4) бюджет памяти экстракции к режиму не относится
+# --------------------------------------------------------------------------- #
+
+def test_crawl_only_does_not_consult_extraction_budget(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--crawl-only`` не конвертирует ⇒ preflight бюджета экстракции не спрашивается.
+
+    Регресс измерен 24.11.2026 на стенде: ``crawl run --crawl-only --until corpus``
+    вернул ``EXIT_USAGE`` «extraction does not fit memory budget … workers=0» и не начал
+    краул, хотя пул экстракции в этом режиме **запрещён** (``build_corpus`` отвергает
+    ``crawl_only`` вместе с ``extraction_pool``) и ни один документ не конвертировался бы.
+    Тем же отказом блокировался ``hound crawl drain``, который зовёт этот проход.
+
+    Проверка не косвенная: подменённый preflight падает, если его вообще позвали.
+    """
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+
+    def _forbidden(**_kwargs: object) -> object:
+        raise AssertionError("preflight бюджета экстракции вызван в режиме --crawl-only")
+
+    monkeypatch.setattr(
+        "core.cli.commands.crawl.preflight_extraction_budget", _forbidden
+    )
+
+    code = main(
+        _argv(
+            package,
+            action="run",
+            run_id="cr4",
+            db=tmp_path / "cr4.db",
+            urls=_urls_file(tmp_path),
+            extra=("--crawl-only",),
+        ),
+        ports=_ports(_RecordingCrawler(_pages())),
+    )
+
+    assert code == EXIT_OK
+    assert json_out(capsys)["crawl_only"] is True
+
+# --------------------------------------------------------------------------- #
+# (5) durable-состояние доезжает до фаз
+# --------------------------------------------------------------------------- #
+
+def test_crawl_run_passes_durable_state_to_phases(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``crawl run`` открывает ``state.db`` и передаёт его фазам (I2d).
+
+    Измерено 24.11.2026 на стенде: ``crawl run`` добыл 7 568 страниц в ``corpus_raw``
+    (737 МБ) и ``extract_queue`` (7 544 pending), а ``state.db`` не получил ни строки —
+    снятие корня не удостоверялось (``_record_root_capture`` выходит на ``state is None``),
+    и ``hound crawl drain --apply`` записал бы предел по снятию, которого не было.
+
+    Проверка не косвенная: подменённый ``_open_state_store`` обязан быть позван с
+    ``create=True``, и **его же** результат обязан доехать до ``_resolve_phases``
+    аргументом ``state``.
+    """
+    monkeypatch.chdir(tmp_path)
+    package = valid_package(tmp_path)
+    from core.cli.commands import crawl as crawl_commands
+    from core.cli.context import _open_state_store as _real_open
+
+    opened: list[tuple[bool, object]] = []
+
+    def _open(args: object, *, create: bool = False) -> object:
+        store = _real_open(args, create=create)  # type: ignore[arg-type]
+        opened.append((create, store))
+        return store
+
+    seen: dict[str, object] = {}
+    real_phases = crawl_commands._resolve_phases
+
+    def _capture(*args: object, **kwargs: object) -> object:
+        seen["state"] = kwargs.get("state")
+        return real_phases(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(crawl_commands, "_open_state_store", _open)
+    monkeypatch.setattr(crawl_commands, "_resolve_phases", _capture)
+
+    code = main(
+        _argv(
+            package,
+            action="run",
+            run_id="cr5",
+            db=tmp_path / "cr5.db",
+            urls=_urls_file(tmp_path),
+            extra=("--crawl-only",),
+        ),
+        ports=_ports(_RecordingCrawler(_pages())),
+    )
+
+    assert code == EXIT_OK
+    assert opened and opened[0][0] is True, "state.db не открыт с create=True"
+    assert seen["state"] is opened[0][1], "state не доехал до фаз"
+    assert seen["state"] is not None

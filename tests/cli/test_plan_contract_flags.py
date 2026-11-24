@@ -212,6 +212,77 @@ def test_contract_flag_inventory_matches_run() -> None:
         # Обе стороны читают один ``dest``: значение, поданное флагу, видно одинаково.
         assert plan_args[spec.dest] is not run_args[spec.dest]
 
+#: Контрактные ``dest``, которые ``crawl run`` объявляет **флагами**. Остальные материалы
+#: ``run_id`` ``crawl`` не принимает осознанно: он не исполняет оценку, поэтому профиль
+#: ретривала/``cutoff_K``/язык запросов резолвятся объявленным дефолтом развёртывания
+#: (``crawl.py``: ``resolve_retrieval_profile(None, deploy_config)``), а ``--update``
+#: относится к циклу, которого у отдельного прохода Ш5 нет. Набор отрецензирован: новый
+#: флаг у ``crawl run`` валит тест, пока он не попадёт сюда (или в инвентарь).
+_CRAWL_RUN_CONTRACT_DESTS: frozenset[str] = frozenset(
+    {"urls", "cycle_id", "only_failed", "only_product", "refresh"}
+)
+
+def _crawl_run_args() -> dict[str, Any]:
+    """Аргументы подкоманды ``crawl run`` из собранного парсера (по ``dest``)."""
+    parser = build_parser()
+    sub = next(
+        action
+        for action in parser._subparsers._group_actions  # type: ignore[union-attr]
+        if hasattr(action, "choices") and action.choices
+    )
+    crawl = next(
+        action
+        for action in sub.choices["crawl"]._subparsers._group_actions  # type: ignore[union-attr]
+        if hasattr(action, "choices") and action.choices
+    )
+    return {action.dest: action for action in crawl.choices["run"]._actions}
+
+def test_crawl_run_declares_reviewed_contract_dests() -> None:
+    """``crawl run`` объявляет тот же **набор** контрактных ``dest``, что отрецензирован.
+
+    Класс дефекта: флаг материала ``run_id`` есть у ``run``/``plan`` и отсутствует у
+    ``crawl run``. Измерено 24.11.2026: ``--refresh`` не был объявлен вовсе, ``argparse``
+    разбирал его как сокращение ``--refresh-scope`` и съедал значение — политика падала
+    в ``auto``, и ``hound crawl drain`` пере-фетчивал известные страницы по сети.
+    """
+    crawl_args = _crawl_run_args()
+    declared = {spec.dest for spec in CONTRACT_FLAGS} & set(crawl_args)
+    assert declared == _CRAWL_RUN_CONTRACT_DESTS, (
+        "набор контрактных флагов crawl run изменился: "
+        f"{sorted(declared ^ _CRAWL_RUN_CONTRACT_DESTS)}"
+    )
+    # Объявленный флаг обязан иметь форму инвентаря: значение читает тот же резолв.
+    for spec in CONTRACT_FLAGS:
+        if spec.dest not in _CRAWL_RUN_CONTRACT_DESTS:
+            continue
+        action = crawl_args[spec.dest]
+        assert action.option_strings == [spec.flag]
+        assert action.default == spec.default
+
+def test_crawl_run_refresh_is_not_an_abbreviation_of_refresh_scope() -> None:
+    """``--refresh drain`` у ``crawl run`` — политика, а не значение ``--refresh-scope``.
+
+    ``argparse`` по умолчанию сокращает длинные опции (``allow_abbrev=True``), поэтому
+    необъявленный ``--refresh`` молча становился сокращением ``--refresh-scope``.
+    Проверка — разбором argv, а не чтением кода: дефект был именно в разборе.
+    """
+    args = build_parser().parse_args(
+        [
+            "crawl",
+            "run",
+            "--run-yaml",
+            "x",
+            "--package",
+            "y",
+            "--refresh",
+            "drain",
+            "--refresh-scope",
+            "https://a.b/",
+        ]
+    )
+    assert args.refresh == "drain"
+    assert args.refresh_scope == ["https://a.b/"]
+
 
 def test_run_only_flags_are_reviewed() -> None:
     """Каждый флаг ``run``, которого нет у ``plan``, отнесён к группе **явно**.

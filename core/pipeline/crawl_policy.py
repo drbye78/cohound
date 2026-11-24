@@ -393,18 +393,39 @@ class CrawlPolicyResolution:
         """Исполнение для конкретного адреса: ``network_mode`` × ``corpus_source``.
 
         Берётся **самое специфичное** решение, покрывающее адрес (``path`` > ``root`` >
-        ``host`` > ``product``, внутри вида — длиннее путь). Адрес вне всех объявленных
-        корней получает ``fetch``+``network`` без области: политика его не называла, и
-        «запретить по умолчанию» было бы решением, которого оператор не принимал.
+        ``host`` > ``product``, внутри вида — длиннее путь). Продуктовое решение покрывает
+        адрес не «всем продуктом», а своим объявленным корнем (``root_url``): у продукта
+        корней несколько, и первое решение не описывает остальные. Адрес вне всех
+        объявленных корней получает первое решение продукта (прежнее поведение), а при
+        отсутствии решений — ``fetch``+``network`` без области: политика его не называла,
+        и «запретить по умолчанию» было бы решением, которого оператор не принимал.
         """
         host, path = _split_url(url)
         best: PolicyDecision | None = None
         best_rank: tuple[int, int] | None = None
+        #: Первое решение продукта — запасной ответ для адреса вне объявленных корней.
+        fallback: PolicyDecision | None = None
         for item in self.decisions:
             if item.product_id != str(product_id):
                 continue
             if item.scope_kind is CrawlPolicyScopeKind.PRODUCT:
-                rank = (0, 0)
+                # Продуктовое решение покрывает не «весь продукт», а свой объявленный
+                # корень (``root_url``): у продукта их несколько, и первое решение не
+                # описывает остальные. Ранжирование по покрытию адреса: ранг
+                # ``(0, длина пути корня)``, чтобы из двух покрывающих победил более
+                # точный. Измерено 24.11.2026 на стенде: корень, у которого решение было
+                # ``refresh``, получал ``deny`` первого решения продукта и не краулился,
+                # а корень с ``reuse`` скачивался по сети на 1 155 страниц — то есть
+                # решение корня не доезжало до исполнения ни в одну из сторон.
+                if fallback is None:
+                    fallback = item
+                if not item.root_url:
+                    # Корень не назван — покрытие проверить нечем: только запасной ответ.
+                    continue
+                root_host, root_path = _split_url(item.root_url)
+                if root_host != host or not _path_covers(root_path, path):
+                    continue
+                rank = (0, len(root_path))
             else:
                 if item.host != host:
                     continue
@@ -419,6 +440,11 @@ class CrawlPolicyResolution:
                     )
             if best_rank is None or rank > best_rank:
                 best, best_rank = item, rank
+        if best is None:
+            # Ни одно решение адрес не покрывает: «адрес вне объявленных корней» —
+            # прежнее поведение (первое решение продукта), иначе запрет по умолчанию был
+            # бы решением, которого оператор не принимал.
+            best = fallback
         if best is None:
             return PolicyExecution()
         return PolicyExecution(

@@ -126,6 +126,50 @@ def test_execution_for_unmatched_address_has_no_mode() -> None:
     assert execution.interval_hours is None
     assert execution.network_mode is CrawlNetworkMode.FETCH
 
+def test_product_decision_covers_only_its_declared_root() -> None:
+    """Продуктовое решение покрывает адрес **своего корня**, а не всего продукта.
+
+    Пакетный ``defaults`` — запись вида ``product`` (product-wildcard), поэтому у всех
+    корней продукта решение одно и то же по режиму, но **исполнение** считается по
+    корню: ``on_request`` разрешает сеть только запрошенному корню, ``scheduled``
+    решает по часам/пространству своего корня. Пока ``execution_for`` оставлял первое
+    решение продукта, запрошенный корень получал ``deny`` соседа (измерено 24.11.2026
+    на стенде: корень с решением ``refresh`` краулился ``deny`` первого корня продукта,
+    а корень с ``reuse`` скачался по сети на 1 155 страниц). Ранг продуктового решения —
+    ``(0, длина пути своего корня)``.
+    """
+    roots = [
+        DeclaredRoot("p1", "a.test", "", root_url="https://a.test/"),
+        DeclaredRoot("p1", "b.test", "/docs", root_url="https://b.test/docs/"),
+    ]
+    resolution = _resolve(
+        _config(defaults={"mode": "on_request"}),
+        roots,
+        # Первый корень уже наблюдался, второй — нет: ``on_request`` обновляет только
+        # запрошенное, а первое обнаружение делается автоматически.
+        observed={("p1", "a.test", ""): NOW - dt.timedelta(days=1)},
+        # Запрошен только второй корень: первый обязан остаться без сети.
+        requested=("https://b.test/docs/",),
+    )
+    assert [
+        (item.root_url, item.network_mode) for item in resolution.decisions
+    ] == [
+        ("https://a.test/", CrawlNetworkMode.DENY),
+        ("https://b.test/docs/", CrawlNetworkMode.FETCH),
+    ]
+
+    # Адрес под каждым корнем получает решение **своего** корня.
+    assert resolution.execution_for("p1", "https://a.test/page").network_mode is (
+        CrawlNetworkMode.DENY
+    )
+    assert resolution.execution_for("p1", "https://b.test/docs/api").network_mode is (
+        CrawlNetworkMode.FETCH
+    )
+    # Адрес вне объявленных корней — прежнее поведение: первое решение продукта.
+    outside = resolution.execution_for("p1", "https://c.test/x")
+    assert outside.network_mode is CrawlNetworkMode.DENY
+    assert outside.scope == "product:p1"
+
 
 def test_priority_path_beats_root_host_product() -> None:
     """``path`` > ``root`` > ``host`` > ``product`` — независимо от источника."""

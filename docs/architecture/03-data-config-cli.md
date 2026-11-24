@@ -1680,7 +1680,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
   **все оси краула** `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document`,
   `--document-level`, `--pdf-pipeline`, `--document-timeout`, `--host-concurrency`,
   `--extract-backlog` (через `crawl_config_digest`). Инвентарь — `CONTRACT_FLAGS`/
-  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:516`, `core/cli/execution_axes.py:195`);
+  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:516`, `core/cli/execution_axes.py:210`);
   полный список флагов — `hound run --help`. Частичный прогон — **другой прогон**, а не
   resume полного.
 * **Меняют объём работы, но не идентичность:** `--reset` (повторить фазы в обход resume;
@@ -1701,7 +1701,7 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 `--exclude-path GLOB` и `--exclude-document GLOB` (повторяемые glob-блэклисты по пути URL и
 по basename), `--document-level LEVEL`, `--pdf-pipeline {structured,text_layer}`,
 `--document-timeout S`, `--host-concurrency N`, `--extract-backlog MB` — последние четыре
-объявлены в том же инвентаре (`core/cli/execution_axes.py:195`) и входят в
+объявлены в том же инвентаре (`core/cli/execution_axes.py:210`) и входят в
 `crawl_config_digest` **только при объявлении** (необъявленная ось = сегодняшнее поведение). Флаги уточняют **run-слой** поверх `run.yaml:crawl`
 (цепочка app < run < site);
 усечение (`max_documents`/`max_depth`) фиксируется честно — сеанс краула не рапортуется

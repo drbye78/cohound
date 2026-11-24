@@ -170,6 +170,7 @@ __all__ = [
     "ContractFlag",
     "DeclaredExecutionAxes",
     "IdentityFlags",
+    "add_contract_flag",
     "add_contract_flags",
     "add_crawl_axis_flags",
     "add_frozen_source_flag",
@@ -716,20 +717,40 @@ def add_contract_flags(parser: argparse.ArgumentParser) -> None:
     и не исполняет.
     """
     for spec in CONTRACT_FLAGS:
-        kwargs: dict[str, Any] = {
-            "dest": spec.dest,
-            "default": spec.default,
-            "help": spec.help,
-        }
-        if spec.action is not None:
-            kwargs["action"] = spec.action
-        if spec.metavar is not None:
-            kwargs["metavar"] = spec.metavar
-        if spec.choices is not None:
-            kwargs["choices"] = list(spec.choices)
-        if spec.type is not None:
-            kwargs["type"] = spec.type
-        parser.add_argument(spec.flag, **kwargs)
+        add_contract_flag(parser, spec.dest)
+
+
+def add_contract_flag(parser: argparse.ArgumentParser, dest: str) -> None:
+    """Регистрирует **один** флаг инвентаря по его ``dest`` (:data:`CONTRACT_FLAGS`).
+
+    Нужен там, где парсер принимает не весь инвентарь, а его часть, и где ручная запись
+    флага уже приводила к дефекту: у ``crawl run`` ``--refresh`` не был объявлен вовсе,
+    поэтому ``argparse`` (``allow_abbrev=True``) разбирал его как сокращение
+    ``--refresh-scope`` и съедал значение — ``--refresh drain`` давал
+    ``refresh_scope=['drain']`` и политику ``auto``. Форма флага приходит из инвентаря,
+    поэтому «объявлен» и «прочитан» разъехаться не могут.
+
+    :param dest: ``dest`` записи :data:`CONTRACT_FLAGS` (неизвестный — ``KeyError``:
+        опечатка не должна молча добавить флаг, которого нет в инвентаре).
+    """
+    try:
+        spec = next(item for item in CONTRACT_FLAGS if item.dest == dest)
+    except StopIteration:
+        raise KeyError(f"нет флага идентичности с dest={dest!r}") from None
+    kwargs: dict[str, Any] = {
+        "dest": spec.dest,
+        "default": spec.default,
+        "help": spec.help,
+    }
+    if spec.action is not None:
+        kwargs["action"] = spec.action
+    if spec.metavar is not None:
+        kwargs["metavar"] = spec.metavar
+    if spec.choices is not None:
+        kwargs["choices"] = list(spec.choices)
+    if spec.type is not None:
+        kwargs["type"] = spec.type
+    parser.add_argument(spec.flag, **kwargs)
 
 
 def contract_flag_values(args: argparse.Namespace) -> dict[str, Any]:

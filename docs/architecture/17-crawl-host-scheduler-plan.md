@@ -357,7 +357,7 @@ F3 → `crawl-2` (`ru-pg-dbms-6f31dce1a5ba`), F5 → **`crawl-3`** — якор�
 ## 6. Фазы
 
 * **F1. Ось без поведения — сделана (`a50be3e`).** Поле + условный ключ в `as_dict()` + `CRAWL_AXIS_DESTS`
-  (`core/cli/execution_axes.py:195`) + флаги. Проверка: пин `run_id` без флага;
+  (`core/cli/execution_axes.py:210`) + флаги. Проверка: пин `run_id` без флага;
   `tests/cli/test_plan_crawl_axes.py:202` зелёный; `tests/pipeline/test_corpus_write_order.py:187`
   не сдвинулся.
 * **F2. Краул как отдельный вход — сделана (`f932271`).** `hound crawl run --crawl-only`: frontier + фетч + retention +

@@ -600,7 +600,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
-  адаптер (`_resolve_llm_scenarios`, `core/cli/execution_axes.py:840-922`). Провайдер может
+  адаптер (`_resolve_llm_scenarios`, `core/cli/execution_axes.py:1138-1222`). Провайдер может
   игнорировать `seed`: замер — 4.2 % (5 из 119) ячеек меняют вердикт при идентичном
   `prompt_hash` (`docs/reports/measurements/2026-10-26-verdict-reproducibility.md`). Это
   остаточный недетерминизм, а не гарантия.

@@ -30,6 +30,7 @@ from typing import Any
 from core.cli.context import (
     _add_common,
     _ensure_run,
+    _open_state_store,
     _resolve_db_path,
     _resolve_phases,
     _resolve_plan,
@@ -163,6 +164,11 @@ def run(args: argparse.Namespace) -> int:
         raise LintFailure([*report.blocking, *report.incomplete], report.warnings)
 
     store = build_store(db_path, profile=args.profile)
+    # Durable per-product состояние — тот же резолв, что у ``run``/``crawl run``:
+    # ``extract consume`` пишет ``document_version`` той же фазой корпуса, и без него
+    # версии документов остались бы только в ``extract_queue`` (дефект 24.11.2026:
+    # ``crawl run``/``extract consume`` не передавали ``state`` в фазы).
+    state_store = _open_state_store(args, create=True)
     ports: Any = None
     result: Any = None
     try:
@@ -229,6 +235,7 @@ def run(args: argparse.Namespace) -> int:
             derive_extract_workers=derive_extract_workers,
             axes=declared,
             declared_status_dict_version=status_dict_version,
+            state=state_store,
             consume_only=True,
         )
         ctx = RunContext(
@@ -237,6 +244,8 @@ def run(args: argparse.Namespace) -> int:
         result = phases["corpus"](ctx)
     finally:
         store.close()
+        if state_store is not None:
+            state_store.close()
         close = getattr(getattr(ports, "crawler", None), "close", None)
         if callable(close):
             close()

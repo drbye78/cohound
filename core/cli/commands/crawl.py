@@ -79,6 +79,7 @@ from core.cli.errors import (
     LintFailure,
 )
 from core.cli.execution_axes import (
+    add_contract_flag,
     declared_status_dict_version,
     resolve_declared_axes,
     resolve_query_lang,
@@ -570,6 +571,14 @@ def _execute_crawl_locked(
     # F7 (17 §2): пустой шард — видимый простой, а не тишина.
     notes.extend(shard_notices(getattr(deploy_config.crawl, "shards", None)))
 
+    # Durable per-product состояние пакета — **тот же** резолв, что у ``run`` (``run.py``):
+    # ``crawl run`` исполняет ту же Ш5 и обязан писать ``url_state``/``document_version``/
+    # ``capture``. Без него снятие корня не удостоверяется (I2d: ``_record_root_capture``
+    # выходит на ``state is None``), и ``hound crawl drain --apply`` записал бы предел по
+    # снятию, которого не было. Измерено 24.11.2026 на стенде: 7 568 страниц легли в
+    # ``corpus_raw`` (737 МБ) и ``extract_queue`` (7 544 pending), а ``state.db`` не
+    # получил ни одной строки.
+    state_store = _open_state_store(args, create=True)
     store = build_store(db_path, profile=args.profile)
     ports: Any = None
     result: Any = None
@@ -604,7 +613,17 @@ def _execute_crawl_locked(
             deploy_config.profile if deploy_config is not None else LOCAL_PROFILE,
             injected_ports=getattr(args, "ports", None) is not None,
         )
-        if "corpus" in _phases_until(until):
+        # ``--crawl-only`` — режим «краул без конверсии» (F2, 17 §4): пул экстракции в нём
+        # **запрещён** (``build_corpus`` отвергает ``crawl_only`` вместе с
+        # ``extraction_pool``), то есть конвертировать нечего и бюджет памяти экстракции
+        # к этой команде не относится. Гейт, который проверяет условие несуществующей
+        # работы, — не предохранитель, а ложный отказ: измерено 24.11.2026 на стенде,
+        # ``crawl run --crawl-only --until corpus`` вернул EXIT_USAGE «extraction does not
+        # fit memory budget … workers=0» (бюджет 4015 MB против пика layout_tables
+        # 3679 MB + parent floor 500 MB) и не начал краул, хотя ни один документ не
+        # конвертировался бы. Тем же отказом был заблокирован и ``hound crawl drain``,
+        # который зовёт этот проход по построению.
+        if "corpus" in _phases_until(until) and not crawl_only:
             # CLI-уточнение уровня (``--document-level``) — часть run-слоя, ровно как его
             # увидит Ш5: preflight обязан проверять **разрешённый** уровень, иначе отказ
             # и исполнение разошлись бы.
@@ -666,6 +685,10 @@ def _execute_crawl_locked(
             pdf_pipeline=pdf_pipeline,
             progress=progress,
             on_product=on_product,
+            # Durable-состояние: ``url_state``/``document_version``/``capture`` пишет
+            # фаза корпуса (I2d). Без него ``crawl run`` добывал байты, но не оставлял
+            # снятия — ровно дефект 24.11.2026.
+            state=state_store,
             # §13 (2.4.0): те же декларированные оси, что у контракта.
             axes=declared,
             declared_status_dict_version=status_dict_version,
@@ -724,6 +747,8 @@ def _execute_crawl_locked(
             notes.append(f"truncation: {type(exc).__name__}: {exc}")
     finally:
         store.close()
+        if state_store is not None:
+            state_store.close()
         close = getattr(getattr(ports, "crawler", None), "close", None)
         if callable(close):
             close()
@@ -1899,6 +1924,20 @@ def _add_crawl_only_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_refresh_flag(parser: argparse.ArgumentParser) -> None:
+    """``--refresh`` у ``crawl run|resume|restart`` — **тем же инвентарём**, что у ``run``.
+
+    Флаг не был объявлен вовсе, а ``argparse`` по умолчанию включает сокращение длинных
+    опций (``allow_abbrev=True``): ``--refresh`` разбирался как сокращение единственной
+    опции с таким префиксом — ``--refresh-scope`` — и съедал значение. Измерено
+    24.11.2026 на стенде: ``--refresh drain`` давал ``refresh_scope=['drain']`` и политику
+    ``auto``, то есть ``hound crawl drain`` не переиспользовал сохранённые байты
+    (``pages_replayed=0``) и пере-фетчивал известные страницы по сети. Форма флага
+    приходит из :data:`core.cli.execution_axes.CONTRACT_FLAGS` — ручная запись разошлась
+    бы с ``run``/``plan``.
+    """
+    add_contract_flag(parser, "refresh")
+
 def _add_source_flags(parser: argparse.ArgumentParser) -> None:
     """Источники корпуса Ш5: ``--urls`` и ``--render-modes`` (как у ``run``)."""
     parser.add_argument(
@@ -2011,6 +2050,7 @@ def configure(sub: Any) -> None:
         "--reset", action="store_true", help="очистить сеанс краула перед запуском"
     )
     _add_phase4_flags(p_run)
+    _add_refresh_flag(p_run)
     _add_crawl_only_flag(p_run)
     _add_common(p_run)
     _add_llm_slot_flag(p_run)
@@ -2043,6 +2083,7 @@ def configure(sub: Any) -> None:
     _add_run_target_flags(p_resume)
     _add_source_flags(p_resume)
     _add_phase4_flags(p_resume)
+    _add_refresh_flag(p_resume)
     _add_crawl_only_flag(p_resume)
     _add_common(p_resume)
     _add_llm_slot_flag(p_resume)
@@ -2055,6 +2096,7 @@ def configure(sub: Any) -> None:
     _add_run_target_flags(p_restart)
     _add_source_flags(p_restart)
     _add_phase4_flags(p_restart)
+    _add_refresh_flag(p_restart)
     _add_crawl_only_flag(p_restart)
     _add_common(p_restart)
     _add_llm_slot_flag(p_restart)
