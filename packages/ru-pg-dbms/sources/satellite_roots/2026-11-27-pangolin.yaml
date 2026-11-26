@@ -1,0 +1,827 @@
+# Наблюдение разведки корней сателлитов Pangolin (2026-11-27).
+#
+# Прибор: `hound package satellites roots --product pangolin --seed ROLE=URL --out …`
+# (`core/pipeline/satellite_probe.py` → `core/pipeline/satellite_roots.py`).
+# Это **наблюдение**, не объявление: корни в паспорте от него не меняются
+# (`--apply --actor` — отдельное решение человека).
+#
+# Четыре прохода, потому что вопрос у них разный:
+#   evidence_url  — адрес свидетельства связи из паспорта (`https://pangolin.sbertech.ru`);
+#   docs_index    — индекс портала `/center/docs/` (состав разделов сайта);
+#   kintsugi_page — страница самого сателлита (проверка гранулярности объявленного корня);
+#   copywala_page — то же для второго сателлита.
+#
+# Измерено:
+#   * корень портала отдаёт антибот-заглушку Qrator (`__qrator/qauth.js`, 401 по HTTP,
+#     260 байт по браузеру) — поэтому «свидетельство связи» как адрес наблюдения не
+#     работает вообще, и это названо, а не выдано за пустое дерево;
+#   * страницы сателлитов доступны обычному HTTP (200, 30 КБ) — браузер им не нужен;
+#   * у Kintsugi 8 разделов (`std/…`), у CopyWala 7 (`about`, `installation-guide`,
+#     `administration-guide`, `cli-reference-guide`, `glossary`, `what-is-new`) — все
+#     внутри объявленных корней `/center/docs/{kintsugi,copywala}`, то есть гранулярность
+#     объявленных корней наблюдением подтверждена;
+#   * состав раздела документации портала: версии `docs/5…8` плюс `copywala`, `kintsugi`,
+#     `gradely` — других компонентных поддеревьев в индексе нет.
+- evidence_url:
+  - product_id: pangolin
+    role: management_console
+    component: Kintsugi
+    seed_url: https://pangolin.sbertech.ru
+    final_url: https://pangolin.sbertech.ru/
+    ambiguous: false
+    nested: false
+    recommended: null
+    candidates: []
+    rejected: []
+    notes:
+    - no_links
+    - 'transport: browser'
+    - 'text_chars: 0'
+    - 'links: 0'
+    - 'antibot_challenge: страница отдала проверку (__qrator) — ссылок в ней нет по
+      построению, это не пустое дерево'
+  - product_id: pangolin
+    role: backup
+    component: CopyWala
+    seed_url: https://pangolin.sbertech.ru
+    final_url: https://pangolin.sbertech.ru/
+    ambiguous: false
+    nested: false
+    recommended: null
+    candidates: []
+    rejected: []
+    notes:
+    - no_links
+    - 'transport: browser'
+    - 'text_chars: 0'
+    - 'links: 0'
+    - 'antibot_challenge: страница отдала проверку (__qrator) — ссылок в ней нет по
+      построению, это не пустое дерево'
+- docs_index:
+  - product_id: pangolin
+    role: management_console
+    component: Kintsugi
+    seed_url: https://pangolin.sbertech.ru/center/docs/
+    final_url: https://pangolin.sbertech.ru/center/docs/7/index.html
+    ambiguous: false
+    nested: true
+    recommended: null
+    candidates:
+    - key: pangolin.sbertech.ru/center
+      documents: 23
+      depth: 1
+      urls:
+      - https://pangolin.sbertech.ru/center/
+      - https://pangolin.sbertech.ru/center/blog/
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/7/about
+      - https://pangolin.sbertech.ru/center/docs/7/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      - https://pangolin.sbertech.ru/center/docs/7/dev-guide
+      - https://pangolin.sbertech.ru/center/docs/7/distribution-kit
+      - https://pangolin.sbertech.ru/center/docs/7/glossary
+      - https://pangolin.sbertech.ru/center/docs/7/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/7/reference-guide
+      - https://pangolin.sbertech.ru/center/docs/7/what-is-new
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      - https://pangolin.sbertech.ru/center/education/
+      - https://pangolin.sbertech.ru/center/knowledge-base/
+      - https://pangolin.sbertech.ru/center/support/
+      - https://pangolin.sbertech.ru/center/telegram/
+      - https://pangolin.sbertech.ru/center/video/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs
+      documents: 16
+      depth: 2
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/7/about
+      - https://pangolin.sbertech.ru/center/docs/7/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      - https://pangolin.sbertech.ru/center/docs/7/dev-guide
+      - https://pangolin.sbertech.ru/center/docs/7/distribution-kit
+      - https://pangolin.sbertech.ru/center/docs/7/glossary
+      - https://pangolin.sbertech.ru/center/docs/7/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/7/reference-guide
+      - https://pangolin.sbertech.ru/center/docs/7/what-is-new
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs/7
+      documents: 10
+      depth: 3
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/7/about
+      - https://pangolin.sbertech.ru/center/docs/7/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      - https://pangolin.sbertech.ru/center/docs/7/dev-guide
+      - https://pangolin.sbertech.ru/center/docs/7/distribution-kit
+      - https://pangolin.sbertech.ru/center/docs/7/glossary
+      - https://pangolin.sbertech.ru/center/docs/7/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/7/reference-guide
+      - https://pangolin.sbertech.ru/center/docs/7/what-is-new
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 3
+      examples:
+      - https://max.ru/pangolindb
+      - https://t.me/pangolindb
+      - https://vk.com/pangolindb
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/8
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/gradely
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/knowledge-base
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/video
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/blog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/about
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/distribution-kit
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/what-is-new
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/installation-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/administration-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/dev-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/reference-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/glossary
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/certificates
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/telegram
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/cookie-policy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/privacy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/agreement
+      documents: 1
+      min_links: 3
+    notes:
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://pangolin.sbertech.ru/center/docs/ (объявлен оператором)'
+    - 'transport: http'
+    - 'text_chars: 654'
+    - 'links: 31'
+  - product_id: pangolin
+    role: backup
+    component: CopyWala
+    seed_url: https://pangolin.sbertech.ru/center/docs/
+    final_url: https://pangolin.sbertech.ru/center/docs/7/index.html
+    ambiguous: false
+    nested: true
+    recommended: null
+    candidates:
+    - key: pangolin.sbertech.ru/center
+      documents: 23
+      depth: 1
+      urls:
+      - https://pangolin.sbertech.ru/center/
+      - https://pangolin.sbertech.ru/center/blog/
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/7/about
+      - https://pangolin.sbertech.ru/center/docs/7/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      - https://pangolin.sbertech.ru/center/docs/7/dev-guide
+      - https://pangolin.sbertech.ru/center/docs/7/distribution-kit
+      - https://pangolin.sbertech.ru/center/docs/7/glossary
+      - https://pangolin.sbertech.ru/center/docs/7/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/7/reference-guide
+      - https://pangolin.sbertech.ru/center/docs/7/what-is-new
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      - https://pangolin.sbertech.ru/center/education/
+      - https://pangolin.sbertech.ru/center/knowledge-base/
+      - https://pangolin.sbertech.ru/center/support/
+      - https://pangolin.sbertech.ru/center/telegram/
+      - https://pangolin.sbertech.ru/center/video/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs
+      documents: 16
+      depth: 2
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/7/about
+      - https://pangolin.sbertech.ru/center/docs/7/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      - https://pangolin.sbertech.ru/center/docs/7/dev-guide
+      - https://pangolin.sbertech.ru/center/docs/7/distribution-kit
+      - https://pangolin.sbertech.ru/center/docs/7/glossary
+      - https://pangolin.sbertech.ru/center/docs/7/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/7/reference-guide
+      - https://pangolin.sbertech.ru/center/docs/7/what-is-new
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs/7
+      documents: 10
+      depth: 3
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/7/about
+      - https://pangolin.sbertech.ru/center/docs/7/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      - https://pangolin.sbertech.ru/center/docs/7/dev-guide
+      - https://pangolin.sbertech.ru/center/docs/7/distribution-kit
+      - https://pangolin.sbertech.ru/center/docs/7/glossary
+      - https://pangolin.sbertech.ru/center/docs/7/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/7/reference-guide
+      - https://pangolin.sbertech.ru/center/docs/7/what-is-new
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 3
+      examples:
+      - https://max.ru/pangolindb
+      - https://t.me/pangolindb
+      - https://vk.com/pangolindb
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/8
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/gradely
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/knowledge-base
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/video
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/blog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/about
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/description-of-functionality
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/distribution-kit
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/what-is-new
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/installation-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/administration-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/dev-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/reference-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7/glossary
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/certificates
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/telegram
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/cookie-policy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/privacy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/agreement
+      documents: 1
+      min_links: 3
+    notes:
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://pangolin.sbertech.ru/center/docs/ (объявлен оператором)'
+    - 'transport: http'
+    - 'text_chars: 654'
+    - 'links: 31'
+- kintsugi_page:
+  - product_id: pangolin
+    role: management_console
+    component: Kintsugi
+    seed_url: https://pangolin.sbertech.ru/center/docs/kintsugi/
+    final_url: https://pangolin.sbertech.ru/center/docs/kintsugi/
+    ambiguous: false
+    nested: true
+    recommended: null
+    candidates:
+    - key: pangolin.sbertech.ru/center
+      documents: 22
+      depth: 1
+      urls:
+      - https://pangolin.sbertech.ru/center/
+      - https://pangolin.sbertech.ru/center/blog/
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/about-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/administration-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/api-guide-dbcm
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/description-product-editions
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/glossary
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/installation-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/licensing-policy
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/user-guide-dbcm-std
+      - https://pangolin.sbertech.ru/center/education/
+      - https://pangolin.sbertech.ru/center/knowledge-base/
+      - https://pangolin.sbertech.ru/center/support/
+      - https://pangolin.sbertech.ru/center/telegram/
+      - https://pangolin.sbertech.ru/center/video/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs
+      documents: 15
+      depth: 2
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/about-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/administration-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/api-guide-dbcm
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/description-product-editions
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/glossary
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/installation-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/licensing-policy
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/user-guide-dbcm-std
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs/kintsugi
+      documents: 9
+      depth: 3
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/about-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/administration-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/api-guide-dbcm
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/description-product-editions
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/glossary
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/installation-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/licensing-policy
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/user-guide-dbcm-std
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs/kintsugi/std
+      documents: 8
+      depth: 4
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/about-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/administration-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/api-guide-dbcm
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/description-product-editions
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/glossary
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/installation-guide-std
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/licensing-policy
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/std/user-guide-dbcm-std
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 3
+      examples:
+      - https://max.ru/pangolindb
+      - https://t.me/pangolindb
+      - https://vk.com/pangolindb
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/8
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/gradely
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/knowledge-base
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/video
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/blog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/about-std
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/installation-guide-std
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/administration-guide-std
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/user-guide-dbcm-std
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/api-guide-dbcm
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/description-product-editions
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/glossary
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi/std/licensing-policy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/certificates
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/telegram
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/cookie-policy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/privacy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/agreement
+      documents: 1
+      min_links: 3
+    notes:
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://pangolin.sbertech.ru/center/docs/kintsugi/ (объявлен оператором)'
+    - 'transport: http'
+    - 'text_chars: 678'
+    - 'links: 30'
+- copywala_page:
+  - product_id: pangolin
+    role: backup
+    component: CopyWala
+    seed_url: https://pangolin.sbertech.ru/center/docs/copywala/
+    final_url: https://pangolin.sbertech.ru/center/docs/copywala/
+    ambiguous: false
+    nested: true
+    recommended: null
+    candidates:
+    - key: pangolin.sbertech.ru/center
+      documents: 22
+      depth: 1
+      urls:
+      - https://pangolin.sbertech.ru/center/
+      - https://pangolin.sbertech.ru/center/blog/
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/copywala/about
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/system-requirements
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/use-cases
+      - https://pangolin.sbertech.ru/center/docs/copywala/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/cli-reference-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/glossary
+      - https://pangolin.sbertech.ru/center/docs/copywala/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/what-is-new
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      - https://pangolin.sbertech.ru/center/education/
+      - https://pangolin.sbertech.ru/center/knowledge-base/
+      - https://pangolin.sbertech.ru/center/support/
+      - https://pangolin.sbertech.ru/center/telegram/
+      - https://pangolin.sbertech.ru/center/video/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs
+      documents: 15
+      depth: 2
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/5/
+      - https://pangolin.sbertech.ru/center/docs/6/
+      - https://pangolin.sbertech.ru/center/docs/7/
+      - https://pangolin.sbertech.ru/center/docs/8/
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/copywala/about
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/system-requirements
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/use-cases
+      - https://pangolin.sbertech.ru/center/docs/copywala/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/cli-reference-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/glossary
+      - https://pangolin.sbertech.ru/center/docs/copywala/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/what-is-new
+      - https://pangolin.sbertech.ru/center/docs/gradely/
+      - https://pangolin.sbertech.ru/center/docs/kintsugi/
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs/copywala
+      documents: 9
+      depth: 3
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/copywala/
+      - https://pangolin.sbertech.ru/center/docs/copywala/about
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/system-requirements
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/use-cases
+      - https://pangolin.sbertech.ru/center/docs/copywala/administration-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/cli-reference-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/glossary
+      - https://pangolin.sbertech.ru/center/docs/copywala/installation-guide
+      - https://pangolin.sbertech.ru/center/docs/copywala/what-is-new
+      evidence:
+      - links
+    - key: pangolin.sbertech.ru/center/docs/copywala/about
+      documents: 3
+      depth: 4
+      urls:
+      - https://pangolin.sbertech.ru/center/docs/copywala/about
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/system-requirements
+      - https://pangolin.sbertech.ru/center/docs/copywala/about/use-cases
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 3
+      examples:
+      - https://max.ru/pangolindb
+      - https://t.me/pangolindb
+      - https://vk.com/pangolindb
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/8
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/7
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/kintsugi
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/gradely
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/knowledge-base
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/video
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/blog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/what-is-new
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/about/system-requirements
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/about/use-cases
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/installation-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/administration-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/cli-reference-guide
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/docs/copywala/glossary
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/certificates
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/center/telegram
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/cookie-policy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/privacy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: pangolin.sbertech.ru/agreement
+      documents: 1
+      min_links: 3
+    notes:
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://pangolin.sbertech.ru/center/docs/copywala/ (объявлен оператором)'
+    - 'transport: http'
+    - 'text_chars: 550'
+    - 'links: 30'
