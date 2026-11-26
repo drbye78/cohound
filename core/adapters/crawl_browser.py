@@ -20,14 +20,28 @@
     → ``RawPage(fetch_mode=BROWSER)``. Возвращаемые байты — **DOM-сериализация браузера
     (транскодирование)**, а не байт-в-байт ответ сервера (I19: это сырьё для retention).
     Живой рендер **не кэшируется** (R7).
-  - ``hybrid`` — прогрев браузером (``navigate`` + ``cookies``) → лёгкий HTTP-GET тем же
-    URL с зеркалированием ``User-Agent``/``Accept-Language`` и **cookie-моста** (все cookie
-    хоста из сессии, включая HttpOnly). **Успех ⇔** ``200 <= status < 300`` **и** ответ не
-    похож на interstitial (см. ниже) → ``RawPage(fetch_mode=HTTP, status_code, content_type)``
-    и **запись в кэш** по ``http_key(url)`` (кэшируется только тело). Любой иной исход
-    (challenge/не-2xx/interstitial) **не кэшируется**: ограниченный повтор с ре-прогревом и
-    jittered-backoff, а при исчерпании — возврат **уже полученного браузерного рендера** (без
-    лишнего честного фетча). **Сбой транспорта — fallback на honest** (живой рендер).
+  - ``hybrid`` — **липкий**: браузер платит за **хост**, а не за URL. Состояние хоста
+    (:class:`_HybridHost`) ведёт режим ``unknown → warm → http``: первый запрос хоста
+    прогревается браузером (``navigate`` + ``cookies``), и дальше адреса этого хоста идут
+    лёгким HTTP-GET с зеркалированием ``User-Agent``/``Accept-Language`` и **cookie-моста**
+    (все cookie хоста из сессии, включая HttpOnly) — **без** браузерной навигации. Челлендж
+    (``401/403/429``), не-2xx или interstitial снимают подтверждение (``http → warm``) и
+    стоят **одного** пере-прогрева с повтором, а не честного рендера каждого адреса.
+    **Успех ⇔** ``200 <= status < 300`` **и** ответ не похож на interstitial (см. ниже) →
+    ``RawPage(fetch_mode=HTTP, status_code, content_type)`` и **запись в кэш** по
+    ``http_key(url)`` (кэшируется только тело). Любой иной исход **не кэшируется**; при
+    исчерпании повторов возвращается **уже полученный браузерный рендер** (без лишнего
+    честного фетча). **Сбой транспорта — fallback на honest** (живой рендер).
+    **Терминальный артефакт** (документ/заявленный контейнер по суффиксу) в браузере **не
+    навигируется**: он не страница, и рендер ничего не добавляет к байтам. Такой URL
+    спрашивается лёгким GET сразу, прогрев — только по отказу сайта, и успех артефакта
+    **не** подтверждает HTTP для страниц того же хоста (у download-эндпоинта и у раздела
+    правила разные).
+    **Названная граница:** лёгкий GET читает тело целиком в память и не применяет
+    ``plan.max_response_bytes``/``staging_dir`` (стриминга здесь нет) — потолок ответа
+    действует только у ``HttpCrawler``. Для страниц это неотличимо от прежнего hybrid, но
+    для крупного артефакта цена — RSS, а не отказ: держите ``max_artifact_bytes`` в уме,
+    когда объявляете ``hybrid`` для хоста с большими файлами.
     Hybrid-GET **условный**: заголовки ``If-None-Match``/``If-Modified-Since`` берутся из
     плана, иначе — из сайдкара кэша (приоритет: план → мета кэша → безусловный GET);
     ``304`` возвращает закэшированные байты с ``not_modified=True`` (пустое тело —
@@ -98,12 +112,13 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import logging
 import shutil
 import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
@@ -121,6 +136,7 @@ from core.ports.crawl_errors import (
 )
 from core.ports.types import FetchMode, FetchPlan, RawPage
 from core.util.cache import ContentAddressedCache, http_key
+from core.util.document_formats import is_terminal_artifact_url
 from core.util.rate_limit import RateLimiter, jittered_backoff
 from core.util.redirects import ResolverFn
 from core.util.robots import RobotsGate
@@ -137,6 +153,7 @@ __all__ = [
     "DEFAULT_ACCEPT_LANGUAGE",
     "DEFAULT_TIMEOUT_MS",
     "DEFAULT_USER_AGENT",
+    "FINAL_URL_HEADER",
     "HTTP_TIMEOUT_S",
     "HYBRID_MAX_ATTEMPTS",
     "INTERSTITIAL_LENGTH_RATIO",
@@ -177,6 +194,50 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 INTERSTITIAL_MIN_RENDER_BYTES = 512
 #: Порог interstitial: HTTP-тело короче ``ratio * len(rendered)`` ⇒ похоже на заглушку.
 INTERSTITIAL_LENGTH_RATIO = 0.25
+
+#: Режим хоста в липком hybrid. ``unknown`` — хост ещё не наблюдали; ``warm`` — прогрет,
+#: но HTTP ещё не подтверждён (или подтверждение снято челленджем); ``http`` — HTTP
+#: подтверждён и держится, пока сайт не ответит челленджем.
+HYBRID_MODE_UNKNOWN = "unknown"
+HYBRID_MODE_WARM = "warm"
+HYBRID_MODE_HTTP = "http"
+
+
+@dataclass
+class _HybridHost:
+    """Наблюдение и состояние одного хоста в липком hybrid.
+
+    Живёт в :class:`BrowserCrawler` (движок принадлежит потоку: Playwright sync-API
+    нельзя делить между потоками), поэтому «прогрет один раз» означает «один раз на
+    поток-движок», а не «один раз на прогон». Это цена потоковой модели, а не выбор.
+    """
+
+    mode: str = HYBRID_MODE_UNKNOWN
+    #: Артефакты хоста подтвердили лёгкий GET. Отдельный признак, а не общий ``mode``:
+    #: у download-эндпоинта и у раздела документации правила разные, и успех файла не
+    #: доказывает, что страница отдаётся без браузера. Обратное верно (страница прошла
+    #: лёгким GET ⇒ транспорт хоста работает), поэтому успех страницы поднимает и это.
+    artifacts_ok: bool = False
+    #: Cookie, снятые при последнем прогреве. Хранятся здесь, а не читаются из контекста:
+    #: сессия закрывается сразу после прогрева, и полагаться на внутренности бэкенда
+    #: (сохраняет ли он jar после закрытия страницы) значило бы зависеть от реализации.
+    cookies: list[dict[str, Any]] = field(default_factory=list)
+    warms: int = 0
+    http_fetches: int = 0
+    challenges: int = 0
+    artifacts: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        """Снимок для публикации: числа, а не флаги (A3 — публикуем измеренное)."""
+        return {
+            "mode": self.mode,
+            "artifacts_ok": self.artifacts_ok,
+            "warms": self.warms,
+            "http_fetches": self.http_fetches,
+            "challenges": self.challenges,
+            "artifacts": self.artifacts,
+            "cookies": len(self.cookies),
+        }
 
 #: Флаги собственного запуска браузера (persistent-ветка; CDP-ветку не затрагивают).
 #: Playwright по умолчанию добавляет ``--enable-automation`` → ``navigator.webdriver=true``,
@@ -235,6 +296,32 @@ def _httpx_available() -> bool:
 def _now_iso() -> str:
     """Текущий UTC-таймстемп в ISO-8601 (поле ``fetched_at`` живого фетча)."""
     return datetime.now(UTC).isoformat()
+
+
+logger = logging.getLogger(__name__)
+
+#: Заголовок, которым собственный GET сообщает **финальный** URL после редиректов.
+#: Своё значение перекрывает одноимённый заголовок сервера (он перезаписывается в
+#: :meth:`BrowserCrawler._default_http_get`), поэтому подделка со стороны сайта невозможна.
+FINAL_URL_HEADER = "X-Cohound-Final-Url"
+
+#: Начала разметки, по которым ``200``-ответ на документ/контейнер считается **не файлом**
+#: (заглушка, страница логина, ошибка прокси). Сравнение — по началу тела, регистр не важен.
+_HTML_SNIFF_PREFIXES = (b"<!doctype html", b"<html", b"<head", b"<body")
+
+
+def _looks_like_html(body: bytes) -> bool:
+    """Похоже ли тело на HTML-документ (для артефакта это признак заглушки)."""
+    return body[:512].lstrip().lower().startswith(_HTML_SNIFF_PREFIXES)
+
+
+def _final_url(resp_headers: dict[str, str]) -> str | None:
+    """Финальный URL из ответа собственного GET (``FINAL_URL_HEADER``) либо ``None``."""
+    for name in (FINAL_URL_HEADER, FINAL_URL_HEADER.lower()):
+        value = resp_headers.get(name)
+        if value:
+            return str(value)
+    return None
 
 
 def _looks_like_interstitial(http_body: bytes, rendered: bytes | None) -> bool:
@@ -524,7 +611,7 @@ class BrowserCrawler:
         ``wait(host, plan.rate_limit)`` перед фетчем.
     """
 
-    version = "browser-crawler-1"
+    version = "browser-crawler-2"
     #: Duck-typed имя транспорта (провенанс краула, Phase 2.1/S1).
     engine = "browser"
     #: Браузерный краулер поддерживает ``fetch: browser`` (D2).
@@ -563,6 +650,10 @@ class BrowserCrawler:
         # D1/§10: per-host политика robots.txt (egress-слой). ``None`` → без проверки;
         # тесты инъектят политику без сети.
         self._robots = robots
+        # Липкий hybrid: режим и cookie **на хост** (``unknown`` → ``warm`` → ``http``).
+        # Движок принадлежит потоку (Playwright sync-API не делим), поэтому и наблюдение
+        # живёт здесь: «прогрет один раз» = «один раз на поток-движок», а не на прогон.
+        self._hybrid_hosts: dict[str, _HybridHost] = {}
         self._closed = False
 
     @property
@@ -639,6 +730,11 @@ class BrowserCrawler:
         if self._closed:
             return
         self._closed = True
+        if self._hybrid_hosts:
+            # Провенанс липкого hybrid: по этим числам видно, платил ли браузер за хост
+            # или за каждый URL. Печатается до очистки — после close наблюдения нет.
+            logger.info("hybrid: наблюдение по хостам %s", self.hybrid_state())
+            self._hybrid_hosts.clear()
         backend = self._backend
         if backend is not None:
             # Best-effort: закрытие запрошено вызывающим, и его исход не наблюдаем (у
@@ -684,19 +780,29 @@ class BrowserCrawler:
     # -- hybrid ---------------------------------------------------------------
 
     def _fetch_hybrid(self, url: str, plan: FetchPlan) -> RawPage:
-        """Прогрев → HTTP-GET с cookie-мостом; успех ⇔ 2xx и не-interstitial → кэш.
+        """Липкий hybrid: прогрев на хост, дальше лёгкий HTTP до нового челленджа.
 
-        Условный GET: приоритет валидаторов **план → мета кэша → безусловный GET**.
-        Валидаторы плана (``if_none_match``/``if_modified_since``) — явное намерение
-        вызывающего; иначе берутся ``etag``/``last_modified`` из сайдкара прошлого
-        получения, и запрос идёт вживую (кэш-шорткат не применяется), чтобы сервер мог
-        ответить дешёвым ``304``. ``304`` → закэшированные байты с ``not_modified=True``;
-        нет кэша/байтов — ``CrawlError`` (``fetch`` уйдёт в honest), пустая страница не
-        фабрикуется.
+        Решение принимает **состояние хоста**, а не каждый URL по отдельности
+        (:class:`_HybridHost`): ``unknown`` → прогрев браузером (он же даёт cookie и
+        эталон рендера) → ``http``, и дальше адреса этого хоста идут обычным GET с
+        cookie-мостом. Челлендж/не-2xx/interstitial снимает подтверждение
+        (``http`` → ``warm``) и стоит одного пере-прогрева, а не честного рендера каждого
+        адреса. Так браузер платит за **хост**, а не за URL.
 
-        Любой иной исход (challenge/не-2xx/interstitial) не кэшируется; при исчерпании
-        повторов возвращается **уже полученный браузерный рендер**. Сбой транспорта
-        (``CrawlError`` из :meth:`_http_get_hybrid`) пробрасывается — ``fetch`` уйдёт в honest.
+        Терминальный артефакт (документ/заявленный контейнер по суффиксу) в браузере
+        **не навигируется**: он не страница, и рендер ничего не добавляет к байтам. Такой
+        URL спрашивается лёгким GET сразу (с уже снятыми cookie), а прогрев — только если
+        сайт ответил отказом. Подтверждение лёгкого GET ведётся **по классу**: успех
+        артефакта не переводит хост в ``http`` для страниц (у download-эндпоинта и у
+        раздела правила разные), но открывает лёгкий путь остальным артефактам хоста
+        (``artifacts_ok``), а успех страницы открывает оба класса — транспорт и cookie-jar
+        у них общие. Иначе хост с сотней PDF платил бы прогрев за каждый файл, что и было
+        исходным дефектом.
+
+        Кэш-шорткат остаётся первым: подтверждённый ранее ответ не требует ни браузера,
+        ни сети. Условный GET: приоритет валидаторов **план → мета кэша → безусловный
+        GET**. ``304`` отдаёт закэшированные байты, ``404``/``410`` — терминальный
+        ``CrawlNotFound`` (браузерный рендер 404-страницы не должен выдаваться за контент).
         """
         key = http_key(url)
         cached: bytes | None = None
@@ -722,12 +828,76 @@ class BrowserCrawler:
         if cached is not None and not conditional:
             return self._page_from_cache(url, cached, meta)
 
+        host = (urlsplit(url).hostname or "").lower()
+        state = self._hybrid_host(host)
+        artifact = is_terminal_artifact_url(url, plan.attachment_formats)
+
+        # -- 1. Лёгкий GET уже подтверждён: браузер не нужен ----------------------
+        confirmed = state.mode == HYBRID_MODE_HTTP or (
+            artifact and state.artifacts_ok
+        )
+        if confirmed:
+            try:
+                status, body, resp_headers = self._http_get_hybrid(
+                    url, state.cookies, effective_plan
+                )
+            except CrawlError:
+                # Сбой транспорта — не приговор режиму: сначала пере-прогрев, и только
+                # если и он не даст байтов, ``fetch`` уйдёт в honest.
+                self._hybrid_demote(state, artifact)
+            else:
+                state.http_fetches += 1
+                if status == 304:
+                    return self._page_not_modified(url, cached, meta, resp_headers)
+                if status in NOT_FOUND_STATUSES:
+                    raise CrawlNotFound(
+                        f"hybrid HTTP {status} для {url!r}: ресурс отсутствует",
+                        http_status=status,
+                    )
+                if self._hybrid_http_usable(status, body, artifact=artifact):
+                    if artifact:
+                        state.artifacts += 1
+                    return self._hybrid_page(url, status, body, resp_headers)
+                state.challenges += 1
+                self._hybrid_demote(state, artifact)
+
+        # -- 2. Артефакт без подтверждения: лёгкий GET, прогрев только по отказу --
+        # Артефакт — не страница: рендер ничего не добавляет к байтам, поэтому прогрев
+        # здесь не платится авансом. Снятые ранее cookie хоста (если хост уже
+        # прогревался ради страницы) едут в запрос.
+        if artifact and not confirmed:
+            try:
+                status, body, resp_headers = self._http_get_hybrid(
+                    url, state.cookies, effective_plan
+                )
+            except CrawlError:
+                pass  # прогрев ниже решит: сбой лёгкого GET не отменяет попытку
+            else:
+                state.http_fetches += 1
+                if status == 304:
+                    return self._page_not_modified(url, cached, meta, resp_headers)
+                if status in NOT_FOUND_STATUSES:
+                    raise CrawlNotFound(
+                        f"hybrid HTTP {status} для {url!r}: ресурс отсутствует",
+                        http_status=status,
+                    )
+                if self._hybrid_http_usable(status, body, artifact=True):
+                    state.artifacts += 1
+                    state.artifacts_ok = True
+                    return self._hybrid_page(url, status, body, resp_headers)
+                state.challenges += 1
+
+        # -- 3. Прогрев (или пере-прогрев) и GET с cookie-мостом -----------------
         last_status: int | None = None
         last_rendered: bytes | None = None
         last_render_url: str = url
         for attempt in range(HYBRID_MAX_ATTEMPTS):
             cookies, render_url, rendered = self._warm(url, plan)
+            state.warms += 1
+            state.cookies = cookies
+            state.mode = HYBRID_MODE_WARM
             status, body, resp_headers = self._http_get_hybrid(url, cookies, effective_plan)
+            state.http_fetches += 1
             if status == 304:
                 # ``httpx`` не поднимает на 304 (follow_redirects=False): статус читаем
                 # напрямую. Тело ``304`` не несёт представления — берём байты из кэша.
@@ -740,40 +910,26 @@ class BrowserCrawler:
                     f"hybrid HTTP {status} для {url!r}: ресурс отсутствует",
                     http_status=status,
                 )
-            if 200 <= status < 300 and not _looks_like_interstitial(body, rendered):
-                # Валидаторы hybrid-GET доступны в ``resp_headers`` (в отличие от honest).
-                etag = resp_headers.get("ETag") or resp_headers.get("etag")
-                last_modified = resp_headers.get("Last-Modified") or resp_headers.get(
-                    "last-modified"
+            if self._hybrid_http_usable(
+                status, body, artifact=artifact, rendered=rendered
+            ):
+                if artifact:
+                    state.artifacts += 1
+                    state.artifacts_ok = True
+                else:
+                    state.mode = HYBRID_MODE_HTTP
+                    # Транспорт хоста подтверждён страницей ⇒ артефакты того же хоста
+                    # тоже пройдут лёгким GET: правило «файл не доказывает страницу»
+                    # односторонне, обратное следует из общего транспорта и cookie-jar.
+                    state.artifacts_ok = True
+                return self._hybrid_page(
+                    url, status, body, resp_headers, final_url=render_url
                 )
-                page = RawPage(
-                    url=render_url,
-                    content=bytes(body),
-                    fetched_at=_now_iso(),
-                    fetch_mode=FetchMode.HTTP,
-                    status_code=status,
-                    content_type=resp_headers.get("Content-Type") or None,
-                    etag=etag or None,
-                    last_modified=last_modified or None,
-                )
-                if self._cache is not None:
-                    self._cache.put_bytes("http", key, page.content)
-                    self._cache.put_meta(
-                        "http",
-                        key,
-                        {
-                            "etag": page.etag,
-                            "last_modified": page.last_modified,
-                            "status_code": page.status_code,
-                            "content_type": page.content_type,
-                            "final_url": page.url,
-                        },
-                    )
-                return page
             # Challenge / не-2xx / interstitial: сохраняем рендер для возможного возврата.
             last_status = status
             last_rendered = rendered
             last_render_url = render_url
+            state.challenges += 1
             if attempt < HYBRID_MAX_ATTEMPTS - 1:
                 time.sleep(jittered_backoff(attempt))
 
@@ -792,6 +948,108 @@ class BrowserCrawler:
             # Honest-путь (чистый рендер) статуса не наблюдает — там он остаётся ``None``.
             http_status=last_status,
         )
+
+    @staticmethod
+    def _hybrid_demote(state: _HybridHost, artifact: bool) -> None:
+        """Снимает подтверждение лёгкого GET **только** у того класса, что отказал.
+
+        Челлендж на странице не отменяет успех артефакта того же хоста и наоборот: это
+        два разных правила сайта. Прогрев общий (cookie-jar один), поэтому следующий
+        фетч любого класса получит свежие cookie.
+        """
+        if artifact:
+            state.artifacts_ok = False
+        else:
+            state.mode = HYBRID_MODE_WARM
+
+    def _hybrid_http_usable(
+        self,
+        status: int,
+        body: bytes,
+        *,
+        artifact: bool,
+        rendered: bytes | None = None,
+    ) -> bool:
+        """Годится ли ответ лёгкого GET как представление ресурса.
+
+        * не-2xx — нет (это challenge/сбой, а не контент);
+        * **артефакт** — годится, если тело не похоже на HTML: ``200`` с разметкой вместо
+          файла означает заглушку/логин/страницу ошибки прокси, а не документ;
+        * **страница** — годится, если не interstitial по сравнению с рендером. Без
+          рендера (липкий ``http``-режим, прогрева в этом фетче не было) сравнения нет,
+          поэтому тело короче ``INTERSTITIAL_MIN_RENDER_BYTES`` считается **непроверенным**
+          и уходит на прогрев: JS-заглушка обычно именно так и выглядит, а корректность
+          важнее экономии (A1).
+        """
+        if not 200 <= status < 300:
+            return False
+        if artifact:
+            return bool(body) and not _looks_like_html(body)
+        if _looks_like_interstitial(body, rendered):
+            return False
+        # Без эталона мелкое тело не отличить от JS-заглушки — проверяем прогревом.
+        return rendered is not None or len(body) >= INTERSTITIAL_MIN_RENDER_BYTES
+
+    def _hybrid_page(
+        self,
+        url: str,
+        status: int,
+        body: bytes,
+        resp_headers: dict[str, str],
+        *,
+        final_url: str | None = None,
+    ) -> RawPage:
+        """``RawPage`` успешного hybrid-GET + запись в кэш (тело и сайдкар).
+
+        ``RawPage.url`` — финальный URL: из прогрева (``final_url``) либо из собственного
+        GET (:data:`FINAL_URL_HEADER`), иначе запрошенный. Валидаторы hybrid-GET доступны
+        в заголовках ответа (в отличие от honest-рендера) и сохраняются в сайдкар, чтобы
+        следующий фетч спросил сервер условно.
+        """
+        etag = resp_headers.get("ETag") or resp_headers.get("etag")
+        last_modified = resp_headers.get("Last-Modified") or resp_headers.get("last-modified")
+        resolved = _final_url(resp_headers) or final_url or url
+        page = RawPage(
+            url=resolved,
+            content=bytes(body),
+            fetched_at=_now_iso(),
+            fetch_mode=FetchMode.HTTP,
+            status_code=status,
+            content_type=resp_headers.get("Content-Type") or None,
+            etag=etag or None,
+            last_modified=last_modified or None,
+        )
+        if self._cache is not None:
+            key = http_key(url)
+            self._cache.put_bytes("http", key, page.content)
+            self._cache.put_meta(
+                "http",
+                key,
+                {
+                    "etag": page.etag,
+                    "last_modified": page.last_modified,
+                    "status_code": page.status_code,
+                    "content_type": page.content_type,
+                    "final_url": page.url,
+                },
+            )
+        return page
+
+    def _hybrid_host(self, host: str) -> _HybridHost:
+        """Состояние хоста в липком hybrid (создаётся при первом обращении)."""
+        state = self._hybrid_hosts.get(host)
+        if state is None:
+            state = self._hybrid_hosts[host] = _HybridHost()
+        return state
+
+    def hybrid_state(self) -> dict[str, dict[str, Any]]:
+        """Наблюдение липкого hybrid: режим и счётчики по хостам (не identity).
+
+        Публикуется как провенанс: сколько раз хост прогревался, сколько адресов ушло
+        лёгким HTTP, сколько раз сайт снимал подтверждение. По этим числам видно, платил
+        ли браузер за хост или за каждый URL.
+        """
+        return {host: state.as_dict() for host, state in sorted(self._hybrid_hosts.items())}
 
     def _warm(
         self, url: str, plan: FetchPlan
@@ -936,7 +1194,12 @@ class BrowserCrawler:
                         "повтор осмыслен"
                     ) from exc
                 continue
-            return response.status_code, response.content, dict(response.headers)
+            # Финальный URL — из собственного redirect-loop (в отличие от honest-рендера
+            # он известен): кладём в заголовки под своим именем, чтобы ``_hybrid_page``
+            # положил его в ``RawPage.url``. Одноимённый заголовок сервера перекрыт.
+            headers_out = dict(response.headers)
+            headers_out[FINAL_URL_HEADER] = current
+            return response.status_code, response.content, headers_out
         raise CrawlError(f"превышено число редиректов ({_MAX_REDIRECTS}) при фетче {url!r}")
 
     # -- backend / сессии -----------------------------------------------------

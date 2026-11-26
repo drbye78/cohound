@@ -574,6 +574,41 @@ Three facts that are cheap to state and expensive to rediscover:
   `crawl status --per-host`, not `fetch_ms`. `COHOUND_SCOUT_CRAWLER=scrapy` is for
   browser-profile hosts only — there the fetch is serialised by design.
 
+### 6.3 `strategy: hybrid` is sticky per host (`browser-crawler-2`)
+
+`honest` renders every URL in the browser. `hybrid` used to do the same **plus** a light
+HTTP-GET: `_warm` opened a browser session per URL, so the browser was paid per address and
+only the body transfer was saved. Measured 27.11.2026 with the fake backend: three URLs on
+one host → three sessions, three navigations.
+
+Now the **host** carries the state (`_HybridHost`, `adapters/crawl_browser.py`):
+
+- `unknown` → **one** warm (browser `navigate` + cookies; the render is also the interstitial
+  baseline) → `http`. Every later URL of that host goes through the light GET with the
+  cookie bridge, no navigation.
+- a challenge (`401/403/429`), a non-2xx or an interstitial demotes `http → warm` and costs
+  **one** re-warm with a retry — not an honest render per address.
+- **a terminal artifact is never navigated**: a document or a declared container by suffix
+  is not a page, and a render adds nothing to the bytes. It is fetched by the light GET
+  immediately (with the cookies already captured); the warm happens only if the site
+  refuses. An artifact's success does **not** promote the host to `http`: a download endpoint
+  and a documentation section have different rules, and confirming one does not confirm the
+  other. Under `fetch: browser` the pipeline still routes artifacts to the browser pool
+  (`route`), so they occupy a browser worker even though they no longer start a browser —
+  the pool width is the declared axis, and the sticky state is per engine.
+- without a render in the same fetch (sticky `http`), the interstitial gate has no baseline,
+  so a body shorter than `INTERSTITIAL_MIN_RENDER_BYTES` (512 B) counts as **unverified** and
+  costs a warm: a JS stub looks exactly like that, and correctness beats economy (A1).
+
+The state lives in the engine, and an engine belongs to a thread (Playwright sync-API), so
+"one warm" means "one per thread-engine", not "one per run": with `browser_workers > 1` each
+worker warms a host itself. The observation is published as **numbers** by
+`BrowserCrawler.hybrid_state()` (mode, `warms`, `http_fetches`, `challenges`, `artifacts`,
+`cookies`) and logged at `close()` — provenance, not identity, since `crawl_strategy` is
+already a contract field. No package declared `hybrid` before the change (all profiles and
+`run.yaml` say `honest`), so no existing run's semantics moved; the adapter version string
+is bumped instead, which is provenance.
+
 ## 7. Gates G1–G4
 
 - **What blocks a run.** `NON_BLOCKING_GATES = {G1, G2, G3}` (`core/pipeline/gates.py:79`,

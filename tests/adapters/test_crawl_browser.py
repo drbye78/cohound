@@ -19,6 +19,7 @@ import pytest
 
 from core.adapters.crawl_browser import (
     CHALLENGE_STATUSES,
+    FINAL_URL_HEADER,
     HYBRID_MAX_ATTEMPTS,
     BrowserCrawler,
 )
@@ -1006,3 +1007,160 @@ def test_honest_render_cannot_observe_http_status() -> None:
     assert isinstance(page, RawPage)
     assert page.status_code is None  # статус ответа не наблюдаем в рендере
     assert page.fetch_mode is FetchMode.BROWSER
+
+
+# Липкий hybrid: браузер платит за ХОСТ, а не за URL
+# ---------------------------------------------------------------------------
+
+#: Тело страницы, проходящее порог «не мелкое» (``INTERSTITIAL_MIN_RENDER_BYTES``).
+PAGE = b"<html>" + b"x" * 2000 + b"</html>"
+
+def test_hybrid_sticky_second_url_skips_browser() -> None:
+    """Хост подтвердил лёгкий GET ⇒ следующий URL идёт без браузерной навигации."""
+    backend = FakeBackend(content=PAGE, cookies=[COOKIE])
+    getter = RecordingHttpGet([(200, PAGE, {"Content-Type": "text/html"})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    first = crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+    second = crawler.fetch("https://example.com/other", _plan(CrawlStrategy.HYBRID))
+
+    assert first.fetch_mode is FetchMode.HTTP
+    assert second.fetch_mode is FetchMode.HTTP
+    # Прогрев ровно один на хост: второй URL браузера не открывал.
+    assert len(backend.sessions) == 1
+    assert len(getter.calls) == 2
+    # cookie-мост переиспользован из состояния хоста, а не снят заново.
+    assert getter.calls[1][2] == [COOKIE]
+    state = crawler.hybrid_state()["example.com"]
+    assert state["mode"] == "http"
+    assert state["warms"] == 1
+    assert state["http_fetches"] == 2
+
+def test_hybrid_sticky_challenge_demotes_and_rewarms() -> None:
+    """Челлендж снимает подтверждение: один пере-прогрев, затем лёгкий GET снова работает."""
+    backend = FakeBackend(content=PAGE, cookies=[COOKIE])
+    getter = RecordingHttpGet(
+        [
+            (200, PAGE, {"Content-Type": "text/html"}),
+            (403, b"denied", {}),
+            (200, PAGE, {"Content-Type": "text/html"}),
+        ]
+    )
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+    page = crawler.fetch("https://example.com/other", _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.HTTP
+    assert page.content == PAGE
+    assert len(backend.sessions) == 2  # прогрев + пере-прогрев по челленджу
+    state = crawler.hybrid_state()["example.com"]
+    assert state["challenges"] == 1
+    assert state["mode"] == "http"
+
+def test_hybrid_artifact_never_navigates_browser() -> None:
+    """Документ — не страница: лёгкий GET сразу, браузер не открывается вовсе."""
+    pdf_url = "https://example.com/doc.pdf"
+    backend = FakeBackend(content=b"<html>pdf viewer</html>", cookies=[COOKIE])
+    getter = RecordingHttpGet(
+        [(200, b"%PDF-1.7 body", {"Content-Type": "application/pdf"})]
+    )
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    page = crawler.fetch(pdf_url, _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.HTTP
+    assert page.content == b"%PDF-1.7 body"
+    assert backend.sessions == []  # ни одной браузерной навигации
+    state = crawler.hybrid_state()["example.com"]
+    assert state["artifacts"] == 1
+    assert state["artifacts_ok"] is True
+    # Успех артефакта НЕ подтверждает страницы: у раздела правила другие.
+    assert state["mode"] == "unknown"
+
+def test_hybrid_artifact_html_answer_escalates_to_warm() -> None:
+    """200 с разметкой вместо файла — заглушка/логин ⇒ прогрев и повтор с cookie."""
+    pdf_url = "https://example.com/doc.pdf"
+    backend = FakeBackend(content=b"<html>pdf viewer</html>", cookies=[COOKIE])
+    getter = RecordingHttpGet(
+        [
+            (200, b"<!DOCTYPE html><html>login</html>", {"Content-Type": "text/html"}),
+            (200, b"%PDF-1.7 body", {"Content-Type": "application/pdf"}),
+        ]
+    )
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    page = crawler.fetch(pdf_url, _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.HTTP
+    assert page.content == b"%PDF-1.7 body"
+    assert len(backend.sessions) == 1
+    # Повтор пошёл уже с cookie-мостом.
+    assert getter.calls[1][2] == [COOKIE]
+
+def test_hybrid_second_artifact_skips_warm() -> None:
+    """Хост с сотней файлов не платит прогрев за каждый: подтверждение по классу."""
+    backend = FakeBackend(content=b"<html>pdf viewer</html>", cookies=[COOKIE])
+    getter = RecordingHttpGet(
+        [(200, b"%PDF-1.7 body", {"Content-Type": "application/pdf"})]
+    )
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        page = crawler.fetch(f"https://example.com/{name}", _plan(CrawlStrategy.HYBRID))
+        assert page.fetch_mode is FetchMode.HTTP
+
+    assert backend.sessions == []
+    state = crawler.hybrid_state()["example.com"]
+    assert state["artifacts"] == 3
+    assert state["warms"] == 0
+
+def test_hybrid_sticky_small_body_is_verified_by_warm() -> None:
+    """Без эталона мелкое тело не отличить от JS-заглушки ⇒ проверяем прогревом."""
+    backend = FakeBackend(content=b"<html>rendered</html>", cookies=[COOKIE])
+    getter = RecordingHttpGet(
+        [
+            (200, PAGE, {"Content-Type": "text/html"}),
+            (200, b"<html>tiny</html>", {"Content-Type": "text/html"}),
+        ]
+    )
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+    page = crawler.fetch("https://example.com/tiny", _plan(CrawlStrategy.HYBRID))
+
+    assert page.fetch_mode is FetchMode.HTTP
+    # Эталон рендера неинформативен (< порога) ⇒ гейт не применяется, но прогрев был.
+    assert len(backend.sessions) == 2
+
+def test_hybrid_sticky_url_comes_from_own_get() -> None:
+    """В липком режиме финальный URL известен из собственного GET, а не из рендера."""
+    backend = FakeBackend(content=PAGE, cookies=[COOKIE])
+    getter = RecordingHttpGet(
+        [
+            (200, PAGE, {"Content-Type": "text/html"}),
+            (
+                200,
+                PAGE,
+                {"Content-Type": "text/html", FINAL_URL_HEADER: "https://example.com/final"},
+            ),
+        ]
+    )
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+
+    crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+    page = crawler.fetch("https://example.com/other", _plan(CrawlStrategy.HYBRID))
+
+    assert page.url == "https://example.com/final"
+
+def test_hybrid_close_publishes_and_clears_state() -> None:
+    """``close`` печатает наблюдение и очищает состояние хостов; повторный close — no-op."""
+    backend = FakeBackend(content=PAGE, cookies=[COOKIE])
+    getter = RecordingHttpGet([(200, PAGE, {"Content-Type": "text/html"})])
+    crawler = BrowserCrawler(backend=backend, http_get=getter)
+    crawler.fetch(URL, _plan(CrawlStrategy.HYBRID))
+
+    crawler.close()
+    assert crawler.hybrid_state() == {}
+    crawler.close()
+    assert backend.close_calls == 1

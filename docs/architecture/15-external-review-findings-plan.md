@@ -136,7 +136,7 @@ mypy: домен 0 ошибок + baseline 121, selfcheck 111/111, pytest 4801 p
 | R7 | `final_url` из edge не валидируется | ПОДТВЕРЖДЕНО | `remote_crawl_executor.py:319` (`validate_url(url)`) vs `:358` (`final_url` без проверки); `final_url` становится `RawPage.url` (`core/pipeline/corpus_drain.py:964`) | нет: тест утверждает **деградацию** malformed `final_url` (`test_remote_crawl_executor.py:548-556`) | Б | P3 |
 | R8 | robots всегда по `https://`, http-фолбэка нет | ПОДТВЕРЖДЕНО | `core/edge/crawler_factory.py:57`, `core/cli/wiring.py:1553`, `core/cli/package/commands.py:1763` | нет ни одного | Г | P4 |
 | R9 | сайдкар меты кэша: легаси-запись теряет статус/тип | ПОДТВЕРЖДЕНО | `crawl_http.py:386` (ключ по запрошенному URL), `:248-262`, `:598-608` | легаси-путь исполняется, потеря не утверждается (`test_crawl_http.py:351-360`) | Г | P4 |
-| R10 | редиректы не валидируются по-хопово | ПОДТВЕРЖДЕНО → **исправлено** (per-hop в http/scrapy/edge + `util/redirects` для SERP-адаптеров и реестров); браузер был сделан правильно | `crawl_http.py:244`,`:322`, `crawl_scrapy.py:1137`; правильно: `crawl_browser.py:300`,`:840` + тесты `:624/637/655` | нет для http/scrapy | Б | **P3** |
+| R10 | редиректы не валидируются по-хопово | ПОДТВЕРЖДЕНО → **исправлено** (per-hop в http/scrapy/edge + `util/redirects` для SERP-адаптеров и реестров); браузер был сделан правильно | `crawl_http.py:244`,`:322`, `crawl_scrapy.py:1137`; правильно: `crawl_browser.py:382`,`:1147` + тесты `:633/643/656` | нет для http/scrapy | Б | **P3** |
 
 **Статус на 2026-10-28, уточнён 08.11.2026.** ✅ R1, R2, R5, R6, R7, R8, R9, R10 · ➖ R3, R4.
 
