@@ -282,6 +282,99 @@ def test_passport_urls_empty_when_no_domains() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Корни сателлитов в деривации (§4.3)
+# ---------------------------------------------------------------------------
+
+def _satellite(state: str, domains: list[str], role: str = "backup") -> dict[str, Any]:
+    """Минимальный сателлит в установленном/черновом состоянии."""
+    data: dict[str, Any] = {
+        "role": role,
+        "state": state,
+        "component": "Backup",
+        "origin": "in_house",
+        "relationship": "bundled",
+        "evidence_state": "verified",
+        "relationship_evidence": {
+            "url": "https://example.com/",
+            "quote": "Backup (бэкапы)",
+        },
+        "doc_domains": domains,
+    }
+    return data
+
+
+def test_passport_urls_include_established_satellite_roots_after_product() -> None:
+    """Корни установленного сателлита идут **после** ``doc_domains`` продукта.
+
+    Порядок — объявленный приоритет обхода: собственная документация продукта, затем
+    компоненты поставки. Обратный порядок отдал бы бюджет продукта компоненту.
+    """
+    passport = Passport.model_validate(
+        _base(
+            doc_domains=["product.example/docs"],
+            satellites=[_satellite("approved", ["sat.example/docs"])],
+        )
+    )
+    assert passport_urls(passport) == [
+        "https://product.example/docs/",
+        "https://sat.example/docs/",
+    ]
+
+
+def test_passport_urls_skip_draft_satellite_roots() -> None:
+    """Корень ``draft``-сателлита в корпус не входит: это кандидат разведки, не материал."""
+    passport = Passport.model_validate(
+        _base(
+            doc_domains=["product.example/docs"],
+            satellites=[_satellite("draft", ["sat.example/docs"])],
+        )
+    )
+    assert passport_urls(passport) == ["https://product.example/docs/"]
+
+
+def test_passport_urls_dedupe_product_and_satellite_root() -> None:
+    """Один и тот же корень у продукта и сателлита объявляется один раз (первое вхождение).
+
+    Иначе ``corpus_urls.yaml`` получил бы дубль, а ``seeds_digest`` — зависимость от того,
+    где корень записан.
+    """
+    passport = Passport.model_validate(
+        _base(
+            doc_domains=["shared.example/docs"],
+            satellites=[_satellite("approved", ["shared.example/docs", "sat.example/"])],
+        )
+    )
+    assert passport_urls(passport) == [
+        "https://shared.example/docs/",
+        "https://sat.example/",
+    ]
+
+
+def test_satellite_not_found_cannot_declare_roots() -> None:
+    """``not_found`` + корни — противоречие: состояние говорит, что сателлита не нашли."""
+    data = _satellite("not_found", ["sat.example/docs"])
+    data.pop("component")
+    data.pop("origin")
+    data.pop("relationship")
+    data.pop("evidence_state")
+    data.pop("relationship_evidence")
+    with pytest.raises(ValueError, match="not_found"):
+        Passport.model_validate(_base(satellites=[data]))
+
+
+def test_satellite_roots_reject_empty_and_duplicate_entries() -> None:
+    """Пустая строка и дубликат корня — ошибка объявления, а не «почти верно»."""
+    with pytest.raises(ValueError):
+        Passport.model_validate(
+            _base(satellites=[_satellite("approved", ["sat.example/docs", "  "])])
+        )
+    with pytest.raises(ValueError):
+        Passport.model_validate(
+            _base(satellites=[_satellite("approved", ["sat.example/docs", "sat.example/docs"])])
+        )
+
+
+# ---------------------------------------------------------------------------
 # Детерминизм
 # ---------------------------------------------------------------------------
 

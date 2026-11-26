@@ -51,6 +51,9 @@ from core.cli.package.commands import (
     cmd_package_role_remove,
     cmd_package_role_update,
     cmd_package_run_show,
+    cmd_package_satellites_discover,
+    cmd_package_satellites_list,
+    cmd_package_satellites_roots,
     cmd_package_scout,
     cmd_package_seeds_add,
     cmd_package_seeds_disable,
@@ -751,6 +754,75 @@ def add_package_parser(subparsers: Any) -> None:
     p_add.add_argument("--limit", type=int, default=10, help="лимит результатов SERP на запрос")
     p_add.add_argument("--max-pages", type=int, default=5, help="потолок фетчей разведки")
     p_add.set_defaults(handler=cmd_package_add_product)
+
+    # satellites: объявленные сателлиты → разведка корней → объявление ---------- #
+    # Группа отвечает на вопрос «что у продукта есть кроме него самого»: список
+    # сателлитов (наблюдение), их корни краула (наблюдение + объявление человеком).
+    p_sat = pkg.add_parser(
+        "satellites",
+        help="сателлиты продукта: список, разведка корней и их объявление в паспорте",
+    )
+    sat = p_sat.add_subparsers(dest="satellites_command", metavar="ДЕЙСТВИЕ")
+
+    p_sat_ls = sat.add_parser(
+        "list", help="объявленные сателлиты и их корни, сверка с corpus_urls.yaml (read-only)"
+    )
+    _add_read_common(p_sat_ls)
+    p_sat_ls.add_argument("--product", required=True, help="product_id (паспорт в passports/)")
+    p_sat_ls.add_argument(
+        "--passports-dir", default=None, help="каталог паспортов (дефолт — resolved paths.passports)"
+    )
+    p_sat_ls.set_defaults(handler=cmd_package_satellites_list)
+
+    p_sat_disc = sat.add_parser(
+        "discover",
+        help="разведка списка сателлитов по документации продукта (LLM; паспорт не правится)",
+    )
+    _add_op_common(p_sat_disc, dry_run=False)
+    p_sat_disc.add_argument("--product", required=True, help="product_id (паспорт в passports/)")
+    p_sat_disc.add_argument(
+        "--passports-dir", default=None, help="каталог паспортов (дефолт — resolved paths.passports)"
+    )
+    p_sat_disc.add_argument(
+        "--max-pages", type=int, default=4, help="сколько страниц области продукта смотреть"
+    )
+    p_sat_disc.add_argument(
+        "--emit-yaml", action="store_true", help="напечатать YAML-блок кандидатов для вставки в паспорт"
+    )
+    p_sat_disc.add_argument("--llm-base-url", default=None, help="endpoint разведки (иначе env)")
+    p_sat_disc.add_argument("--llm-model", default=None, help="модель разведки (иначе env)")
+    p_sat_disc.add_argument("--llm-decoder", default=None, help="декодер разведки (иначе env)")
+    p_sat_disc.add_argument("--llm-slot", default=None, help="слот deploy.llm для разведки")
+    p_sat_disc.set_defaults(handler=cmd_package_satellites_discover)
+
+    p_sat_roots = sat.add_parser(
+        "roots",
+        help="разведка корней сателлитов и объявление их в паспорте (--apply требует --actor)",
+    )
+    _add_op_common(p_sat_roots, dry_run=False)
+    p_sat_roots.add_argument("--product", required=True, help="product_id (паспорт в passports/)")
+    p_sat_roots.add_argument(
+        "--passports-dir", default=None, help="каталог паспортов (дефолт — resolved paths.passports)"
+    )
+    p_sat_roots.add_argument(
+        "--role", action="append", default=None, help="только эти роли сателлитов (повторяемо)"
+    )
+    p_sat_roots.add_argument(
+        "--sitemap",
+        action="append",
+        default=None,
+        metavar="ROLE=URL",
+        help="объявленная карта сайта сателлита (усиливает кандидатов; повторяемо)",
+    )
+    p_sat_roots.add_argument(
+        "--out",
+        default=None,
+        help="куда записать YAML плана разведки (наблюдение; паспорт при этом не меняется)",
+    )
+    p_sat_roots.add_argument(
+        "--apply", action="store_true", help="записать однозначные корни в паспорт (требует --actor)"
+    )
+    p_sat_roots.set_defaults(handler=cmd_package_satellites_roots)
 
     # index-gc (прунинг композиций по run DB; dry-run по умолчанию) ---------- #
     p_gc = pkg.add_parser(

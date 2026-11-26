@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,7 +18,13 @@ import yaml
 
 from core.adapters.llm_discovery import DiscoveryLLM
 from core.config.domain_profiles import load_domain_profiles
-from core.domain.enums import CrawlStrategy, ExtractionRoute, FetchMode
+from core.domain.enums import (
+    CrawlStrategy,
+    ExtractionRoute,
+    FetchMode,
+    SatelliteState,
+)
+from core.domain.models import Citation, Passport, Satellite
 from core.pipeline.crawl_probe import (
     ProbeConfidence,
     ProbeKeyStatus,
@@ -30,6 +37,7 @@ from core.pipeline.package_add_product import (
     DiscoveredSite,
     _derive_sites,
     _profile_for_verdict,
+    _site_role,
     _site_seed_url,
     _sitemap_budget,
     apply_add_product,
@@ -624,6 +632,81 @@ def test_plan_seeds_from_all_sites_and_hint(tmp_path: Path) -> None:
     assert by_url["https://acme-docs.test/"]["profile_key"] == "acme-docs.test"
     assert plan.onboarding_state.value == "ready"
 
+
+def test_satellite_host_seed_gets_satellite_role() -> None:
+    """Хост объявленного сателлита — ``satellite``, а не ``primary``.
+
+    Роль — не косметика: ``primary`` говорит «это сам продукт», а материал сателлита
+    принадлежит компоненту поставки. Исключение I17 (свидетельство сателлита допускает
+    чужой хост) обязано быть видно в seed-плане, иначе аудит онбординга покажет чужой
+    домен без причины.
+    """
+    site = DiscoveredSite(
+        key="backup.example", urls=["https://backup.example/docs"], reason="satellite"
+    )
+    assert _site_role(site).value == "primary"
+    assert (
+        _site_role(site, satellite_hosts={"backup.example"}).value == "satellite"
+    )
+    # Документационный хост сателлита остаётся ``docs``: принадлежность видна в ключе,
+    # а роль описывает тип материала.
+    docs_site = DiscoveredSite(
+        key="docs.backup.example", urls=["https://docs.backup.example/"], reason="satellite"
+    )
+    assert _site_role(docs_site, satellite_hosts={"docs.backup.example"}).value == "docs"
+
+def test_declared_satellite_root_becomes_satellite_seed(tmp_path: Path) -> None:
+    """Корень объявленного сателлита входит в seed-набор с ролью ``satellite``.
+
+    Сквозной путь одного объявления: паспорт объявляет ``satellites[].doc_domains`` →
+    хост проходит фильтр вендорского домена (исключение I17 — свидетельство сателлита) →
+    сайт получает роль ``satellite`` → seed попадает в план. Без любой из трёх частей
+    объявленный корень молча выпал бы из корпуса, а паспорт утверждал бы обратное.
+    """
+    pkg = valid_package(tmp_path)
+    passport = Passport(
+        product_id="acme",
+        canonical_name=PRODUCT,
+        vendor="Acme",
+        jurisdiction="RU",
+        doc_domains=["acme.test"],
+        satellites=[
+            Satellite(
+                role="backup",
+                state=SatelliteState.APPROVED,
+                component="Backup",
+                origin="in_house",
+                relationship="bundled",
+                evidence_state="verified",
+                relationship_evidence=Citation(
+                    url="https://acme.test/", quote="Backup (бэкапы)"
+                ),
+                doc_domains=["backup.acme.test"],
+            )
+        ],
+        snapshot_date="2026-06-01",  # type: ignore[arg-type]
+    )
+    report = SimpleNamespace(
+        ok=True, passport=passport, needs_human=[], fetched=[], candidates_json={}
+    )
+    plan = plan_add_product(
+        pkg,
+        PRODUCT,
+        url=START,
+        reason="аналог (тест)",
+        discovery_llm=_llm(),
+        crawler=_crawler(START, DOCS),
+        extractor=FakeExtractor(),
+        search=_serp(DOCS),
+        probe_ports=_ports(),
+        today="2026-06-01",
+        scout=lambda **_kwargs: report,
+    )
+    by_url = {seed["normalized_url"]: seed for seed in plan.seeds}
+    assert "https://backup.acme.test/" in by_url
+    assert by_url["https://backup.acme.test/"]["role"] == "satellite"
+    # Сателлит не подменяет продукт: его seed не помечен как ``add_product``.
+    assert by_url["https://backup.acme.test/"]["source"] == "discovery"
 
 def test_plan_seeds_single_valid_seed_warns(tmp_path: Path) -> None:
     """Discovery ничего не нашёл → один seed + warning ``single_seed``."""

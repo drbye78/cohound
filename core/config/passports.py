@@ -36,11 +36,14 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from core.domain.enums import SatelliteState
 from core.domain.models import Passport
 from core.util.hashing import short_hash
 
 __all__ = [
+    "ESTABLISHED_SATELLITE_STATES",
     "PassportLoadError",
+    "domain_to_url",
     "latest_passport_path",
     "load_passport",
     "load_passports",
@@ -179,23 +182,47 @@ def load_passports(passports_dir: str | Path) -> dict[str, Passport]:
 # ---------------------------------------------------------------------------
 
 
+#: Состояния сателлита, чьи корни попадают в корпус. ``draft``/``not_found`` — нет:
+#: корень, выведенный разведкой, это кандидат, а не объявленный материал (A3, I6/I7).
+ESTABLISHED_SATELLITE_STATES = frozenset(
+    {SatelliteState.APPROVED, SatelliteState.EDITED_BY_HUMAN}
+)
+
+
+def domain_to_url(raw_domain: Any) -> str | None:
+    """Домен/префикс паспорта → кандидатный URL (``None`` для пустой записи)."""
+    raw = str(raw_domain).strip()
+    if not raw:
+        return None
+    return raw if _SCHEME_PREFIX.match(raw) else f"https://{raw.strip('/')}/"
+
+
 def passport_urls(passport: Passport) -> list[str]:
-    """Выводит **кандидатные** базовые URL из ``passport.doc_domains``.
+    """Выводит **кандидатные** базовые URL из паспорта: продукт, затем сателлиты.
 
     Это именно кандидаты для последующего обхода: они **не фетчатся**, **не являются
     evidence** и не проходят I19 (внешний контент становится evidence только после
     ``corpus_raw`` → hash → index). Пути не достраиваются: схема-less запись получает
     лишь ``https://`` и завершающий ``/``; запись со схемой сохраняется как есть.
-    Порядок — как в ``doc_domains``; дубликаты схлопываются (первое вхождение).
+
+    **Порядок = объявленный приоритет обхода**: сначала ``doc_domains`` продукта (это его
+    собственная документация), затем корни сателлитов в порядке списка ``satellites``.
+    Сателлит даёт корни только в установленном состоянии (:data:`ESTABLISHED_SATELLITE_STATES`)
+    — иначе черновик разведки молча расширил бы корпус. Дубликаты схлопываются (первое
+    вхождение): один и тот же корень может быть объявлен и продуктом, и сателлитом.
     """
     urls: list[str] = []
     for domain in passport.doc_domains:
-        raw = str(domain).strip()
-        if not raw:
-            continue
-        url = raw if _SCHEME_PREFIX.match(raw) else f"https://{raw.strip('/')}/"
-        if url not in urls:
+        url = domain_to_url(domain)
+        if url is not None and url not in urls:
             urls.append(url)
+    for satellite in passport.satellites:
+        if satellite.state not in ESTABLISHED_SATELLITE_STATES:
+            continue
+        for domain in satellite.doc_domains:
+            url = domain_to_url(domain)
+            if url is not None and url not in urls:
+                urls.append(url)
     return urls
 
 

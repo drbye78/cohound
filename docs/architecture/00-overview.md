@@ -318,6 +318,8 @@ core/
                run_identity.py eval_cache.py extract_cache.py onboarding.py
                package_{io,admin,discovery,candidates,scout}.py package_add_product.py
                passport_scout.py scout_common.py templates/*.txt
+               satellite_discovery.py satellite_probe.py satellite_roots.py
+               passport_patch.py
   adapters/    vector_npy.py index_npy.py index_format.py
                lexical_tantivy.py lexical_bm25.py
                embed_local.py embed_model2vec.py llm_local.py llm_discovery.py

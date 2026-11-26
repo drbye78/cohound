@@ -22,7 +22,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -311,7 +311,14 @@ def _is_docs_like_host(host: str) -> bool:
 
 
 def _passport_satellite_hosts(passport: Any) -> set[str]:
-    """Хосты, подтверждённые свидетельством сателлита (сильное исключение I17)."""
+    """Хосты, подтверждённые свидетельством сателлита (сильное исключение I17).
+
+    Три источника, и каждый — объявление, а не догадка: адрес свидетельства связи, домен
+    ``origin`` (если он вообще является доменом) и **объявленные корни** сателлита
+    (``satellites[].doc_domains``). Последнее обязательно: корень сателлита может жить на
+    собственном хосте, и без него фильтр вендорского домена выбросил бы объявленный
+    материал как «чужой» — ровно наоборот смыслу исключения I17.
+    """
     hosts: set[str] = set()
     for satellite in getattr(passport, "satellites", []) or []:
         evidence = getattr(satellite, "relationship_evidence", None)
@@ -324,6 +331,10 @@ def _passport_satellite_hosts(passport: Any) -> set[str]:
         origin_value = getattr(origin, "value", origin)
         if isinstance(origin_value, str) and ("." in origin_value or "://" in origin_value):
             host = _host(_normalize_url(origin_value))
+            if host:
+                hosts.add(host)
+        for domain in getattr(satellite, "doc_domains", []) or []:
+            host = _host(_normalize_url(str(domain)))
             if host:
                 hosts.add(host)
     return hosts
@@ -531,6 +542,15 @@ def _site_urls(
             evidence = getattr(satellite, "relationship_evidence", None)
             if evidence is not None and getattr(evidence, "url", None):
                 raw.append(str(evidence.url))
+            # Объявленные корни сателлита (``satellites[].doc_domains``) — это его
+            # материал, и он обязан попасть в seed-набор, иначе объявление в паспорте
+            # ничего не значит для прогона. Схема-less запись нормализуется как у
+            # ``passport_urls``: ``https://`` и завершающий ``/``.
+            for domain in getattr(satellite, "doc_domains", []) or []:
+                text = str(domain).strip()
+                if not text:
+                    continue
+                raw.append(text if "://" in text else f"https://{text.strip('/')}/")
     raw.extend(str(item.get("url")) for item in serp_candidates if item.get("url"))
 
     normalized: list[str] = []
@@ -759,11 +779,19 @@ def _derive_sites(
 # ---------------------------------------------------------------------------
 
 
-def _site_role(site: DiscoveredSite) -> SeedRole:
-    """Роль сайта: docs-подобный → ``docs``; корпоративный root → ``satellite``.
+def _site_role(
+    site: DiscoveredSite, *, satellite_hosts: Collection[str] = ()
+) -> SeedRole:
+    """Роль сайта: docs-подобный → ``docs``; сателлит → ``satellite``; host-root → ``host_root``.
 
     Явного поля роли в :class:`DiscoveredSite` нет; роль выводится детерминированно из
-    ключа/пути (данные, не догадка о продукте).
+    ключа/пути и **объявленных** хостов сателлитов (данные, не догадка о продукте).
+
+    Сателлит идёт после ``docs``: если материал сателлита лежит на ``docs.``-хосте, он
+    всё равно документация, а принадлежность видна в самом ключе. Проверка нужна потому,
+    что хост сателлита — это **чужой** для продукта материал: объявлять его ``primary``
+    значило бы выдавать компонент поставки за сам продукт (I17: свидетельство сателлита
+    и есть исключение из vendor-фильтра, и роль обязана это назвать).
     """
     key = site.key.lower()
     host, _, path = key.partition("/")
@@ -773,6 +801,8 @@ def _site_role(site: DiscoveredSite) -> SeedRole:
         segment in {"docs", "doc", "documentation"} for segment in path.split("/") if segment
     ):
         return SeedRole.DOCS
+    if host in {str(item).lower() for item in satellite_hosts}:
+        return SeedRole.SATELLITE
     if site.is_root:
         # Корпоративный host-root: seed допустим только потому, что профиль такого
         # ключа несёт ``max_depth: 0`` (09 §7.3.4); роль фиксирует эту границу явно.
@@ -828,6 +858,7 @@ def _plan_seeds(
     profiles: Mapping[str, Mapping[str, Any]],
     warnings: list[str],
     needs_human: list[str],
+    satellite_hosts: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Формирует seed-план из **всех** сайтов + ``resolved_url`` (09 §2.1/§7.6).
 
@@ -857,7 +888,11 @@ def _plan_seeds(
             if resolved_norm is not None and normalized == resolved_norm
             else SeedSource.DISCOVERY
         )
-        role = SeedRole.PRIMARY if source is SeedSource.ADD_PRODUCT else _site_role(site)
+        role = (
+            SeedRole.PRIMARY
+            if source is SeedSource.ADD_PRODUCT
+            else _site_role(site, satellite_hosts=satellite_hosts)
+        )
         planned.setdefault(
             normalized,
             {
@@ -1323,6 +1358,7 @@ def plan_add_product(
         profiles=profiles,
         warnings=warnings,
         needs_human=needs_human,
+        satellite_hosts=satellite_hosts,
     )
     onboarding_state = (
         OnboardingState.READY if seeds else OnboardingState.PENDING_SEEDS

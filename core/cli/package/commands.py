@@ -3128,3 +3128,367 @@ def _validate_package_cli(package_dir: str, passports_dir: str | None) -> OpResu
     оставалась одной строкой и якоря документации не двигались.
     """
     return validate_package(package_dir, passports_dir=passports_dir)
+
+
+# ---------------------------------------------------------------------------
+# Сателлиты: список → разведка корней → объявление (§4.3)
+# ---------------------------------------------------------------------------
+
+def _satellites_passports_dir(args: argparse.Namespace) -> str | None:
+    """Каталог паспортов: ``--passports-dir`` либо resolved ``paths.passports``."""
+    explicit = getattr(args, "passports_dir", None)
+    if explicit:
+        return str(explicit)
+    paths = getattr(args, "paths", None)
+    return str(paths.passports) if paths is not None else None
+
+
+def _satellites_load_passport(args: argparse.Namespace) -> Any:
+    """Загружает паспорт продукта или завершает команду ошибкой ``usage``."""
+    from core.config.passports import load_passport
+
+    passports_dir = _satellites_passports_dir(args)
+    if passports_dir is None:
+        raise CliError(
+            "каталог паспортов не разрешён: задайте --passports-dir или paths.yaml",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    product = str(args.product)
+    passport = _invoke(lambda: load_passport(product, passports_dir))
+    if passport is None:
+        raise CliError(
+            f"паспорт продукта {product!r} не найден в {passports_dir}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    return passport, passports_dir
+
+
+def _satellites_declared_seeds(package_dir: Path) -> dict[str, list[str]]:
+    """Объявленный seed-набор пакета (``sources/corpus_urls.yaml``); нет файла — пусто."""
+    path = package_dir / "sources" / "corpus_urls.yaml"
+    if not path.is_file():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return {str(key): list(value or []) for key, value in data.items()}
+
+
+def cmd_package_satellites_list(args: argparse.Namespace) -> int:
+    """``hound package satellites list`` — объявленные сателлиты и их корни (read-only).
+
+    Показывает то, что **объявлено**, и чем это подтверждено: роль, компонент, состояние,
+    корни и — отдельной строкой — попали ли эти корни в seed-набор пакета. Последнее важно:
+    корень, объявленный в паспорте, но отсутствующий в ``corpus_urls.yaml``, означает, что
+    пакет не пересобран, и прогон его не увидит.
+    """
+    passport, passports_dir = _satellites_load_passport(args)
+    from core.config.passports import ESTABLISHED_SATELLITE_STATES, domain_to_url
+
+    declared_seeds = set(
+        _satellites_declared_seeds(Path(_resolve_package_dir(args))).get(
+            passport.product_id, []
+        )
+    )
+    rows: list[dict[str, Any]] = []
+    for satellite in passport.satellites:
+        # Сверка идёт **по нормализованному URL**, а не по подстроке домена: подстрочный
+        # поиск считал бы корень `…/docs` покрытым корнем `…/docs/copywala`, то есть
+        # отвечал бы не на тот вопрос.
+        roots = [domain_to_url(domain) for domain in satellite.doc_domains]
+        roots = [url for url in roots if url is not None]
+        missing = [url for url in roots if url not in declared_seeds]
+        established = satellite.state in ESTABLISHED_SATELLITE_STATES
+        rows.append(
+            {
+                "role": satellite.role,
+                "component": satellite.component,
+                "state": satellite.state.value,
+                "in_corpus": established,
+                "doc_domains": list(satellite.doc_domains),
+                "seeds": [url for url in roots if url in declared_seeds],
+                "missing_seeds": missing,
+                "seeded": bool(roots) and not missing,
+                "evidence": (
+                    satellite.relationship_evidence.model_dump(mode="json")
+                    if satellite.relationship_evidence is not None
+                    else None
+                ),
+            }
+        )
+    payload = {
+        "product_id": passport.product_id,
+        "version": passport.version,
+        "passports_dir": passports_dir,
+        "satellites": rows,
+        "unseeded_roots": [
+            url for row in rows for url in row["missing_seeds"]
+        ],
+        "unestablished_satellites": [
+            row["role"] for row in rows if not row["in_corpus"]
+        ],
+    }
+    lines = [
+        f"product: {passport.product_id} (version: {passport.version})",
+        f"satellites: {len(rows)}",
+    ]
+    for row in rows:
+        lines.append(
+            f"  {row['role']}: {row['component'] or '-'} [{row['state']}] "
+            f"roots={len(row['doc_domains'])} seeded={'yes' if row['seeded'] else 'no'}"
+            + ("" if row["in_corpus"] else " (не входит в корпус: состояние)")
+        )
+        for domain in row["doc_domains"]:
+            url = domain_to_url(domain)
+            mark = "" if url in declared_seeds else " (не в corpus_urls)"
+            lines.append(f"    {domain}{mark}")
+    if payload["unseeded_roots"]:
+        lines.append(
+            "note: корни без seed'а — пересоберите corpus_urls.yaml "
+            "(правка паспорта и файл разъехались)"
+        )
+    _emit(args, payload, lines)
+    return EXIT_OK
+
+
+def cmd_package_satellites_discover(args: argparse.Namespace) -> int:
+    """``hound package satellites discover`` — разведка **списка** сателлитов продукта.
+
+    Собирает страницы объявленной области продукта, спрашивает LLM и сверяет ответ с
+    паспортом. Пишет review-артефакт ``sources/satellites/{date}-{product}.json`` и
+    **не** правит паспорт: объявление сателлита — авторское решение с цитатой связи, а
+    гипотеза модели без подписи человека объявлением не становится (precision-first,
+    I6/I7). ``--emit-yaml`` печатает готовый блок для вставки в паспорт.
+    """
+    from core.cli.context import _load_package_roles
+    from core.cli.wiring import (
+        WiringError,
+        build_discovery_llm,
+        build_scout_crawler,
+    )
+    from core.pipeline.package_io import atomic_write_text
+    from core.pipeline.satellite_discovery import discover_satellites
+
+    passport, _passports_dir = _satellites_load_passport(args)
+    injected_llm = getattr(args, "discovery_llm", None)
+    if injected_llm is not None:
+        discovery_llm = injected_llm
+    else:
+        try:
+            discovery_llm = build_discovery_llm(
+                base_url=getattr(args, "llm_base_url", None),
+                model_id=getattr(args, "llm_model", None),
+                decoder=getattr(args, "llm_decoder", None),
+                slot=getattr(args, "llm_slot", None),
+                deploy_llm=load_deploy_config(None).llm,
+            )
+        except WiringError as exc:
+            emit_error(args, "llm", concise(exc))
+            return EXIT_USAGE
+    if not _llm_configured(discovery_llm):
+        emit_error(
+            args,
+            "llm",
+            "LLM-разведка не сконфигурирована: задайте --llm-base-url/--llm-model "
+            "или COHOUND_LLM_BASE_URL/COHOUND_LLM_MODEL; кандидаты не выдумываются",
+        )
+        return EXIT_USAGE
+
+    crawler = getattr(args, "crawler", None) or build_scout_crawler()
+    extractor = getattr(args, "extractor", None)
+    if extractor is None:
+        from core.cli.wiring import build_adapters
+
+        extractor = build_adapters(profile="local").extractor
+    report = discover_satellites(
+        passport,
+        crawler=crawler,
+        extractor=extractor,
+        discovery_llm=discovery_llm,
+        roles=_load_package_roles(getattr(args, "package", None)),
+        max_pages=int(getattr(args, "max_pages", 4) or 4),
+    )
+    payload = report.as_dict()
+    payload["dry_run"] = True
+    written: dict[str, str] = {}
+    if not getattr(args, "dry_run", False):
+        snapshot = _dt.date.today().isoformat()
+        out = (
+            Path(_resolve_package_dir(args))
+            / "sources"
+            / "satellites"
+            / f"{snapshot}-{passport.product_id}.json"
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(out, json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+        written["artifact"] = str(out)
+        payload.update(written)
+    lines = [
+        f"product: {passport.product_id}",
+        f"proposed: {len(report.proposed)} confirmed: {len(report.confirmed)} "
+        f"not_rediscovered: {len(report.not_rediscovered)}",
+    ]
+    for satellite in report.proposed:
+        lines.append(f"  NEW {satellite.role}: {satellite.component or '-'}")
+    for row in report.not_rediscovered:
+        lines.append(f"  MISSING {row['role']}: {row['component'] or '-'} (состояние не понижено)")
+    for note in report.needs_human:
+        lines.append(f"needs_human: {note}")
+    for error in report.errors:
+        lines.append(f"error: {error}")
+    if written:
+        lines.append(f"artifact: {written['artifact']}")
+    if getattr(args, "emit_yaml", False) and report.proposed:
+        lines.append("--- yaml (вставить в passports/{product}/…:satellites)")
+        lines.append(
+            yaml.safe_dump(
+                [item.model_dump(mode="json") for item in report.proposed],
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+            )
+        )
+    _emit(args, payload, lines)
+    return EXIT_OK if report.ok else EXIT_ERROR
+
+
+def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
+    """``hound package satellites roots`` — разведка **корней** сателлитов и их объявление.
+
+    Для каждого сателлита с известным адресом (``relationship_evidence.url``) смотрит
+    landing-страницу, извлекает ссылки, читает объявленную карту сайта и решает robots;
+    вывод — кандидаты-корни с числами (:mod:`core.pipeline.satellite_roots`). При
+    неоднозначности (два корня равной глубины с равным покрытием) корень **не**
+    предлагается: выбор — решение человека.
+
+    ``--apply --actor`` пишет однозначные корни в ``satellites[].doc_domains`` паспорта,
+    сохраняя комментарии и всё остальное дословно (:mod:`core.pipeline.passport_patch`).
+    Паспорт после записи валидируется; невалидный — восстанавливается, запись отменяется.
+    """
+    from core.cli.wiring import LOCAL_PROFILE
+    from core.pipeline.package_io import atomic_write_text
+    from core.pipeline.passport_patch import patch_satellite_roots
+    from core.pipeline.satellite_probe import SatelliteProbePorts, probe_satellite_roots
+    from core.pipeline.satellite_roots import render_plan_yaml, roots_by_role
+
+    if getattr(args, "apply", False) and not getattr(args, "actor", None):
+        raise CliError(
+            "--apply требует --actor (человек, изменяющий паспорт)",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    if getattr(args, "profile", LOCAL_PROFILE) != LOCAL_PROFILE:
+        raise CliError(
+            "satellites roots исполняется в профиле local (прямые краулеры); split не поддержан",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    passport, passports_dir = _satellites_load_passport(args)
+    roles_filter = set(getattr(args, "role", None) or [])
+    satellites = [
+        satellite
+        for satellite in passport.satellites
+        if not roles_filter or satellite.role in roles_filter
+    ]
+    if not satellites:
+        raise CliError(
+            f"у продукта {passport.product_id!r} нет сателлитов под фильтр {sorted(roles_filter) or '—'}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    # Экстрактор нужен как мера «страница дала текст» (пригодность landing-страницы):
+    # без него вердикт опирался бы на размер байт, а пустая оболочка выглядела бы живой.
+    extractor = getattr(args, "extractor", None)
+    if extractor is None:
+        from core.cli.wiring import build_adapters
+
+        extractor = build_adapters(profile=LOCAL_PROFILE).extractor
+    package_dir = Path(_resolve_package_dir(args))
+    ports_raw = _add_product_ports(args, package_dir, extractor)
+    ports = SatelliteProbePorts(
+        http=ports_raw.http,
+        extractor=ports_raw.extractor,
+        browser=ports_raw.browser,
+        robots=ports_raw.robots,
+    )
+    sitemap_urls: dict[str, str] = {}
+    for item in getattr(args, "sitemap", None) or []:
+        role, _, url = str(item).partition("=")
+        if role and url:
+            sitemap_urls[role] = url
+    plans = probe_satellite_roots(
+        product_id=passport.product_id,
+        satellites=satellites,
+        ports=ports,
+        sitemap_urls=sitemap_urls,
+    )
+    updates = roots_by_role(plans)
+    payload: dict[str, Any] = {
+        "product_id": passport.product_id,
+        "plans": [plan.as_dict() for plan in plans],
+        "proposed_roots": {role: list(roots) for role, roots in updates.items()},
+        "applied": False,
+    }
+    out_path = getattr(args, "out", None)
+    if out_path:
+        from core.pipeline.package_io import atomic_write_text as _write_text
+
+        target = Path(str(out_path))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_text(target, render_plan_yaml(plans))
+        payload["plan_file"] = str(target)
+    lines = [f"product: {passport.product_id}"]
+    for plan in plans:
+        recommended = plan.recommended()
+        lines.append(
+            f"  {plan.role}: candidates={len(plan.candidates)} "
+            f"recommended={recommended.key if recommended else '—'}"
+            + (" AMBIGUOUS" if plan.ambiguous else "")
+        )
+        for candidate in plan.candidates:
+            lines.append(
+                f"    {candidate.key} docs={candidate.documents} "
+                f"depth={candidate.depth} via={','.join(candidate.evidence)}"
+            )
+        for note in plan.notes:
+            lines.append(f"    note: {note}")
+    if getattr(args, "apply", False) and updates:
+        from core.config.passports import latest_passport_path, load_passport
+
+        path = latest_passport_path(passport.product_id, passports_dir)
+        if path is None:
+            raise CliError("паспортный файл не найден для записи", code="usage", exit_code=EXIT_USAGE)
+        raw = path.read_text(encoding="utf-8")
+        patched = _invoke(lambda: patch_satellite_roots(raw, updates))
+        if patched == raw:
+            lines.append("apply: no-op (корни уже объявлены)")
+        else:
+            atomic_write_text(path, patched)
+            try:
+                _invoke(lambda: load_passport(passport.product_id, passports_dir))
+            except Exception:
+                atomic_write_text(path, raw)
+                raise
+            payload["applied"] = True
+            payload["passport_path"] = str(path)
+            lines.append(f"apply: {path} ({len(updates)} рол.)")
+            snapshot = _dt.date.today().isoformat()
+            artifact = (
+                package_dir / "sources" / "satellite_roots"
+                / f"{snapshot}-{passport.product_id}.json"
+            )
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(
+                artifact,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            )
+            payload["artifact"] = str(artifact)
+            lines.append(f"artifact: {artifact}")
+            lines.append(
+                "next: пересоберите sources/corpus_urls.yaml из паспорта "
+                "(деривация) — иначе прогон корней не увидит"
+            )
+    elif updates:
+        lines.append("dry-run: паспорт не изменён (--apply --actor чтобы объявить)")
+    _emit(args, payload, lines)
+    return EXIT_OK

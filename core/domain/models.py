@@ -630,6 +630,19 @@ class Satellite(BaseModel):
     relationship: Relationship | None = None
     evidence_state: EvidenceState | None = None
     relationship_evidence: Citation | None = None
+    #: Корни краула сателлита — та же семантика, что ``Passport.doc_domains``, но
+    #: принадлежащая **сателлиту**, а не продукту-носителю: его материал лежит в своей
+    #: области (другое дерево портала, другой хост), и объявлять её на продукте значило бы
+    #: утверждать, что это документация самого продукта.
+    #:
+    #: Заполняются разведкой (:mod:`core.pipeline.satellite_roots`) по наблюдению и
+    #: применяются человеком (``hound package satellites roots --apply --actor``). В корпус
+    #: (``passport_urls`` → ``corpus_urls.yaml``) попадают **только** у установленного
+    #: сателлита (``approved``/``edited_by_human``): корень, выведенный разведкой, — это
+    #: кандидат, а не объявленный материал, и молчаливое расширение корпуса запрещено.
+    #: У ``not_found`` корней быть не может по определению — состояние говорит, что
+    #: сателлита не нашли.
+    doc_domains: list[str] = Field(default_factory=list)
     rejected_candidates: list[dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -650,6 +663,25 @@ class Satellite(BaseModel):
                 raise ValueError(f"установленный сателлит: не заданы поля {missing}")
             if self.relationship_evidence is None:
                 raise ValueError("установленный сателлит обязан иметь relationship_evidence")
+        # Корни — объявление области, а не заметка: пустая строка/дубль сделали бы
+        # ``passport_urls`` недетерминированным, а ``seeds_digest`` — зависящим от
+        # порядка вставки.
+        if self.state is SatelliteState.NOT_FOUND and self.doc_domains:
+            raise ValueError(
+                "сателлит not_found не может объявлять корни: состояние говорит, "
+                "что сателлит не найден"
+            )
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for domain in self.doc_domains:
+            value = str(domain).strip()
+            if not value:
+                raise ValueError("сателлит: пустой корень в doc_domains")
+            if value in seen:
+                raise ValueError(f"сателлит: дубликат корня {value!r} в doc_domains")
+            seen.add(value)
+            cleaned.append(value)
+        self.doc_domains = cleaned
         return self
 
 

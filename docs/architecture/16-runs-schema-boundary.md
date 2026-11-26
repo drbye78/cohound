@@ -787,7 +787,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
    `core/pipeline/state_adopt.py:120` — **текст там с 08.11.2026 сам устарел**:
    `runs.run_scope` объявлен (`core/store/sqlite.py:206`) и пишется `persist_manifest`
    (`core/store/sqlite_store.py:1284`); правка в `core/` — вне этой полосы), а `ProductPlanSet`
-   существует (`core/domain/models.py:2990`) и **до границы** не персистился ни разу —
+   существует (`core/domain/models.py:3410`) и **до границы** не персистился ни разу —
    единственное
    использование `core/pipeline/onboarding.py:95-112`. То есть `runs.run_scope` и
    `runs.product_plan_json` — новые записи, а не переезд существующей. ✅ После границы оба

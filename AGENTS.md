@@ -138,7 +138,7 @@ over "refuse above N". Code that silently degrades instead of reporting is the w
 | `core/edge/` | Composition root Z1/DMZ: seam server, auth, audit, seam schema, crawl scheduler, poller, crawler factory, runtime config, launcher. |
 | `scripts/ci.sh` | Single CI entry point (spec §11.6). `scripts/check_doc_anchors.py` gates `path:line` anchors in `docs/`, `README.md`, `AGENTS.md`; `--check-drift BASE` reports anchors whose target line **moved** since `BASE` (a non-empty line at the old address proves nothing — measured 16.11.2026: 55 anchors drifted silently past the non-emptiness check). `scripts/check_runbook.py` gates the user-facing guide the same way anchors gate prose: a command the reader copies must exist. |
 | `tests/selfcheck.py` | Autonomous foundation check (no pytest): dictionary, DDL, invariants, import graph §1, neutrality §1.3. |
-| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`, `baselines.csv`, `cohort.yaml`, `golden.csv`, `domain_profiles.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date); optional `crawl_policy.yaml` (crawl cadence: `defaults`/`products`/`sites` modes + `product_axes` limits — its digest is in `EXECUTION_CONTRACT_FIELDS`, so editing it is a new `run_id`; `ru-pg-dbms` declares `scheduled/24`), `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
+| `packages/{case_id}/` | Category package (data, not code): `package.yaml`, `catalog.csv`, `baselines.csv`, `cohort.yaml`, `golden.csv`, `domain_profiles.yaml`, `run.yaml`; `sources/` — authored inputs (seeds, corpus URLs, render modes, `manual_artifacts.yaml` — declared bytes the crawler did not take, written by `hound artifacts fetch`; its `manual_artifacts_digest` is a contract field, so adding a file is a new `run_id`; `reference_products.yaml` — which upstream lines the profile measures and at which versions; `baseline_facts.csv` — observations about the ancestor's documentation, each with a verbatim quote, text hash and date; `satellite_roots/`, `satellites/` — **наблюдения** разведки сателлитов, из которых объявляется корпус: корни компонента поставки объявляются в паспорте (`satellites[].doc_domains`), а не здесь, и `passport_urls` выводит их в seed-набор после `doc_domains` продукта); optional `crawl_policy.yaml` (crawl cadence: `defaults`/`products`/`sites` modes + `product_axes` limits — its digest is in `EXECUTION_CONTRACT_FIELDS`, so editing it is a new `run_id`; `ru-pg-dbms` declares `scheduled/24`), `crawl_sources.yaml` (feed/channel routing) and `registries/` (package-scoped registry specs — no package has them yet, `_template` included). |
 | `passports/{product_id}/` | Product passports. |
 | `contracts/seam/` | Published JSON schemas of the DMZ seam (`/v1/*`). |
 | `config/deploy.yaml` · `config/paths.example.yaml` | Zone profile (edge) · example directory layout (`COHOUND_HOME`/`COHOUND_*_DIR`). |
@@ -1084,6 +1084,21 @@ invented ceiling), `--max-documents` has no cap; links are always extracted so t
 `hound baseline recon` is deterministic (quote must be a substring of the chunk text) and picks
 candidates through `LexicalSearcherPort` (in-process BM25), not a linear scan; the map is the
 evaluator's verdict and therefore carries its own identity, including the model.
+
+**Сателлиты: список и корни — наблюдение, объявление — решение человека.** Сателлит
+(консоль управления, средство резервного копирования) — это **дополнительный корень
+продукта-владельца**, не отдельный `product_id`: состав корпуса задаёт паспорт
+(`satellites[].doc_domains`), а `passport_urls` выводит его после `doc_domains` продукта и
+только в состоянии `approved`/`edited_by_human` (корень из `draft` — кандидат, а не
+материал). `./hound.py package satellites list --package … --product …` сверяет объявленное
+с seed-набором пакета (расхождение = пакет не пересобран); `satellites discover` разведывает
+**список** по документации продукта (находка без цитаты связи кандидатом не становится;
+объявленное и не найденное не понижается — I6/I7); `satellites roots --out FILE` выводит
+корни из наблюдений (ссылки landing-страницы + объявленная `--sitemap ROLE=URL`), а
+`--apply --actor` пишет однозначные корни в паспорт строчно, сохраняя шапку и комментарии
+(полная перезапись через PyYAML стёрла бы обоснование, а `passports_digest` считается по
+байтам). При неоднозначности (два корня равной глубины с равным покрытием) корень **не**
+предлагается: выбор — решение человека.
 
 Blocked bytes the crawler was not allowed to take (robots, auth) enter the corpus as a
 **declared** input, never by editing `corpus_raw`: `./hound.py artifacts list …` shows the
