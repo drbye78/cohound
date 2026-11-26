@@ -40,12 +40,15 @@ pangolin:
 #
 # База знаний — второй корень: на неё ссылается адрес retrieval-эталона O14
 # (`xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite`).
-# Сателлиты (copywala/kintsugi/gradely) — под browser+honest на том же портале.
+# GraDeLy — раздел портала в области продукта (сателлитом не объявлен).
+# Порядок ниже — деривация `passport_urls`: сначала `doc_domains` продукта, затем корни
+# сателлитов в порядке списка `satellites` (Kintsugi — management_console, CopyWala —
+# backup). Сателлиты — под browser+honest на том же портале.
 - https://platformv.sbertech.ru/docs/public/PSQ/8.3.0/
 - https://pangolin.sbertech.ru/center/knowledge-base/
-- https://pangolin.sbertech.ru/center/docs/copywala/
-- https://pangolin.sbertech.ru/center/docs/kintsugi/
 - https://pangolin.sbertech.ru/center/docs/gradely/
+- https://pangolin.sbertech.ru/center/docs/kintsugi/
+- https://pangolin.sbertech.ru/center/docs/copywala/
 postgrespro:
 # docs — первым (высшая ценность). Учебный корень edu выведен из объявленного корпуса
 # 14.11.2026 (решение владельца, см. шапку файла): раньше он затягивался как «любой

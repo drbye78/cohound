@@ -444,12 +444,16 @@ def test_pangolin_scope_is_announced_edition_only() -> None:
     profiles = load_domain_profiles(ON_DISK_PROFILES)
     cfg = load_run_config(ON_DISK_RUN)
 
+    # Порядок — деривация `passport_urls`: `doc_domains` продукта, затем корни
+    # сателлитов в порядке списка `satellites` (Kintsugi — management_console,
+    # CopyWala — backup). Корни сателлитов объявлены **у сателлитов**, а не у продукта:
+    # это их материал, и объявлять его документацией продукта было бы неверно.
     expected = [
         "https://platformv.sbertech.ru/docs/public/PSQ/8.3.0/",
         "https://pangolin.sbertech.ru/center/knowledge-base/",
-        "https://pangolin.sbertech.ru/center/docs/copywala/",
-        "https://pangolin.sbertech.ru/center/docs/kintsugi/",
         "https://pangolin.sbertech.ru/center/docs/gradely/",
+        "https://pangolin.sbertech.ru/center/docs/kintsugi/",
+        "https://pangolin.sbertech.ru/center/docs/copywala/",
     ]
     # 1. Файл — деривация паспорта, и набор именно такой.
     assert seeds["pangolin"] == expected

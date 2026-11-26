@@ -45,12 +45,13 @@ doc_domains:
   # портал требует browser+honest (антибот) и обойдён лишь на 16 %.
   - "platformv.sbertech.ru/docs/public/PSQ/8.3.0"
   - "pangolin.sbertech.ru/center/knowledge-base"
-  # Сателлиты — только объявленные в `satellites` (Kintsugi — management_console,
-  # CopyWala — backup) плюс GraDeLy. Версии 5/6/7, блог, `cve-policy`, сертификаты и
-  # маркетинговые страницы выведены: это не документация объявленной редакции.
-  - "pangolin.sbertech.ru/center/docs/copywala"
-  - "pangolin.sbertech.ru/center/docs/kintsugi"
+  # GraDeLy остаётся в области продукта: сателлитом он не объявлен, это раздел портала.
+  # Версии 5/6/7, блог, `cve-policy`, сертификаты и маркетинговые страницы выведены:
+  # это не документация объявленной редакции.
   - "pangolin.sbertech.ru/center/docs/gradely"
+  # Корни объявленных сателлитов живут у самих сателлитов (`satellites[].doc_domains`):
+  # это их материал, и `passport_urls` добавляет его к корпусу продукта в порядке списка
+  # `satellites` (сателлит → после продукта).
 satellites:
   # Установлен: подтверждены существование и связь в роли (URL сайта из «Комм.» + фраза).
   - role: management_console
@@ -62,6 +63,8 @@ satellites:
     relationship_evidence:
       url: "https://pangolin.sbertech.ru"
       quote: "Kintsugi (управление)"
+    doc_domains:
+      - pangolin.sbertech.ru/center/docs/kintsugi
   # Установлен: бэкапы с FUSE — роль backup.
   - role: backup
     state: approved
@@ -72,4 +75,6 @@ satellites:
     relationship_evidence:
       url: "https://pangolin.sbertech.ru"
       quote: "CopyWala (бэкапы с FUSE)"
+    doc_domains:
+      - pangolin.sbertech.ru/center/docs/copywala
 snapshot_date: 2026-10-01
