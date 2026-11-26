@@ -27,24 +27,55 @@ digital_q_database:
 - https://database.diasoft.ru/
 - https://database.diasoft.ru/docs/ru/q-database/versiya-180/
 pangolin:
-# Документация — первым: это дерево и есть карта возможностей, а корень, который идёт
-# последним, — корень, который может не выполниться (порядок = приоритет, §13).
-# Версия 8.1.0, а не «текущая 8.3.0»: паспорт объявляет `version: Pangolin 8.1`, и
-# свидетельство о другой редакции не подтверждает утверждение об объявленной
-# (precision-first). Смена редакции — правка паспорта, а не этого файла.
-# Почему не родитель `/docs/public/PSQ/`: его префикс накрывает все 18 версий дерева,
-# бюджет корня делился бы между ними, а содержимое версий дублируется — платили бы за
-# дубликаты до дедупа по content_hash.
-- https://platformv.sbertech.ru/docs/public/PSQ/8.1.0/
-- https://pangolin.sbertech.ru/
-- https://platformv.sbertech.ru/products/rabota-s-dannymi/pangolin/
-- https://sbertech.ru/
-- https://sbertech.ru/documents/platform-v-pangolin-se/
+# ГРАНИЦА СУЖЕНА 26.11.2026 (решение владельца). Было: корень `pangolin.sbertech.ru/` —
+# весь портал, который держал в корпусе ТРИ редакции сразу (`center/docs/7` = 7.3.2,
+# `center/docs/8` = 8.3.0, `PSQ/8.1.0`) плюс блог, `cve-policy` и сертификаты.
+# Теперь — дерево объявленной редакции и только объявленные сателлиты.
+#
+# Редакция поднята 8.1 → 8.3: индекс `…/PSQ/8.3.0/index.html` перечисляет версии до
+# 8.3.0, портал `https://pangolin.sbertech.ru/center/docs/8/` пишет «Релиз продукта
+# 8.3.0». Дерево PSQ отдаёт 200 обычному HTTP, портал `center/docs/8` — тот же текст,
+# но под browser+honest и обойдён на 16 %, поэтому корень — `platformv…/PSQ/8.3.0`.
+# Префикс-родитель `/PSQ/` накрыл бы все 18 опубликованных версий.
+#
+# База знаний — второй корень: на неё ссылается адрес retrieval-эталона O14
+# (`xlsx_007_nalichie_dostupnoi_zakazchikam_bazy_znanii_na_saite`).
+# Сателлиты (copywala/kintsugi/gradely) — под browser+honest на том же портале.
+- https://platformv.sbertech.ru/docs/public/PSQ/8.3.0/
+- https://pangolin.sbertech.ru/center/knowledge-base/
+- https://pangolin.sbertech.ru/center/docs/copywala/
+- https://pangolin.sbertech.ru/center/docs/kintsugi/
+- https://pangolin.sbertech.ru/center/docs/gradely/
 postgrespro:
 # docs — первым (высшая ценность). Учебный корень edu выведен из объявленного корпуса
 # 14.11.2026 (решение владельца, см. шапку файла): раньше он затягивался как «любой
 # поддомен» и съел 664 элемента бюджета корня postgrespro.ru, а docs-корень не начался.
-- https://postgrespro.ru/docs/
+#
+# ГРАНИЦА СУЖЕНА 24.11.2026 (решение владельца): корень `/docs/` — это каталог
+# документации ВСЕХ продуктов вендора, а не документация объявленной редакции.
+# Измерено на прогоне `ru-pg-dbms-e11e04cbb3d9` (обход остановлен на 40 854 документах,
+# 8.05 GB): 166 145 адресов = 9 наборов (`enterprise`, `postgrespro` = Standard,
+# `postgresql`, `shardman`, `ppem`, `otelcol`, `pg_probackup3`, `axe`, `ora2pgpro`,
+# `progate`) × 53 группы (набор, версия) × 3.91 (языковые варианты `?lang=ru|en|ru-en`).
+# Паспорт объявляет `version: Postgres Pro Enterprise 18.4.1` и
+# `edition_assessed: Enterprise / Certified`, поэтому объявленный корпус — дерево этой
+# редакции: `/docs/enterprise/18/`. 91 % скачанного (7 288 из 8 050 MB) приходилось на
+# версии 9.4–17 и на Standard, то есть на редакции, которых паспорт не объявляет.
+# `current` НЕ входит: это алиас, переезжающий на новый мажор при релизе (та же причина,
+# что у корня `postgresql` — `/docs/18/`, а не `/docs/current/`), а сегодня он равен 18.
+# Язык: сайт отдаёт каждую страницу в трёх вариантах, и `?lang=` — отдельный адрес, а не
+# редирект (`content_hash` различается у 99.9 % пар). Оставлен русский: адрес без
+# параметра отдаёт русский текст (измерено: доля кириллицы 0.70–0.83), плюс явный
+# `?lang=ru`. `?lang=en` и `?lang=ru-en` отсекаются осью `exclude_queries` профиля домена
+# (`domain_profiles.yaml`), а не этим файлом: это ось краула, а не граница корня.
+- https://postgrespro.ru/docs/enterprise/18/
+# Деревья сателлитов (решение владельца 24.11.2026): на них опирается retrieval-эталон
+# O14 (ppem/2 — 33 из 132 адресов, pg_probackup3 — 8, ora2pgpro — 3), и `pg_probackup`
+# объявлен сателлитом продукта в паспорте (`role: backup`). Версия — последняя
+# опубликованная, как и у основного дерева. Язык — той же осью `exclude_queries`.
+- https://postgrespro.ru/docs/ppem/2/
+- https://postgrespro.ru/docs/pg_probackup3/3.5/
+- https://postgrespro.ru/docs/ora2pgpro/26/
 - https://postgrespro.ru/products/postgrespro/enterprise/
 - https://postgrespro.ru/
 postgresql:

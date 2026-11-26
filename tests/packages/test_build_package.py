@@ -61,6 +61,7 @@ PROFILE_FIELDS = {
     "max_documents",
     "exclude_paths",
     "exclude_documents",
+    "exclude_queries",
     "document_level",
     "browser_workers",
     "sitemap",
@@ -277,18 +278,26 @@ def test_run_crawl_axes_accepted_by_strict_loader() -> None:
 @pytest.mark.parametrize(
     ("url", "max_depth", "max_documents", "document_level", "extract_workers"),
     [
-        # Дерево документации: sitemap 404. Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд,
-        # `--crawl-only --run-id recon-pg_docs`): 18 939 документов, `truncated: false`;
-        # 800 усекало корень в 23 раза (прогон `2a5b51af5778`: 949 + `max_documents`).
-        ("https://postgrespro.ru/docs/16/", 8, 20000, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
+        # Дерево объявленной редакции. ГРАНИЦА СУЖЕНА 24.11.2026 (решение владельца):
+        # было `postgrespro.ru/docs` — каталог ВСЕХ продуктов вендора (9 наборов ×
+        # 53 группы набор/версия × 3.91 языковых варианта = 166 145 адресов; обход
+        # `ru-pg-dbms-e11e04cbb3d9` остановлен на 40 854 документах / 8.05 GB, из них
+        # 91 % — версии 9.4–17 и Standard, которых паспорт не объявляет).
+        # `max_documents` теперь **не объявлен**: размер дерева редакции не измерен ни
+        # разу, а прежние 20 000 относились к корню `/docs/`. Потолок здесь был бы
+        # выбором приоритета, а не заявкой на размер — исчерпание измеряется обходом.
+        # Язык — ось `exclude_queries` (см. `test_postgrespro_docs_root_keeps_russian_only`).
+        ("https://postgrespro.ru/docs/enterprise/18/", 8, 3000, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Host-ключ портала (и страницы продукта) сохраняет прежний бюджет: path-ключ
         # `/docs` не должен протекать на соседние корни того же хоста. Проба 10.11.2026
         # взяла 3 996 документов и была остановлена хостом (980 × `429` на `/list/*`):
         # 800 — выбор приоритета, не измеренный размер.
         ("https://postgrespro.ru/", 8, 800, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
-        # Статическая нижняя граница корня 3 025 (`/center/docs/7` 2 307 + kintsugi 227 +
-        # copywala 491); живой краул 12.11.2026 не завершён (572 за 40 мин, browser
-        # сериализован) ⇒ 3 500 — выше нижней границы, `truncated: false` не подтверждён.
+        # Ключ обслуживает четыре поддерева портала (с 26.11.2026 host-корня нет, см.
+        # `test_pangolin_scope_is_announced_edition_only`). 3 500 — исторический бюджет
+        # host-корня: статическая нижняя граница 3 025 (`/center/docs/7` 2 307 + kintsugi
+        # 227 + copywala 491), выше любого из четырёх поддеревьев, поэтому ничего не
+        # усекает; точные пределы — `hound crawl drain --apply` после исчерпания.
         ("https://pangolin.sbertech.ru/", 8, 3500, DocumentLevel.LAYOUT_TABLES, RUN_CRAWL_EXTRACT_WORKERS),
         # Host-root мульти-продуктового сайта: discovery запрещён (I17) — только корень.
         # Окно извлечения объявлено (1) — единственный ключ, где ось стоит на профиле:
@@ -366,6 +375,115 @@ def test_resolve_crawl_limits_per_site(
     assert limits.document_level is document_level
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
+
+def test_postgrespro_docs_root_keeps_russian_only() -> None:
+    """Корень документации объявляет русский язык осью `exclude_queries` (site-слой).
+
+    Класс дефекта: сайт отдаёт каждую страницу тремя **отдельными** адресами
+    (`?lang=ru`, `?lang=en`, `?lang=ru-en`), `content_hash` у них разный у 99.9 % пар —
+    это не редирект и не дубль байтов, а множитель ×3.91 к корпусу. `exclude_paths`
+    query-строку не видит (матчит только путь), поэтому нужна отдельная ось.
+    Измерено 24.11.2026 на обходе `ru-pg-dbms-e11e04cbb3d9`: 166 145 адресов при
+    42 517 канонических страницах.
+    """
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+    cfg = load_run_config(ON_DISK_RUN)
+
+    docs = resolve_crawl_limits(
+        "https://postgrespro.ru/docs/enterprise/18/sql-vacuum",
+        app=CrawlConfig(),
+        run=cfg.crawl,
+        profiles=profiles,
+    )
+    assert list(docs.exclude_queries) == ["lang=en", "lang=ru-en"]
+
+    # Та же ось у деревьев сателлитов: их корпус тоже русский.
+    for url in (
+        "https://postgrespro.ru/docs/ppem/2/agent-config-ref",
+        "https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-continuous-wal-archiving",
+        "https://postgrespro.ru/docs/ora2pgpro/26/introduction",
+    ):
+        satellite = resolve_crawl_limits(
+            url, app=CrawlConfig(), run=cfg.crawl, profiles=profiles
+        )
+        assert list(satellite.exclude_queries) == ["lang=en", "lang=ru-en"], url
+
+    # Ось не протекает на соседние корни того же хоста: там объявлено пусто.
+    portal = resolve_crawl_limits(
+        "https://postgrespro.ru/products/postgrespro/enterprise/",
+        app=CrawlConfig(),
+        run=cfg.crawl,
+        profiles=profiles,
+    )
+    assert list(portal.exclude_queries) == []
+
+
+def test_pangolin_scope_is_announced_edition_only() -> None:
+    """Корпус Pangolin = дерево объявленной редакции + объявленные сателлиты.
+
+    Класс дефекта (тот же, что у postgrespro): корнем был весь портал
+    ``pangolin.sbertech.ru``, и в корпус попадали ТРИ редакции сразу — ``center/docs/7``
+    (текст 7.3.2, 321 документ), ``center/docs/8`` (8.3.0, 239) и ``PSQ/8.1.0``
+    (1 154), плюс блог, ``cve-policy`` и сертификаты. Измерено 26.11.2026 по
+    ``state.db`` стенда: **5 053** адреса под ``/center/docs/``. Свидетельство о версии,
+    которой нет в паспорте, не подтверждает утверждение об объявленной редакции
+    (precision-first) и размывает бюджет корня.
+
+    Пин держит четыре вещи, каждая из которых — лазейка, если её убрать:
+    1. состав корней (дерево редакции, база знаний, три сателлита — и ничего больше);
+    2. редакцию в корне дерева (``PSQ/8.3.0``, а не префикс ``PSQ`` — он накрыл бы все
+       18 опубликованных версий);
+    3. оси: дерево PSQ отдаёт 200 обычному HTTP, портал требует browser+honest;
+    4. отсутствие версий 5/6/7 и маркетинга в seed-наборе.
+    """
+    from core.config.passports import load_passports, passport_urls
+    from core.pipeline.fetch_plan import resolve_fetch_plan
+
+    seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
+    passport = load_passports(ROOT / "passports")["pangolin"]
+    profiles = load_domain_profiles(ON_DISK_PROFILES)
+    cfg = load_run_config(ON_DISK_RUN)
+
+    expected = [
+        "https://platformv.sbertech.ru/docs/public/PSQ/8.3.0/",
+        "https://pangolin.sbertech.ru/center/knowledge-base/",
+        "https://pangolin.sbertech.ru/center/docs/copywala/",
+        "https://pangolin.sbertech.ru/center/docs/kintsugi/",
+        "https://pangolin.sbertech.ru/center/docs/gradely/",
+    ]
+    # 1. Файл — деривация паспорта, и набор именно такой.
+    assert seeds["pangolin"] == expected
+    assert passport_urls(passport) == expected, (
+        "corpus_urls — деривация doc_domains паспорта; правка одной стороны без другой "
+        "разъедется при регенерации"
+    )
+    assert "Pangolin 8.3" in passport.version
+
+    # 2–4. Ни одной версии вне объявленной, ни блога, ни маркетинга.
+    for url in expected:
+        assert "/center/docs/5" not in url and "/center/docs/6" not in url, url
+        assert "/center/docs/7" not in url, url
+        assert "/center/docs/8" not in url, url
+        assert "cve-policy" not in url and "/blog" not in url, url
+        assert "rabota-s-dannymi" not in url, url
+    assert "https://pangolin.sbertech.ru/" not in seeds["pangolin"]
+
+    # 3. Оси: дерево PSQ — http (замер 26.11.2026: 200 обычному HTTP), портал — browser.
+    psq = resolve_fetch_plan(expected[0], profiles)
+    assert psq.fetch is FetchMode.HTTP
+    for url in expected[1:]:
+        portal = resolve_fetch_plan(url, profiles)
+        assert portal.fetch is FetchMode.BROWSER, url
+        assert portal.strategy is CrawlStrategy.HONEST, url
+
+    # Бюджет: ни одно из поддеревьев не усекается известным размером из `state.db`
+    # (knowledge-base 135, copywala 344, kintsugi 122, gradely 186; PSQ/8.3.0 не измерен,
+    # унаследован 1 500 от 8.1.0 = 1 155 + 30 %).
+    known = {"knowledge-base": 135, "copywala": 344, "kintsugi": 122, "gradely": 186}
+    for url in expected[1:]:
+        limits = resolve_crawl_limits(url, app=CrawlConfig(), run=cfg.crawl, profiles=profiles)
+        subtree = url.rstrip("/").rsplit("/", 1)[-1]
+        assert limits.max_documents > known[subtree], (url, limits.max_documents)
 
 
 def test_declared_extract_workers_wins_over_derivation() -> None:
@@ -600,14 +718,19 @@ def test_postgrespro_seed_order_is_authored_docs_first_portal_last() -> None:
     снова поставил бы ``postgrespro.ru/`` (портал) перед ``postgrespro.ru/docs/`` —
     ровно дефект живого прогона 22.10.
 
-    Список — из трёх корней: учебный ``edu`` выведен 14.11.2026 (решение владельца,
-    см. ``test_edu_subdomain_is_excluded_from_corpus_and_scope``).
+    Список — из шести корней: учебный ``edu`` выведен 14.11.2026 (решение владельца,
+    см. ``test_edu_subdomain_is_excluded_from_corpus_and_scope``); деревья сателлитов
+    (``ppem``, ``pg_probackup3``, ``ora2pgpro``) добавлены 24.11.2026 вместе с сужением
+    корня документации до объявленной редакции.
     """
     from core.config.passports import load_passports
 
     seeds = yaml.safe_load(CORPUS_URLS.read_text(encoding="utf-8"))
     assert seeds["postgrespro"] == [
-        "https://postgrespro.ru/docs/",
+        "https://postgrespro.ru/docs/enterprise/18/",
+        "https://postgrespro.ru/docs/ppem/2/",
+        "https://postgrespro.ru/docs/pg_probackup3/3.5/",
+        "https://postgrespro.ru/docs/ora2pgpro/26/",
         "https://postgrespro.ru/products/postgrespro/enterprise/",
         "https://postgrespro.ru/",
     ]

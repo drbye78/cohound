@@ -862,8 +862,7 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
 
     **Бюджеты — по измеренному размеру, а не «круглым» числом.** Числа взяты из
     пере-разведки 09–13.11.2026 (`docs/reports/measurements/2026-11-09-root-size-recon.md`):
-    ``postgrespro.ru/docs`` — 18 939 (``truncated: false``) ⇒ 20 000; ``PSQ/8.1.0`` — 1 155
-    ⇒ 1 500; ``docs.tantorlabs.ru`` — 1 207 ⇒ 1 500; ``database.diasoft.ru`` — 1 184 ⇒ 1 500;
+    ``PSQ/8.1.0`` — 1 155 ⇒ 1 500; ``docs.tantorlabs.ru`` — 1 207 ⇒ 1 500; ``database.diasoft.ru`` — 1 184 ⇒ 1 500;
     ``pangolin.sbertech.ru`` — статическая нижняя
     граница 3 025 ⇒ 3 500 (краул не завершён); ``sbertech.ru/documents`` — 27 ``<loc>`` ⇒ 100;
     ``tantorlabs.ru/products/dbms`` — 3 ⇒ 50; ``wiki.astralinux.ru/tandocs`` — 73 ⇒ 150;
@@ -877,6 +876,16 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     владельца, поэтому профиля и бюджета у него больше нет: 2 939 документов / 87 803 чанка
     (34,7 %) при 0 ячеек, опирающихся на его свидетельство. Ключ нельзя оставить «на всякий
     случай» — ключ профиля объявляет хост в scope (``Frontier.host_in_scope``).
+
+    **Корень ``/docs/`` сужен до дерева объявленной редакции 24.11.2026** (решение
+    владельца): ``postgrespro.ru/docs`` — каталог документации ВСЕХ продуктов вендора, а не
+    документация ``edition_assessed: Enterprise / Certified``. Измерено обходом
+    ``ru-pg-dbms-e11e04cbb3d9`` (остановлен на 40 854 документах / 8.05 GB): 166 145
+    адресов = 9 наборов × 53 группы (набор, версия) × 3.91 (языковые варианты ``?lang=``);
+    91 % скачанного — версии 9.4–17 и Standard. Прежние 20 000 измерялись на ``/docs/``
+    целиком и к дереву редакции не относятся, поэтому бюджет нового корня — измеренное +
+    запас: 1 267 канонических страниц = 2 379 адресов после языкового фильтра ⇒ 3 000
+    (``+26 %``). Язык объявляется осью ``exclude_queries`` (``?lang=en``, ``?lang=ru-en``).
 
     Набор ключей совпадает с эталонным ``packages/ru-pg-dbms/domain_profiles.yaml``
     (повторный прогон генератора идемпотентен и не затирает домены).
@@ -999,6 +1008,15 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             # (`fetch` p95 5.7 с) — объявленный интервал его не разгоняет.
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
+        # ГРАНИЦА СУЖЕНА 26.11.2026 (решение владельца). Корнем больше НЕ является весь
+        # портал: объявлены четыре поддерева (`/center/knowledge-base/`,
+        # `/center/docs/{copywala,kintsugi,gradely}/`). Раньше в корпусе оказывались ТРИ
+        # редакции сразу (`center/docs/7` = 7.3.2, `center/docs/8` = 8.3.0) плюс блог,
+        # `cve-policy`, сертификаты — измерено по `state.db`: 5 053 адреса под
+        # `/center/docs/`. Бюджет считается на (продукт, seed-root), а не на ключ профиля,
+        # поэтому 3 500 (исторический бюджет host-корня) не усекает ни одно из четырёх
+        # поддеревьев; точные пределы объявит `hound crawl drain --apply` после исчерпания.
+        #
         # Размер ИЗМЕРЕН статически 13.11.2026 (BFS по `curl`): `/center/docs/7/` — 2 307
         # страниц, `/center/docs/kintsugi/` — 227, `/center/docs/copywala/` — 491; сумма
         # **3 025** — нижняя граница корня. Живой краул 12.11.2026 не завершён: 572
@@ -1043,7 +1061,8 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 8,
             # Бюджет выше измерения, а не «круглое число». Замер 29.10.2026, дерево версии
-            # 8.1.0 (та, что объявлена в паспорте — `version: Pangolin 8.1`): нижняя
+            # 8.1.0 (на тот момент объявлена в паспорте; с 26.11.2026 паспорт объявляет
+            # 8.3 — дерево той же структуры, но НЕ измерено): нижняя
             # граница 1299 страниц = сумма ссылок 15 разделов
             # `common/documents/<sec>/index.html` (about 12, administration-guide 113,
             # architecture-components 254, description-of-functionality 99,
@@ -1069,9 +1088,11 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "strategy": "honest",
             "max_depth": 8,
-            # 300 — как было: под этим префиксом остались маркетинговые страницы продукта
-            # (`/products/rabota-s-dannymi/pangolin/`), объём мал; дерево документации
-            # вынесено на path-ключ выше и свой бюджет не отбирает.
+            # 300 — как было. Корней этого пакета на префиксе нет с 26.11.2026:
+            # маркетинговая страница `/products/rabota-s-dannymi/pangolin/` выведена из
+            # объявленного корпуса (это не документация редакции), дерево документации
+            # живёт на path-ключе выше. Ключ оставлен как оси для адресов, которые
+            # discovery может встретить на хосте, и как объявление браузерного профиля.
             "max_documents": 300,
             # Sitemap намеренно НЕ задан. Замер 29.10.2026: host-wide sitemap — 816 <loc>,
             # из них под /docs/public/PSQ/ **ноль** (дерево документации в карту не входит)
@@ -1095,17 +1116,61 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         # Дерево документации: sitemap не публикуется (advertised → 404), размер — из TOC.
-        # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд, бюджет 20000): **18 939
-        # документов**, `truncated: false` (`queue_remaining = 0`), 18 912 — HTML дерева.
-        # Прежние 800 усекали корень в 23 раза (прогон `2a5b51af5778`: 949 документов,
-        # `truncated: max_documents`), отсюда 121 ячейка `in_scope_not_reached`
-        # (например `enterprise/18`: живых 1 267, в корпусе 12). 20 000 — выше измерения.
-        # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1.
-        "postgrespro.ru/docs": {
+        # ГРАНИЦА СУЖЕНА 24.11.2026 (решение владельца): было `postgrespro.ru/docs` —
+        # каталог документации ВСЕХ продуктов вендора. Измерено на обходе
+        # `ru-pg-dbms-e11e04cbb3d9` (остановлен на 40 854 документах / 8.05 GB):
+        # 166 145 адресов = 9 наборов × 53 группы (набор, версия) × 3.91 (языковые
+        # варианты `?lang=`). 91 % скачанного — версии 9.4–17 и Standard, то есть
+        # редакции, которых паспорт не объявляет (`edition_assessed: Enterprise /
+        # Certified`, `version: Postgres Pro Enterprise 18.4.1`). Прежний замер
+        # 09.11.2026 (18 939 документов, `truncated: false`, бюджет 20 000) относился к
+        # корню `/docs/`, а не к дереву редакции, поэтому к новому корню не применяется.
+        #
+        # `max_documents` = измеренное + объявленный запас: дерево редакции — 1 267
+        # канонических страниц = 2 379 адресов после языкового фильтра, 3 000 — это +26 %
+        # на страницы, чьи варианты частичный обход не успел обнаружить. Точное значение
+        # объявит `hound crawl drain --apply` после исчерпания корня.
+        #
+        # `exclude_queries` — язык: сайт отдаёт каждую страницу тремя отдельными адресами
+        # (`?lang=ru`, `?lang=en`, `?lang=ru-en`), `content_hash` у них разный у 99.9 % пар.
+        # Оставлен русский: адрес без параметра отдаёт русский текст (доля кириллицы
+        # 0.70–0.83), плюс явный `?lang=ru`. `exclude_paths` query-строку не видит.
+        "postgrespro.ru/docs/enterprise/18": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
-            "max_documents": 20000,
+            "max_documents": 3000,
+            "exclude_queries": ["lang=en", "lang=ru-en"],
+            "rate_limit": {"min_s": 0.05, "max_s": 0.2},
+        },
+        # Деревья сателлитов (решение владельца 24.11.2026): на них опирается
+        # retrieval-эталон O14 — ppem/2 33 из 132 адресов, pg_probackup3 8 (объявленный
+        # сателлит, `role: backup`), ora2pgpro 3. Версия — последняя опубликованная, как и
+        # у основного дерева. Язык — той же осью. `max_documents` = измеренное + запас по
+        # обходу `e11e04cbb3d9` после языкового фильтра: 323 / 105 / 83 адреса ⇒ 500 / 200 /
+        # 150. Точные значения — `hound crawl drain --apply` после исчерпания корней.
+        "postgrespro.ru/docs/ppem/2": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 500,
+            "exclude_queries": ["lang=en", "lang=ru-en"],
+            "rate_limit": {"min_s": 0.05, "max_s": 0.2},
+        },
+        "postgrespro.ru/docs/pg_probackup3/3.5": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 200,
+            "exclude_queries": ["lang=en", "lang=ru-en"],
+            "rate_limit": {"min_s": 0.05, "max_s": 0.2},
+        },
+        "postgrespro.ru/docs/ora2pgpro/26": {
+            "fetch": "http",
+            "extract": "auto",
+            "max_depth": 8,
+            "max_documents": 150,
+            "exclude_queries": ["lang=en", "lang=ru-en"],
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         # Sitemap намеренно НЕ на host-ключе (см. ловушку матчинга в докстринге):
