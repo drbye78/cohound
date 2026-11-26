@@ -268,6 +268,8 @@ def test_serp_rounds_flag_matches_run() -> None:
         ["--max-documents", "42"],
         ["--exclude-document", "*.pdf"],
         ["--exclude-path", "/archive/*"],
+        # Блэклист по query-строке: путь один, вариантов много — множитель корпуса.
+        ["--exclude-query", "lang=en"],
         ["--document-level", "text"],
         ["--pdf-pipeline", "text_layer"],
         ["--host-concurrency", "3"],

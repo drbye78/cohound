@@ -36,12 +36,15 @@ def test_run_parser_exposes_crawl_control_flags() -> None:
             "/tmp/*",
             "--exclude-document",
             "*.pdf",
+            "--exclude-query",
+            "lang=en",
         ]
     )
     assert args.max_depth == 2
     assert args.max_documents == 10
     assert args.exclude_paths == ["/private/*", "/tmp/*"]
     assert args.exclude_documents == ["*.pdf"]
+    assert args.exclude_queries == ["lang=en"]
 
 
 def test_run_parser_rejects_negative_max_depth() -> None:

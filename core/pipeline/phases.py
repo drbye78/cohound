@@ -1056,6 +1056,7 @@ def build_phases(
     drain_max_depth: int | None = None,
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
+    exclude_queries: Sequence[str] | None = None,
     crawl_app: CrawlConfig | None = None,
     node_id: str | None = None,
     document_level: DocumentLevel | None = None,
@@ -1343,6 +1344,8 @@ def build_phases(
             override["exclude_paths"] = list(exclude_paths)
         if exclude_documents:
             override["exclude_documents"] = list(exclude_documents)
+        if exclude_queries:
+            override["exclude_queries"] = list(exclude_queries)
         if document_level is not None:
             override["document_level"] = document_level
         if pdf_pipeline is not None:

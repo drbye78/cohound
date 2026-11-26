@@ -453,7 +453,7 @@ diff, ради которого делается инкрементальнос�
 
   | класс | оси | где ловится |
   |---|---|---|
-  | (а) `CrawlLimits` | `max_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `document_level`, а также `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent`, `document_timeout_s` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
+  | (а) `CrawlLimits` | `max_workers`, `max_depth`, `max_documents`, `exclude_paths`, `exclude_documents`, `exclude_queries`, `document_level`, а также `revalidate_max_documents`, `max_response_bytes`, `max_artifact_bytes`, `attachment_formats`, `archive_max_*`, `archive_descent`, `document_timeout_s` (последние — **только когда заданы явно**) | `crawl_config_digest` — по каждому site-key + `__default__`, т.е. **все слои** (app/run/per-site); плюс индивидуальные `crawl_*` поля run-слоя. Класс — `execution_change` |
   | (а′) расписание экстракции: `extract_workers`, `extract_max_tasks_per_child` | **не** входят в контракт (F0, `11` §2.10): параллелизм извлечения не может изменить состав корпуса — документ уже добыт и ретенирован, чанки — детерминированная функция его текста и уровня. В отличие от `max_workers`, конкурентность fetch взаимодействует с усечением `max_documents` и потому **остаётся** осью контракта | наблюдённый факт: `metrics.json.resources.scheduling` (`source`: `declared`\|`derived`). Резолвнутое значение публикуется, но `run_id` не меняет — иначе выведенное из бюджета хоста окно делало бы `run_id` функцией машины |
   | (б) `crawl.strategy` / `crawl.rate_limit` | `crawl.strategy` — только run-слой (`run.yaml:crawl`), per-site `strategy` идентичность **не** меняет; `crawl.rate_limit` — run-слой **плюс** per-site (site > run): разрешённый темп входит в `crawl_config_digest` (с 07.11.2026), потому что per-site значение перекрывает объявленную ось, а темп решает исход `429`/`5xx` и взаимодействует с усечением `max_documents` | отдельные поля контракта `crawl_strategy`/`crawl_rate_limit` (`core/cli/execution_axes.py`) + ключ `rate_limit` в `CrawlLimits.as_dict()`; класс — `execution_change` |
   | (в) `crawl.robots` | включение/выключение `robots.txt` — **app-слой** (`deploy.yaml:crawl.robots`; в `run.yaml:crawl` поля нет) | входит в `crawl_config_digest` **всегда** (как `max_depth`), класс — `execution_change` (D-5): гейт `robots.txt` решает, какие документы вообще допущены, т.е. это условие измерения, а не рычаг пропускной способности. Пробел закрыт: до правки D-5 ось меняла поведение, но не входила ни в один дайджест |
@@ -518,6 +518,7 @@ crawl:                          # §3.2/D4: дефолты оси стратег
   revalidate_max_documents: null      # опц. (>=1): потолок известных URL ревалидации на продукт
   exclude_paths: ["/private/*"] # опц.: glob блэклиста по пути URL (fnmatchcase)
   exclude_documents: ["*.pdf"]  # опц.: glob блэклиста по basename URL
+  exclude_queries: ["lang=en"]  # опц.: glob блэклиста по query-строке URL (fnmatchcase)
   # --- спуск в контейнеры (P6/B3) — см. §D.1.1 ---
   attachment_formats: [zip, 7z, rar]          # опц.: позитивная вселенная контейнеров
   archive_descent: full                       # опц.: full (спуск исполняется) | plan (только листинг)
@@ -695,9 +696,13 @@ seeds); BFS-обход идёт и локальным путём, и через 
 раундов `round_budget` под executor). `max_documents=0` отвергается на загрузке (`>0`).
 Блэклисты — glob (`fnmatchcase`, case-sensitive): `exclude_paths` по пути URL (паттерн
 принимается и с ведущим `/`, и без — `docs/*` ≡ `/docs/*`, N5), `exclude_documents` по
-basename пути (`*.pdf`); применяются и к seeds, и к обнаруженным ссылкам. **Caveat
-`exclude_documents`:** имя файла, переданное только в query-строке
-(`/download?file=report.pdf`), basename не является и паттерном не ловится.
+basename пути (`*.pdf`), `exclude_queries` по **сырой query-строке** URL
+(`urlsplit(url).query`, без `?`; напр. `lang=en`); применяются и к seeds, и к
+обнаруженным ссылкам. Третья форма снимает прежнюю оговорку: имя файла, переданное
+только в query-строке (`/download?file=report.pdf`), basename не является, но ловится
+паттерном по query. URL без query не матчится ни одним паттерном query-блэклиста.
+Смысл оси: один и тот же путь отдаётся в нескольких вариантах (язык, версия, режим
+отображения) — это множитель корпуса, а не другой документ.
 
 **`document_level` (P5) — уровень извлечения документов.** Ось `crawl.document_level`
 (`off`|`text`|`layout`|`layout_tables`|`full`) едет **той же** цепочкой
@@ -890,7 +895,7 @@ RTX 3050 — 9.94×/11.73×/8.45× на 22/181/665 стр. против одно
 
   Профиль домена — **высший** слой цепочки осей контроля краула (D1/D2): per-site
   `max_workers`/`extract_workers`/`extract_max_tasks_per_child`/`max_depth`/`max_documents`/
-  `revalidate_max_documents`/`exclude_paths`/`exclude_documents`/`document_level`/
+  `revalidate_max_documents`/`exclude_paths`/`exclude_documents`/`exclude_queries`/`document_level`/
   `max_response_bytes`/`max_artifact_bytes`/`attachment_formats`/`archive_*` переопределяют
   run/app-дефолты (`resolve_crawl_limits`). Например,
   `example.org/documents: {fetch: http, max_depth: 1, exclude_documents: ["*.pdf"]}`.
@@ -1149,6 +1154,7 @@ crawl:                         # операционная политика HTTP-
   # archive_descent: full                           # full | plan
   exclude_paths: []            # glob блэклиста по пути URL (fnmatchcase; ведущий "/" опционален)
   exclude_documents: []        # glob блэклиста по basename URL, напр. ["*.pdf"]
+  exclude_queries: []          # glob блэклиста по query-строке URL, напр. ["lang=en"]
   robots: null                 # N1: null=auto (robots при discovery); true/false — явно
   # D9 (план 26): лимиты PDF-документа. Опущены = лимита нет (измеренное состояние корпуса,
   # см. §D.2.2 `product_axes` и замер O31). Объявлять их правильнее на продукте/корне.
@@ -1282,7 +1288,7 @@ path-prefix seed-root к нему не применяется: `/docs/` може
 определение и ловушку `edu.postgrespro.ru` см. §D.2) — поддомен, объявленный только
 родительским ключом профиля, бюджета корня не получает. SSRF-валидация,
 `..`-traversal-guard и robots — тоже без изменений; блэклист оператора
-(`exclude_paths`/`exclude_documents`) побеждает всегда. Обход видим: счётчик + ограниченные
+(`exclude_paths`/`exclude_documents`/`exclude_queries`) побеждает всегда. Обход видим: счётчик + ограниченные
 примеры (`artifacts_outside_prefix`) попадают в провенанс корня рядом с
 `skipped_blacklisted`/`skipped_documents` — молчаливый обход был бы дефектом.
 
@@ -1678,9 +1684,9 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
   (`crawl_policy_digest`), а также `--llm-slot`, `--llm-model`, `--llm-reasoning-effort`
   (`llm_scenarios`), `--retrieval-profile`, `--cutoff-k`, `--serp-rounds` (оси контракта) и
   **все оси краула** `--max-depth`, `--max-documents`, `--exclude-path`, `--exclude-document`,
-  `--document-level`, `--pdf-pipeline`, `--document-timeout`, `--host-concurrency`,
+  `--exclude-query`, `--document-level`, `--pdf-pipeline`, `--document-timeout`, `--host-concurrency`,
   `--extract-backlog` (через `crawl_config_digest`). Инвентарь — `CONTRACT_FLAGS`/
-  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:516`, `core/cli/execution_axes.py:210`);
+  `CRAWL_AXIS_DESTS` (`core/cli/execution_axes.py:620`, `core/cli/execution_axes.py:210`);
   полный список флагов — `hound run --help`. Частичный прогон — **другой прогон**, а не
   resume полного.
 * **Меняют объём работы, но не идентичность:** `--reset` (повторить фазы в обход resume;
@@ -1698,8 +1704,8 @@ onboarding-префлайт (seed-набор, §A.1.1): `--until plan` его **
 
 Оси контроля краула (D1/D2): `--max-depth D` (BFS-обход in-site ссылок; `0` — только seeds,
 дефолт), `--max-documents N` (`>0`; потолок добытых страниц на `(продукт, seed-root)`),
-`--exclude-path GLOB` и `--exclude-document GLOB` (повторяемые glob-блэклисты по пути URL и
-по basename), `--document-level LEVEL`, `--pdf-pipeline {structured,text_layer}`,
+`--exclude-path GLOB`, `--exclude-document GLOB` и `--exclude-query GLOB` (повторяемые
+glob-блэклисты по пути URL, по basename и по query-строке), `--document-level LEVEL`, `--pdf-pipeline {structured,text_layer}`,
 `--document-timeout S`, `--host-concurrency N`, `--extract-backlog MB` — последние четыре
 объявлены в том же инвентаре (`core/cli/execution_axes.py:210`) и входят в
 `crawl_config_digest` **только при объявлении** (необъявленная ось = сегодняшнее поведение). Флаги уточняют **run-слой** поверх `run.yaml:crawl`
@@ -1815,7 +1821,7 @@ CLI-поверхности. Каждая проверка обёрнута в tr
 | 1 | Расщепить `core/schemas.py` → `domain/{enums,models,invariants,r2,anchors}.py` | `tests/selfcheck.py` зелёный | ✅ T1.2 (2026-10-08); монолит удалён `d8d0558` (2026-10-10); гейт — `tests/selfcheck.py:1213` (`_shims_removed`) |
 | 2 | Расщепить `core/db.py` → `store/sqlite.py` (DDL) + `ports/store.py` (контракт) | DDL-тест + триггеры | ✅ T1.3 (2026-10-08); DDL — `core/store/sqlite.py:155`, `SCHEMA_VERSION` — `core/store/sqlite.py:153`; тот же гейт `tests/selfcheck.py:1213` |
 | 3 | Ввести `ports/*` (Protocol) и адаптеры-заглушки | импорт-граф CI (итерация 4) | ✅ W1/T1.1 (2026-10-08, `1fc3d82`): 19 модулей портов (`core/ports/*.py` без `__init__.py`; `core/ports/store.py:1`); граф — `tests/selfcheck.py:1037` (`_import_graph`), вызов `tests/selfcheck.py:375` |
-| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1462` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
+| 4 | Перенести проверки `Cell._enforce_invariants` в `domain/invariants.py` (вызов из Pydantic) | selfcheck | ⬜ не сделано (08.11.2026) — правила **продублированы**, а не перенесены: Pydantic-валидатор `core/domain/models.py:1469` держит проверки inline (92 `raise ValueError` в модуле; импорта `core.domain.invariants` нет — он был бы циклическим), а `core/domain/invariants.py:203` (`check_cell`) лишь **зеркалит** их для pipeline/store/selfcheck. Остаток — один носитель правил вместо двух |
 
 Ранее использовавшиеся transitional re-export-шимы `core.schemas`/`core.db` **удалены**;
 публичный контракт — `core.domain` и `core.store.sqlite` (проверяется

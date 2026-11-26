@@ -857,9 +857,10 @@ class CrawlRunConfig(BaseModel):
     per-host диапазон uniform(min_s, max_s). При отсутствии секции поведение неизменно.
 
     D1/D2: здесь же — run-profile слой осей контроля краула (``max_workers``/``max_depth``/
-    ``max_documents``/``exclude_paths``/``exclude_documents``); ``None`` = «не задано на этом
-    слое» (наследуется application default). Резолв цепочки app < run < site — в
-    :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`. ``max_documents=0`` отвергается.
+    ``max_documents``/``exclude_paths``/``exclude_documents``/``exclude_queries``); ``None`` =
+    «не задано на этом слое» (наследуется application default). Резолв цепочки
+    app < run < site — в :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`.
+    ``max_documents=0`` отвергается.
     """
 
     model_config = _BASE
@@ -938,6 +939,11 @@ class CrawlRunConfig(BaseModel):
     revalidate_max_documents: int | None = Field(default=None, ge=1)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    #: Блэклист по **query-строке** URL (``run.yaml:crawl.exclude_queries``). Query не входит
+    #: в путь, поэтому ``exclude_paths``/``exclude_documents`` её не видят: один путь может
+    #: отдаваться в нескольких вариантах (язык, версия, режим) — это множитель корпуса.
+    #: Матч — ``fnmatchcase`` по сырой query-строке (``urlsplit(url).query``).
+    exclude_queries: list[str] | None = None
     # P5: run-слой уровня извлечения документных форматов (``run.yaml:crawl.document_level``).
     # ``None`` = не задано на этом слое (наследуется app-дефолт ``full``). Резолв —
     # :func:`core.pipeline.crawl_frontier.resolve_crawl_limits`.
@@ -974,7 +980,7 @@ class CrawlRunConfig(BaseModel):
     #: (та же цепочка, что у ``pdf_max_pages``).
     pdf_max_extracted_chars: int | None = Field(default=None, gt=0)
 
-    @field_validator("exclude_paths", "exclude_documents")
+    @field_validator("exclude_paths", "exclude_documents", "exclude_queries")
     @classmethod
     def _check_globs(cls, value: list[str] | None) -> list[str] | None:
         """Отвергает не-строки/пустые glob (D1/H)."""
@@ -983,7 +989,8 @@ class CrawlRunConfig(BaseModel):
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError(
-                    "crawl.exclude_paths/exclude_documents: ожидались непустые строки-glob"
+                    "crawl.exclude_paths/exclude_documents/exclude_queries: "
+                    "ожидались непустые строки-glob"
                 )
         return value
 

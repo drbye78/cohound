@@ -8,7 +8,8 @@
 Почему отдельная цепочка (решение заморожено): существующий ``resolve_crawl_target``
 (``core.pipeline.crawl_sources``) резолвит оси ``fetch/extract/strategy/wait_for/rate_limit``
 по слоям ``crawl_sources.yaml`` и трогать его порядок нельзя (24 layering-теста). Новые оси
-(``max_workers``/``max_depth``/``max_documents``/``exclude_paths``/``exclude_documents``) идут
+(``max_workers``/``max_depth``/``max_documents``/``exclude_paths``/``exclude_documents``/
+``exclude_queries``) идут
 своим путём и **не** добавляются в ``crawl_sources.yaml``.
 
 **Scope — per seed-root, не «SSRF-чек прошёл».** Обнаруженный URL ставится в очередь, только
@@ -40,15 +41,21 @@ host-scope корня включал **любой** поддомен его хо
 продолжают навигацию**, поэтому path-prefix к ним не применяется: ``/docs/`` может ссылаться
 на ``/files/report.pdf``, и это не «выход из раздела». Host scope, SSRF-валидация и
 ``..``-traversal-guard остаются обязательными, блэклист оператора
-(``exclude_paths``/``exclude_documents``) побеждает всегда. Обход **видим**: он считается и
+(``exclude_paths``/``exclude_documents``/``exclude_queries``) побеждает всегда. Обход **видим**: он считается и
 даёт ограниченный список примеров (``artifacts_outside_prefix``), которые попадают в
 провенанс фазы рядом с ``skipped_blacklisted``/``skipped_documents`` — молчаливый обход был бы
 дефектом.
 
 **Блэклисты (D1/D2).** ``exclude_paths`` — glob по **пути** URL (``fnmatchcase``,
 case-sensitive); ``exclude_documents`` — glob по **basename** (последний сегмент пути, напр.
-``*.pdf``). Никаких regex/подстрок: предсказуемо и ReDoS-безопасно. Оба применяются **и при
-постановке в очередь, и перед фетчем**.
+``*.pdf``); ``exclude_queries`` — glob по **сырой query-строке** URL (``urlsplit(url).query``,
+без ``?``; напр. ``lang=en``). Никаких regex/подстрок: предсказуемо и ReDoS-безопасно. Все три
+применяются **и при постановке в очередь, и перед фетчем**.
+
+Почему query — отдельная ось: query-строка не входит в путь, поэтому ни ``exclude_paths``,
+ни ``exclude_documents`` её не видят. Один и тот же путь может отдаваться в нескольких
+вариантах (язык, версия, режим отображения), и это множитель корпуса, а не отдельный документ.
+Имена параметров и значения — данные, не код: ось нейтральна к предметной категории.
 
 **Seed-root** — корень, от которого ведётся scope: top-level URL (из ``--urls``/feed-channel)
 или запись каталога. Seeds имеют глубину 0; ссылка со страницы глубины ``d`` → глубина ``d+1``.
@@ -335,6 +342,12 @@ class CrawlLimits:
     revalidate_max_documents: int | None = None
     exclude_paths: tuple[str, ...] = ()
     exclude_documents: tuple[str, ...] = ()
+    #: Блэклист по **query-строке** URL (``exclude_queries``). Query-строка не входит в
+    #: путь, поэтому ``exclude_paths``/``exclude_documents`` её не видят: один путь может
+    #: отдаваться в нескольких вариантах (язык, версия, режим), и это множитель корпуса.
+    #: Матч — ``fnmatchcase`` по **сырой** query-строке (``urlsplit(url).query``, без ``?``);
+    #: URL без query не матчится ни одним паттерном. Значения — данные, не код.
+    exclude_queries: tuple[str, ...] = ()
     #: P5: уровень извлечения документных форматов (ось ``crawl.document_level``). Дефолт
     #: ``full`` = сегодняшнее эффективное поведение. Резолвится той же цепочкой app < run <
     #: site; per seed-root (один корень = один уровень).
@@ -470,6 +483,13 @@ class CrawlLimits:
             "max_documents": self.max_documents,
             "exclude_paths": list(self.exclude_paths),
             "exclude_documents": list(self.exclude_documents),
+            # Блэклист по query — **безусловный** ключ, как ``exclude_paths``: ось меняет
+            # состав корпуса (какие URL вообще допущены), то есть является условием
+            # измерения. Ключ меняет ``crawl_config_digest`` всех прогонов — это осознанно
+            # (``execution_change``, §13): обратная совместимость не требуется (решение
+            # владельца), а прогон, снятый без оси, обязан иметь другой ``run_id``, чем
+            # прогон с ней.
+            "exclude_queries": list(self.exclude_queries),
             "document_level": self.document_level.value,
             "pdf_pipeline": self.pdf_pipeline.value,
             "robots": self.robots,
@@ -896,6 +916,7 @@ def resolve_crawl_limits(
     )
     site_exclude_paths = profile.exclude_paths if profile is not None else None
     site_exclude_documents = profile.exclude_documents if profile is not None else None
+    site_exclude_queries = profile.exclude_queries if profile is not None else None
     site_document_level = profile.document_level if profile is not None else None
     site_pdf_pipeline = profile.pdf_pipeline if profile is not None else None
     site_document_timeout = profile.document_timeout_s if profile is not None else None
@@ -986,6 +1007,7 @@ def resolve_crawl_limits(
     )
     run_exclude_paths = run.exclude_paths if run is not None else None
     run_exclude_documents = run.exclude_documents if run is not None else None
+    run_exclude_queries = run.exclude_queries if run is not None else None
     run_document_level = (
         getattr(run, "document_level", None) if run is not None else None
     )
@@ -1131,6 +1153,9 @@ def resolve_crawl_limits(
     )
     exclude_documents = _pick(
         app.exclude_documents, run_exclude_documents, site_exclude_documents
+    )
+    exclude_queries = _pick(
+        app.exclude_queries, run_exclude_queries, site_exclude_queries
     )
     document_level = _pick(
         getattr(app, "document_level", None),
@@ -1358,6 +1383,7 @@ def resolve_crawl_limits(
         ),
         exclude_paths=tuple(exclude_paths or ()),
         exclude_documents=tuple(exclude_documents or ()),
+        exclude_queries=tuple(exclude_queries or ()),
         document_level=DocumentLevel(
             DocumentLevel.FULL if document_level is None else document_level
         ),
@@ -1391,7 +1417,8 @@ def resolve_crawl_limits(
 def blacklist_match(url: str, limits: CrawlLimits) -> str | None:
     """Возвращает заматчивший паттерн блэклиста или ``None`` (D1/D2, N5).
 
-    ``exclude_paths`` — по пути URL, ``exclude_documents`` — по basename. ``fnmatchcase``
+    Три формы блэклиста: ``exclude_paths`` — по пути URL, ``exclude_documents`` — по
+    basename, ``exclude_queries`` — по **сырой query-строке** URL. Всё ``fnmatchcase``
     (case-sensitive) без regex/подстрок.
 
     **Leading-slash tolerance (N5).** Паттерн пути принимается и с ведущим ``/``, и без
@@ -1399,12 +1426,18 @@ def blacklist_match(url: str, limits: CrawlLimits) -> str | None:
     поэтому ``docs/*`` матчит ``/docs/x`` как и ``/docs/*``. Паттерн-``/`` (зачёркивает
     host-корень) сохраняется.
 
-    **Caveat ``exclude_documents`` (N5).** Сравнивается basename **пути** URL (файл —
-    сегмент пути, напр. ``/docs/report.pdf``). Имя файла, переданное **только** в
-    query-строке (``/download?file=report.pdf``), basename не является и паттерном не
-    ловится — это задокументированное ограничение (см. ``03`` §D.2), а не догадка.
+    **``exclude_queries`` снимает прежнюю оговорку про query-строку.** До этой оси query
+    не ловилась ничем: ``exclude_documents`` сравнивает basename **пути**, а имя файла,
+    переданное только в query (``/download?file=report.pdf``), basename не является.
+    Теперь такая форма ловится паттерном по query. Матчится **сырая** query-строка
+    (``urlsplit(url).query``, без ``?``, без декодирования): URL без query даёт пустую
+    строку и не матчится ни одним непустым паттерном.
+
+    Возвращается именно заматчивший паттерн, а не ``True``: он попадает в
+    ``skipped_blacklisted``, поэтому отсечение остаётся **видимым** в провенансе.
     """
-    path = urlsplit(url).path or "/"
+    parts = urlsplit(url)
+    path = parts.path or "/"
     for pattern in limits.exclude_paths:
         normalized = "/" + pattern.lstrip("/")
         if fnmatchcase(path, normalized):
@@ -1413,6 +1446,14 @@ def blacklist_match(url: str, limits: CrawlLimits) -> str | None:
     for pattern in limits.exclude_documents:
         if fnmatchcase(base, pattern):
             return pattern
+    # Query — не путь: ``exclude_paths``/``exclude_documents`` её не видят по построению
+    # (path и basename — части ``urlsplit(...).path``). Пустая query не матчится ни одним
+    # паттерном: ``fnmatchcase("", "")`` вернул бы ``True``, поэтому явная проверка.
+    query = parts.query
+    if query:
+        for pattern in limits.exclude_queries:
+            if fnmatchcase(query, pattern):
+                return pattern
     return None
 
 

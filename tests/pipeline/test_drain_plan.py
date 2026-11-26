@@ -457,13 +457,15 @@ def test_render_rejects_unknown_key() -> None:
 def test_render_on_disk_profiles_changes_only_target_key() -> None:
     raw = ON_DISK_PROFILES.read_text(encoding="utf-8")
     before = yaml.safe_load(raw)
-    key = "postgrespro.ru/docs"
+    # Ключ пилота сужен 24.11.2026 до дерева объявленной редакции (решение владельца):
+    # `postgrespro.ru/docs` был каталогом документации ВСЕХ продуктов вендора.
+    key = "postgrespro.ru/docs/enterprise/18"
     assert key in before, "фикстура зависит от реального ключа пилота"
     measured = int(before[key]["max_documents"])
     update = DrainUpdate(
         key=key,
         product_id="postgrespro",
-        root_url="https://postgrespro.ru/docs/",
+        root_url="https://postgrespro.ru/docs/enterprise/18/",
         measured=measured,
         max_documents=measured + 1,
         max_depth=before[key].get("max_depth"),
@@ -478,6 +480,6 @@ def test_render_on_disk_profiles_changes_only_target_key() -> None:
             continue
         assert after[other] == before[other]
     # Шапка (ведущие комментарии) сохраняется дословно.
-    assert out.split("\npostgrespro.ru/docs:", 1)[0] == raw.split(
-        "\npostgrespro.ru/docs:", 1
+    assert out.split("\npostgrespro.ru/docs/enterprise/18:", 1)[0] == raw.split(
+        "\npostgrespro.ru/docs/enterprise/18:", 1
     )[0]

@@ -2008,7 +2008,7 @@ def _build_corpus(
     :param crawl_app: D1/D2 — application-слой осей контроля краула (``deploy.yaml:crawl``,
         :class:`~core.config.deploy.CrawlConfig`): низший приоритет цепочки
         ``app < run < site`` для ``max_workers``/``max_depth``/``max_documents``/
-        ``exclude_paths``/``exclude_documents`` (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`).
+        ``exclude_paths``/``exclude_documents``/``exclude_queries`` (:func:`core.pipeline.crawl_frontier.resolve_crawl_limits`).
         ``None`` → дефолт :class:`CrawlConfig` (``max_depth=0``, без лимитов/блэклистов —
         поведение неизменно).
     :param state: durable per-product состояние (``ProductStatePort``, 09 §4.1/§4.2).

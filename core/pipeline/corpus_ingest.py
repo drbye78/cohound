@@ -2785,7 +2785,7 @@ def fresh_sitemap_seeds(
     остаётся нефильтрованным.
 
     Пометка ``(pid, loc)`` **не** делается здесь (F12): loc может быть отвергнут уже
-    после scope — блэклистом профиля корня (``exclude_paths``/``exclude_documents``) или
+    после scope — блэклистом профиля корня (``exclude_paths``/``exclude_documents``/``exclude_queries``) или
     ``max_documents`` при постановке в очередь. Такой loc обязан остаться доступным
     другому корню продукта, поэтому ``sitemap_seed_used`` пополняется в
     корневом цикле только по факту приёма в очередь (``add_seed`` → ``queued``/
@@ -5546,10 +5546,10 @@ def apply_revalidation_cap(
     """Отбирает ``cap`` **исполнимых** известных URL продукта.
 
     Сначала — eligibility-фильтр по resolved-лимитам владельца (root key для
-    root-группы, origin для orphan-бакета): ``exclude_paths``/``exclude_documents``
-    и pre-fetch-пропуск документа при ``document_level=off``. Иначе неисполнимый URL
-    навсегда занимал бы голову NULLs-first/oldest-first очереди: drain отверг бы его
-    без обновления ``url_state``, и потолок тратил бы слот на него каждый цикл.
+    root-группы, origin для orphan-бакета): ``exclude_paths``/``exclude_documents``/
+    ``exclude_queries`` и pre-fetch-пропуск документа при ``document_level=off``. Иначе
+    неисполнимый URL навсегда занимал бы голову NULLs-first/oldest-first очереди: drain
+    отверг бы его без обновления ``url_state``, и потолок тратил бы слот на него каждый цикл.
 
     Затем — порядок ``last_checked_at`` **NULLs first**, ``normalized_url``. Стабильное
     «первые N» навсегда бы заморило хвост; «сначала старые» ротирует автоматически:

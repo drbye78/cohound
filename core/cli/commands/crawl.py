@@ -541,6 +541,7 @@ def _execute_crawl_locked(
     max_documents = getattr(args, "max_documents", None)
     exclude_paths = getattr(args, "exclude_paths", None)
     exclude_documents = getattr(args, "exclude_documents", None)
+    exclude_queries = getattr(args, "exclude_queries", None)
     document_level = getattr(args, "document_level", None)
     pdf_pipeline = getattr(args, "pdf_pipeline", None)
     follow = bool(getattr(args, "follow", False))
@@ -681,6 +682,7 @@ def _execute_crawl_locked(
             max_documents=max_documents,
             exclude_paths=exclude_paths,
             exclude_documents=exclude_documents,
+            exclude_queries=exclude_queries,
             document_level=document_level,
             pdf_pipeline=pdf_pipeline,
             progress=progress,

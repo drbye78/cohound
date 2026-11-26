@@ -596,7 +596,7 @@ Fusion-параметры (включая `rrf_k`) входят в `retrieval_pa
   схема не навязывается и форма держится одним pydantic-парсом ответа. Семантику
   проверяет эшелон.
 - **Детерминизм:** greedy или seed; `temperature`/`seed` из `ScenarioBinding`
-  (`core/domain/models.py:1629-1660`). Условия генерации **пишутся в манифест** с правки
+  (`core/domain/models.py:1636-1660`). Условия генерации **пишутся в манифест** с правки
   V5/V6: `seed` (`EVALUATOR_DEFAULT_SEED = 0`), `temperature`
   (`EVALUATOR_DEFAULT_TEMPERATURE = 0.0`), `constrained_decoding` (= `decoder_wire_type`),
   `endpoint_host`, `max_tokens`, `reasoning_effort` — все из тех же констант, что уходят в
@@ -716,7 +716,7 @@ llm_scenarios:
 **Только `evaluator` и объявляется.** Остальные сценарии (`search_adapter`/`discovery`/
 `concept_scout`) слотов в `deploy.llm` не имеют и в `llm_scenarios` не пишутся —
 пустая таблица честнее выдуманной (`_resolve_llm_scenarios`,
-`core/cli/execution_axes.py:855-857`). Строка `evaluator` появляется только при **активном**
+`core/cli/execution_axes.py:870-872`). Строка `evaluator` появляется только при **активном**
 слоте (непустой `base_url`); если endpoint пришёл из env, таблица остаётся пустой и факт
 «оценщик вне execution contract» сообщает `llm_env_notices`.
 

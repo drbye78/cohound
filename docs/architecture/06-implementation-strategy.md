@@ -721,7 +721,7 @@ P5), но строка помечена здесь как неактуальна
   `_commit_outcome`. Дефолт `None`/`1` ⇒ inline, байт-в-байт.
   **Ось — провенанс, не контракт:** `extract_workers`/`extract_max_tasks_per_child` в
   `CrawlLimits.as_dict()` не входят ⇒ в `crawl_config_digest`/`run_id` **не** попадают
-  (`core/pipeline/crawl_frontier.py:226-233`): иначе число, выведенное из бюджета хоста, делало бы
+  (`core/pipeline/crawl_frontier.py:233-233`): иначе число, выведенное из бюджета хоста, делало бы
   `run_id` функцией машины. Число выводится из бюджета (`preflight_extraction_budget`) и
   публикуется в манифесте; в `packages/ru-pg-dbms/run.yaml` ось **намеренно не объявлена**
   (`packages/ru-pg-dbms/run.yaml:91`), объявлен только `extract_max_tasks_per_child: 25`

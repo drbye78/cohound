@@ -1818,7 +1818,7 @@ def root_lifecycle(
     if seed_blacklisted:
         phase.errors.append(
             f"{product.pid}/{root_url}: seed зачёркнут блэклистом "
-            "(exclude_paths/exclude_documents) — не enqueued"
+            "(exclude_paths/exclude_documents/exclude_queries) — не enqueued"
         )
     # F7 (17 §2): корень принадлежит **чужому** шарду — этот узел его не краулит, и это
     # названо (счётчик ``host_out_of_shard`` в провенансе корня уже поставлен
@@ -1909,7 +1909,7 @@ def root_lifecycle(
         elif extra_status == "blacklisted":
             phase.errors.append(
                 f"{product.pid}/{extra}: sitemap-seed зачёркнут блэклистом "
-                "(exclude_paths/exclude_documents) — не enqueued"
+                "(exclude_paths/exclude_documents/exclude_queries) — не enqueued"
             )
 
     # I3/§5: документы, найденные SERP-контуром, — depth-0 seeds **этого** корня.
@@ -1930,7 +1930,7 @@ def root_lifecycle(
             product.serp_ingest["blacklisted"].append(found)
             phase.errors.append(
                 f"{product.pid}/{found}: serp-находка зачёркнута блэклистом "
-                "(exclude_paths/exclude_documents) — не enqueued"
+                "(exclude_paths/exclude_documents/exclude_queries) — не enqueued"
             )
         # A2 (F3): отказа по ``max_documents`` на постановке больше нет — находка
         # ставится в очередь, а бюджет решается на изъятии. Поэтому усечения на

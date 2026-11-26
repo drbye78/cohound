@@ -50,6 +50,7 @@ def test_defaults_are_zero_depth_no_limits() -> None:
     assert limits.max_depth == 0
     assert limits.max_documents is None
     assert limits.exclude_paths == () and limits.exclude_documents == ()
+    assert limits.exclude_queries == ()
 
 # --------------------------------------------------------------------------- #
 # (g2) robots: условие измерения, а не рычаг пропускной способности (D-5)
@@ -228,6 +229,40 @@ def test_unset_run_layer_falls_back_to_app() -> None:
     assert limits.max_documents == 7
 
 
+def test_exclude_queries_chain_app_run_site() -> None:
+    """``exclude_queries`` — та же цепочка app < run < site, без нового приоритета."""
+    app = CrawlConfig(exclude_queries=["lang=en"])
+    assert resolve_crawl_limits(URL, app=app).exclude_queries == ("lang=en",)
+
+    run = CrawlRunConfig(exclude_queries=["ver=*"])
+    assert resolve_crawl_limits(URL, app=app, run=run).exclude_queries == ("ver=*",)
+
+    profiles = {"example.com/docs": DomainProfile(exclude_queries=["print=1"])}
+    limits = resolve_crawl_limits(URL, app=app, run=run, profiles=profiles)
+    assert limits.exclude_queries == ("print=1",)
+    # Пустой список на site-слое — тоже объявление: он не «наследует» run.
+    empty_site = {"example.com/docs": DomainProfile(exclude_queries=[])}
+    assert (
+        resolve_crawl_limits(URL, app=app, run=run, profiles=empty_site).exclude_queries
+        == ()
+    )
+
+
+def test_exclude_queries_is_unconditional_in_as_dict() -> None:
+    """Ключ ``exclude_queries`` в ``as_dict`` есть **всегда** (как ``exclude_paths``).
+
+    Ось меняет состав корпуса, то есть условие измерения: прогон с ней и без неё обязан
+    иметь разный ``crawl_config_digest``/``run_id``. Обратной совместимости нет намеренно
+    (решение владельца): ``execution_change``, а не «тихое» расширение словаря.
+    """
+    assert CrawlLimits().as_dict()["exclude_queries"] == []
+    app = CrawlConfig(exclude_queries=["lang=en", "ver=*"])
+    payload = resolve_crawl_limits(URL, app=app).as_dict()
+    assert payload["exclude_queries"] == ["lang=en", "ver=*"]
+    # Порядок паттернов — часть значения: первый матч идёт в провенанс.
+    assert payload["exclude_queries"] != ["ver=*", "lang=en"]
+
+
 def test_reject_zero_max_documents_at_config_load() -> None:
     with pytest.raises(ValidationError):
         CrawlConfig(max_documents=0)
@@ -259,6 +294,48 @@ def test_blacklist_path_and_basename_matching() -> None:
     assert is_blacklisted("https://h/public/a", limits) is False
     # подстрока/суффикс не матчатся: только fnmatch по сегменту/пути.
     assert is_blacklisted("https://h/a/b.pdf.text", limits) is False
+
+
+# --------------------------------------------------------------------------- #
+# (e2) блэклист по query-строке (exclude_queries)
+# --------------------------------------------------------------------------- #
+#
+# Класс дефекта: один и тот же путь отдаётся в нескольких вариантах, различающихся
+# **только** query-строкой (язык, версия, режим отображения). Это множитель корпуса, а
+# ``exclude_paths``/``exclude_documents`` его не видят: они матчат ``urlsplit(url).path``
+# и его basename, куда query не входит. Измерено 24.11.2026: у одного хоста три языковых
+# варианта одной страницы давали ×3.91 к числу документов корня.
+
+
+def test_exclude_queries_matches_raw_query_only() -> None:
+    """``exclude_queries`` отсекает по query и не трогает тот же путь без неё."""
+    limits = CrawlLimits(exclude_queries=("lang=en",))
+    assert blacklist_match("https://h/docs/x?lang=en", limits) == "lang=en"
+    # Тот же путь, другой вариант query и путь без query — не зачёркнуты.
+    assert is_blacklisted("https://h/docs/x?lang=ru", limits) is False
+    assert is_blacklisted("https://h/docs/x", limits) is False
+    # Путь тот же: ось не подменяет блэклист по пути.
+    assert is_blacklisted("https://h/other/x?lang=ru", limits) is False
+
+
+def test_exclude_queries_glob_does_not_match_url_without_query() -> None:
+    """Паттерн ``*`` не матчит URL без query: пустая строка — не «что угодно».
+
+    ``fnmatchcase("", "*")`` вернул бы ``True``, и корень целиком выпал бы из корпуса.
+    """
+    limits = CrawlLimits(exclude_queries=("lang=*", "*"))
+    assert blacklist_match("https://h/docs/x?lang=ru", limits) == "lang=*"
+    assert is_blacklisted("https://h/docs/x", limits) is False
+    assert is_blacklisted("https://h/docs/x?", limits) is False
+
+
+def test_exclude_queries_returns_the_matching_pattern() -> None:
+    """Возвращается **сам паттерн**, а не ``True``: он идёт в ``skipped_blacklisted``."""
+    limits = CrawlLimits(exclude_queries=("ver=*", "lang=en"))
+    assert blacklist_match("https://h/x?ver=2&lang=en", limits) == "ver=*"
+    frontier = Frontier("https://h/", limits)
+    assert frontier.add_seed("https://h/x?lang=en") == "blacklisted"
+    assert frontier.skipped_blacklisted == ["https://h/x?lang=en"]
 
 
 # --------------------------------------------------------------------------- #

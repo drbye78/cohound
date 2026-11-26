@@ -588,6 +588,11 @@ class CrawlConfig(BaseModel):
     revalidate_max_documents: int | None = Field(default=None, ge=1)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    #: Блэклист по **query-строке** URL (``crawl.exclude_queries``). Query не входит в
+    #: путь, поэтому ``exclude_paths``/``exclude_documents`` её не видят: один путь может
+    #: отдаваться в нескольких вариантах (язык, версия, режим), и это множитель корпуса.
+    #: Матч — ``fnmatchcase`` по сырой query-строке. Значения — данные, не код.
+    exclude_queries: list[str] | None = None
     # P5: уровень извлечения документных форматов (PDF/Office). Дефолт ``full`` =
     # сегодняшнее эффективное поведение (layout Heron + таблицы ACCURATE + авто-OCR); его
     # смена — граница класса ``execution_change`` (§13), не ``methodology_change``. Резолв —
@@ -636,7 +641,7 @@ class CrawlConfig(BaseModel):
     pdf_max_pages: int | None = Field(default=None, gt=0)
     pdf_max_extracted_chars: int | None = Field(default=None, gt=0)
 
-    @field_validator("exclude_paths", "exclude_documents")
+    @field_validator("exclude_paths", "exclude_documents", "exclude_queries")
     @classmethod
     def _check_globs(cls, value: list[str] | None) -> list[str] | None:
         """Отвергает не-строки/пустые glob (D1/H: предсказуемый блэклист)."""
@@ -645,7 +650,8 @@ class CrawlConfig(BaseModel):
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError(
-                    "crawl.exclude_paths/exclude_documents: ожидались непустые строки-glob"
+                    "crawl.exclude_paths/exclude_documents/exclude_queries: "
+                    "ожидались непустые строки-glob"
                 )
         return value
 

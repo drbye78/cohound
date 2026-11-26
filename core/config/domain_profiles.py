@@ -96,6 +96,11 @@ class DomainProfile(BaseModel):
     revalidate_max_documents: int | None = Field(default=None, ge=1)
     exclude_paths: list[str] | None = None
     exclude_documents: list[str] | None = None
+    #: per-site блэклист по **query-строке** URL. ``None`` = не задано на этом слое
+    #: (наследуется run/app). Query не входит в путь, поэтому ``exclude_paths``/
+    #: ``exclude_documents`` её не видят: один путь может отдаваться в нескольких
+    #: вариантах (язык, версия, режим) — это множитель корпуса, а не другой документ.
+    exclude_queries: list[str] | None = None
     # P5: per-site слой уровня извлечения документных форматов (высший приоритет цепочки
     # app < run < site). ``None`` = не задано на этом слое (наследуется run/app). Это
     # операторский escape hatch от «слишком медленного PDF» — без правки кода.
@@ -131,7 +136,7 @@ class DomainProfile(BaseModel):
     # Развёртка ``sitemapindex`` — один уровень (потолки в ``core.util.sitemap``).
     sitemap: str | None = None
 
-    @field_validator("exclude_paths", "exclude_documents")
+    @field_validator("exclude_paths", "exclude_documents", "exclude_queries")
     @classmethod
     def _check_globs(cls, value: list[str] | None) -> list[str] | None:
         """Отвергает не-строки/пустые glob (D1/H)."""
@@ -140,7 +145,7 @@ class DomainProfile(BaseModel):
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError(
-                    "domain_profiles.exclude_paths/exclude_documents: "
+                    "domain_profiles.exclude_paths/exclude_documents/exclude_queries: "
                     "ожидались непустые строки-glob"
                 )
         return value

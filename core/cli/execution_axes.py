@@ -212,6 +212,7 @@ CRAWL_AXIS_DESTS: tuple[str, ...] = (
     "max_documents",
     "exclude_paths",
     "exclude_documents",
+    "exclude_queries",
     "document_level",
     "pdf_pipeline",
     "document_timeout_s",
@@ -375,6 +376,20 @@ def add_crawl_axis_flags(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="GLOB",
         help="glob блэклиста по basename URL, напр. '*.pdf' (повторяемый)",
+    )
+    # Query-строка не входит в путь, поэтому ``--exclude-path``/``--exclude-document`` её
+    # не видят: один путь может отдаваться в нескольких вариантах (язык, версия, режим),
+    # и это множитель корпуса. Матч — ``fnmatchcase`` по сырой query-строке.
+    parser.add_argument(
+        "--exclude-query",
+        dest="exclude_queries",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob блэклиста по query-строке URL (fnmatchcase, повторяемый; "
+            "напр. 'lang=en')"
+        ),
     )
     parser.add_argument(
         "--document-level",

@@ -2672,6 +2672,7 @@ def _resolve_phases(
     drain_max_depth: int | None = None,
     exclude_paths: Sequence[str] | None = None,
     exclude_documents: Sequence[str] | None = None,
+    exclude_queries: Sequence[str] | None = None,
     document_level: DocumentLevel | None = None,
     pdf_pipeline: PdfPipeline | None = None,
     state: Any = None,
@@ -2918,6 +2919,7 @@ def _resolve_phases(
         ),
         "exclude_paths": list(exclude_paths) if exclude_paths else None,
         "exclude_documents": list(exclude_documents) if exclude_documents else None,
+        "exclude_queries": list(exclude_queries) if exclude_queries else None,
         # F1/F6 (17 §4, §4.3): оси краула, объявленные оператором, обязаны доезжать до Ш5
         # тем же путём, что ``--max-depth``: дайджест уже считается с ними
         # (``_crawl_axis_overrides``), и без проводки ``run_id`` описывал бы полосы и
@@ -3604,6 +3606,19 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="GLOB",
         help="glob блэклиста по basename URL, напр. '*.pdf' (повторяемый)",
+    )
+    # Query-строка не входит в путь, поэтому ``--exclude-path``/``--exclude-document`` её
+    # не видят: один путь может отдаваться в нескольких вариантах (язык, версия, режим).
+    parser.add_argument(
+        "--exclude-query",
+        dest="exclude_queries",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "glob блэклиста по query-строке URL (fnmatchcase, повторяемый; "
+            "напр. 'lang=en')"
+        ),
     )
     # P5: уровень извлечения документных форматов (run-слой поверх run.yaml).
     parser.add_argument(
