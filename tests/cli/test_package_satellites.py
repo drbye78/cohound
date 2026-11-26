@@ -135,6 +135,10 @@ def _args(
     passports_dir: Path,
     *,
     package_dir: Path | None = None,
+    product: str = "pangolin",
+    role: list[str] | None = None,
+    include_unestablished: bool = False,
+    seed: list[str] | None = None,
     apply: bool,
     actor: str | None,
     out: str | None = None,
@@ -145,9 +149,11 @@ def _args(
 
     return argparse.Namespace(
         package=str(package_dir or PACKAGE),
-        product="pangolin",
+        product=product,
         passports_dir=str(passports_dir),
-        role=["backup"],
+        role=["backup"] if role is None else role,
+        include_unestablished=include_unestablished,
+        seed=seed,
         sitemap=None,
         apply=apply,
         actor=actor,
@@ -164,10 +170,25 @@ def test_roots_apply_writes_root_into_satellite_element(tmp_path: Path) -> None:
     package = tmp_path / "pkg"
     (package / "sources").mkdir(parents=True)
     target = next((passports / "pangolin").glob("*.yaml"))
-    before = target.read_text(encoding="utf-8")
+    # Копия с **пустым** корнем: на исходном паспорте объявление было бы no-op и тест
+    # не отличил бы «правка не сработала» от «править было нечего».
+    raw = target.read_text(encoding="utf-8")
+    before = raw.replace(
+        "    doc_domains:\n      - pangolin.sbertech.ru/center/docs/copywala\n", "", 1
+    )
+    assert before != raw
+    target.write_text(before, encoding="utf-8")
 
+    # Свидетельство связи ведёт на корень сайта, поэтому адрес наблюдения объявляется:
+    # без `--seed` рекомендации нет (`site_root_seed`), и объявлять было бы нечего.
     code = cmd_package_satellites_roots(
-        _args(passports, package_dir=package, apply=True, actor="tester")
+        _args(
+            passports,
+            package_dir=package,
+            seed=["backup=https://pangolin.sbertech.ru/center/docs/"],
+            apply=True,
+            actor="tester",
+        )
     )
     assert code == 0
     after = target.read_text(encoding="utf-8")
@@ -207,6 +228,98 @@ def test_roots_writes_plan_artifact_without_touching_passport(tmp_path: Path) ->
     assert isinstance(plan, list) and plan
     assert plan[0]["role"] == "backup"
     assert plan[0]["candidates"][0]["key"] == "pangolin.sbertech.ru/center/docs/backup"
+
+def test_roots_skips_satellite_that_is_not_established(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Разведка идёт по **установленным** сателлитам; черновик назван, а не разведан.
+
+    Пин держит измеренный факт: до фильтра состояния прибор разведывал и `draft`
+    (у tantor — `Polar`, у jatoba — `VipNet`), хотя объявить его корень некуда:
+    `passport_urls` читает корни только у `approved`/`edited_by_human`. Наблюдение
+    черновика ради объявления — работа в пустоту, а `--apply` на нём был бы молчаливым
+    no-op.
+    """
+    passports = tmp_path / "passports"
+    shutil.copytree(PASSPORTS / "tantor", passports / "tantor")
+    package = tmp_path / "pkg"
+    (package / "sources").mkdir(parents=True)
+    out = tmp_path / "roots.yaml"
+
+    code = cmd_package_satellites_roots(
+        _args(
+            passports,
+            package_dir=package,
+            product="tantor",
+            role=[],
+            apply=False,
+            actor=None,
+            out=str(out),
+        )
+    )
+    assert code == 0
+    printed = _capture(capsys)
+    assert "(пропущен) unknown [Polar] state=draft" in printed
+    probed = {plan["role"] for plan in yaml.safe_load(out.read_text(encoding="utf-8"))}
+    assert "unknown" not in probed
+    assert {"management_console", "streaming", "database_appliance"} <= probed
+
+
+def test_roots_apply_refuses_unestablished_satellite(tmp_path: Path) -> None:
+    """``--include-unestablished`` — наблюдение; объявить корень черновика нельзя."""
+    passports = tmp_path / "passports"
+    shutil.copytree(PASSPORTS / "tantor", passports / "tantor")
+    package = tmp_path / "pkg"
+    (package / "sources").mkdir(parents=True)
+    with pytest.raises(Exception) as error:
+        cmd_package_satellites_roots(
+            _args(
+                passports,
+                package_dir=package,
+                product="tantor",
+                role=[],
+                include_unestablished=True,
+                apply=True,
+                actor="tester",
+            )
+        )
+    assert getattr(error.value, "exit_code", None) == EXIT_USAGE
+    assert "unknown[draft]" in str(error.value)
+
+
+def test_roots_refuses_duplicate_role(tmp_path: Path) -> None:
+    """Роль — не уникальный ключ: две роли `backup` сделали бы правку паспорта слепой.
+
+    Адресация вывода идёт по роли (`--seed ROLE=`, план, `roots_by_role`), поэтому при
+    совпадении объявление записалось бы не тому сателлиту, а `roots_by_role` оставил бы
+    одну запись из двух. У jatoba два `security_crypto` — состояние `draft` у второго
+    снимает совпадение; здесь проверяется, что **установленное** совпадение отказывает.
+    """
+    passports = tmp_path / "passports"
+    shutil.copytree(PASSPORTS / "pangolin", passports / "pangolin")
+    target = next((passports / "pangolin").glob("*.yaml"))
+    extra = (
+        "  - role: backup\n"
+        "    state: approved\n"
+        "    component: \"Second Backup\"\n"
+        "    origin: in_house\n"
+        "    relationship: bundled\n"
+        "    evidence_state: verified\n"
+        "    relationship_evidence:\n"
+        "      url: \"https://pangolin.sbertech.ru\"\n"
+        "      quote: \"второе средство резервного копирования\"\n"
+    )
+    raw = target.read_text(encoding="utf-8")
+    target.write_text(raw.replace("snapshot_date:", extra + "snapshot_date:", 1), encoding="utf-8")
+    package = tmp_path / "pkg"
+    (package / "sources").mkdir(parents=True)
+    with pytest.raises(Exception) as error:
+        cmd_package_satellites_roots(
+            _args(passports, package_dir=package, apply=False, actor=None)
+        )
+    assert getattr(error.value, "exit_code", None) == EXIT_USAGE
+    assert "backup" in str(error.value)
+
 
 def test_roots_apply_requires_actor(tmp_path: Path) -> None:
     passports = tmp_path / "passports"

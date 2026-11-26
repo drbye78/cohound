@@ -93,6 +93,10 @@ class SatelliteRootPlan:
     #: Кандидаты, отвергнутые прибором, с причиной (``below_min_links``, ``external_host``).
     rejected: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Причина, по которой рекомендации нет **при наличии кандидатов** (``site_root_seed``).
+    #: Неоднозначность и вложенность вычисляются из кандидатов, а эта — из адреса
+    #: наблюдения, поэтому хранится явно: иначе пришлось бы угадывать по замечаниям.
+    blocked: str | None = None
 
     @property
     def ambiguous(self) -> bool:
@@ -129,10 +133,11 @@ class SatelliteRootPlan:
     def recommended(self) -> RootCandidate | None:
         """Первый кандидат по (глубина ↑, документы ↓) — рекомендация, не решение.
 
-        ``None`` при неоднозначности покрытия и при вложенном наборе (:attr:`nested`):
-        в обоих случаях выбор корня — решение человека о границе корпуса.
+        ``None`` при неоднозначности покрытия, при вложенном наборе (:attr:`nested`) и
+        при адресе наблюдения без пути (:attr:`blocked`): во всех случаях выбор корня —
+        решение человека о границе корпуса.
         """
-        if not self.candidates or self.ambiguous or self.nested:
+        if not self.candidates or self.ambiguous or self.nested or self.blocked:
             return None
         return min(self.candidates, key=lambda item: (item.depth, -item.documents, item.key))
 
@@ -146,6 +151,7 @@ class SatelliteRootPlan:
             "final_url": self.final_url,
             "ambiguous": self.ambiguous,
             "nested": self.nested,
+            "blocked": self.blocked,
             "recommended": recommended.key if recommended is not None else None,
             "candidates": [item.as_dict() for item in self.candidates],
             "rejected": list(self.rejected),
@@ -177,6 +183,7 @@ def derive_roots(
     links: Sequence[str] = (),
     sitemap_urls: Sequence[str] = (),
     robots_allows: bool | None = None,
+    seed_declared: bool = False,
     min_links: int = MIN_ROOT_LINKS,
 ) -> SatelliteRootPlan:
     """Выводит кандидатов-корней сателлита из наблюдённых фактов.
@@ -197,6 +204,12 @@ def derive_roots(
     Ссылки вне хоста финального URL попадают в ``rejected`` с причиной ``external_host``:
     это не отказ, а видимый факт — прибор их не считал.
 
+    :param seed_declared: адрес наблюдения объявлен оператором (``--seed``), а не взят из
+        свидетельства связи. Различие решает: свидетельство связи обычно указывает на
+        **корень сайта** (маркетинговую главную), и его дерево ссылок — это навигация
+        сайта, а не документация компонента. Такой набор кандидатов наблюдением получен,
+        но рекомендацией не становится (:attr:`SatelliteRootPlan.blocked`).
+
     :returns: :class:`SatelliteRootPlan` с числами; при пустом наборе ссылок —
         ``notes=["no_links"]`` и пустой список кандидатов (корень не выдумывается).
     """
@@ -212,6 +225,28 @@ def derive_roots(
         plan.notes.append(f"redirect_host: {_host(seed_url)} → {_host(final_url)}")
     if robots_allows is False:
         plan.notes.append("robots_disallow_seed")
+    if not seed_declared:
+        # Дерево ссылок прибор видит всегда, а вот **документация** ли это — объявленный
+        # выбор, а не вывод из структуры (A3). Измерено 27.11.2026 на `tantorlabs.ru`:
+        # свидетельство связи вело на главную, и самый покрытый префикс был `/products`
+        # (11 ссылок из 88) — то есть объявление корнем сателлита маркетингового раздела
+        # вернуло бы в корпус ровно тот материал, который сужение границ вывело. То же на
+        # странице продукта (`/products/dbms` → `/products`): её ссылки — навигация сайта.
+        # Поэтому рекомендация требует **объявленного** адреса наблюдения (`--seed`);
+        # без него набор кандидатов остаётся наблюдением с названной причиной.
+        if not _path_segments(seed_url):
+            plan.blocked = "site_root_seed"
+            plan.notes.append(
+                "site_root_seed: адрес наблюдения — корень сайта, его дерево ссылок это "
+                "навигация, а не документация компонента; задайте --seed ROLE=URL"
+            )
+        else:
+            plan.blocked = "evidence_seed"
+            plan.notes.append(
+                "evidence_seed: адрес взят из свидетельства связи, а не объявлен "
+                "оператором; страница продукта даёт навигацию сайта, а не дерево "
+                "документации — задайте --seed ROLE=URL"
+            )
 
     link_groups = _count_prefixes(links, host)
     sitemap_groups = _count_prefixes(sitemap_urls, host)

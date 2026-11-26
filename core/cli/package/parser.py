@@ -830,6 +830,14 @@ def add_package_parser(subparsers: Any) -> None:
         help="куда записать YAML плана разведки (наблюдение; паспорт при этом не меняется)",
     )
     p_sat_roots.add_argument(
+        "--include-unestablished",
+        action="store_true",
+        help=(
+            "разведать и сателлитов в состоянии draft (наблюдение; --apply на них всё "
+            "равно откажет — корень объявляет только установленный сателлит)"
+        ),
+    )
+    p_sat_roots.add_argument(
         "--apply", action="store_true", help="записать однозначные корни в паспорт (требует --actor)"
     )
     p_sat_roots.set_defaults(handler=cmd_package_satellites_roots)

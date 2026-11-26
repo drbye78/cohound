@@ -45,7 +45,14 @@ class SatelliteProbePorts:
 #: Маркеры страницы-заглушки антибот-защиты. Это не «сайт пуст»: страница отдала
 #: скрипт проверки, и ссылок в ней нет по построению. Прибор обязан назвать это своим
 #: именем, иначе «0 ссылок» читается как «дерева нет».
-CHALLENGE_MARKERS = ("__qrator", "jschl", "cf-browser-verification", "captcha")
+CHALLENGE_MARKERS = (
+    "__qrator",
+    "jschl",
+    "cf-browser-verification",
+    "_incapsula_resource",
+    "ddos-guard",
+    "captcha",
+)
 
 #: Сколько символов сообщения об ошибке транспорта сохранять в замечании.
 _ERROR_BRIEF = 160
@@ -220,13 +227,19 @@ def probe_satellite_roots(
             links=links,
             sitemap_urls=sitemap,
             robots_allows=robots_allows,
+            seed_declared=role in seeds_by_role,
         )
         if role in seeds_by_role:
             plan.notes.append(f"seed: {seed_url} (объявлен оператором)")
         plan.notes.append(f"transport: {page.transport}")
         plan.notes.append(f"text_chars: {page.text_chars}")
         plan.notes.append(f"links: {len(links)}")
-        if page.challenge:
+        # Замечание утверждает «ссылок нет по построению», поэтому оно допустимо
+        # только когда ссылок действительно нет. Виджет проверки на обычной странице
+        # (форма обратной связи, `recaptcha` в разметке) — не заглушка: измерено
+        # 27.11.2026 на `jatoba.ru` (121 ссылка и слово `captcha` в разметке), где
+        # прежняя безусловная пометка противоречила собственным числам.
+        if page.challenge and not links:
             plan.notes.append(
                 f"antibot_challenge: страница отдала проверку ({page.challenge}) — "
                 "ссылок в ней нет по построению, это не пустое дерево"

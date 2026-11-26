@@ -35,11 +35,67 @@ def _plan(**kwargs: object):
         "product_id": "demo",
         "role": "backup",
         "component": "Backup",
-        "seed_url": f"https://{HOST}/",
-        "final_url": f"https://{HOST}/",
+        # Адрес наблюдения — страница раздела, объявленная оператором (`--seed`):
+        # без объявления рекомендация подавляется (`blocked`), см. отдельные пины.
+        "seed_url": f"https://{HOST}/docs/",
+        "final_url": f"https://{HOST}/docs/",
+        "seed_declared": True,
     }
     base.update(kwargs)
     return derive_roots(**base)  # type: ignore[arg-type]
+
+
+def test_evidence_seed_does_not_recommend() -> None:
+    """Адрес из свидетельства связи — наблюдение, но не рекомендация корня.
+
+    Пин держит второй измеренный случай (27.11.2026, `tantorlabs.ru/products/dbms`):
+    ссылки страницы продукта ведут на разделы сайта (`/products`, `/policy`, `/edu`), и
+    самый покрытый префикс — маркетинговый раздел. Объявить его корнем сателлита значит
+    вернуть в корпус то, что сужение границ вывело.
+    """
+    plan = _plan(
+        seed_url=f"https://{HOST}/products/dbms",
+        final_url=f"https://{HOST}/products/dbms",
+        seed_declared=False,
+        links=_urls("products", 8) + _urls("policy", 7) + _urls("edu", 4),
+    )
+    assert plan.candidates
+    assert plan.blocked == "evidence_seed"
+    assert plan.recommended() is None
+    assert roots_by_role([plan]) == {}
+
+
+def test_site_root_seed_does_not_recommend() -> None:
+    """С главной сайта рекомендации нет: это навигация сайта, а не документация.
+
+    Пин держит измеренный дефект (27.11.2026, `tantorlabs.ru`): свидетельство связи вело
+    на главную, прибор рекомендовал `/products` — самый покрытый префикс навигации.
+    `--apply` объявил бы корнем сателлита маркетинговый раздел и вернул в корпус ровно
+    тот материал, который сужение границ только что вывело.
+    """
+    plan = _plan(
+        seed_url=f"https://{HOST}/",
+        final_url=f"https://{HOST}/",
+        seed_declared=False,
+        links=_urls("products", 11) + _urls("policy", 7) + _urls("edu", 4),
+    )
+    assert plan.candidates, "наблюдение получено — вопрос лишь в рекомендации"
+    assert plan.blocked == "site_root_seed"
+    assert plan.recommended() is None
+    assert roots_by_role([plan]) == {}
+    assert any(note.startswith("site_root_seed") for note in plan.notes)
+
+
+def test_declared_seed_on_site_root_still_recommends() -> None:
+    """Оператор объявил адрес наблюдения — значит, выбор корня он и сделал."""
+    plan = _plan(
+        seed_url=f"https://{HOST}/",
+        final_url=f"https://{HOST}/",
+        links=_urls("docs", 6),
+        seed_declared=True,
+    )
+    assert plan.blocked is None
+    assert plan.recommended() is not None
 
 
 def test_prefix_below_threshold_is_rejected_with_count() -> None:

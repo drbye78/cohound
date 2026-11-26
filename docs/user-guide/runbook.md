@@ -194,9 +194,15 @@ reference-корпусе PG 18 (`baseline recon --dry-run`, 9 763 чанка, з
   --product {product_id} --emit-yaml
 
 # Разведка корней сателлита: ссылки landing-страницы + объявленная карта сайта
-# (--sitemap ROLE=URL). При неоднозначности корень не предлагается.
+# (--sitemap ROLE=URL). Разведуются только установленные сателлиты; черновик называется
+# в выводе как пропущенный (--include-unestablished — наблюдение, объявлять нельзя).
+# Адрес наблюдения объявляет человек (--seed ROLE=URL): свидетельство связи обычно
+# указывает на главную сайта, а её дерево ссылок — навигация, а не документация.
+# При неоднозначности, вложенности кандидатов или необъявленном адресе корень не
+# предлагается.
 ./hound.py package satellites roots --package packages/{case_id} \
-  --product {product_id} --role backup --out /tmp/roots.yaml
+  --product {product_id} --role backup \
+  --seed backup=https://{host}/{docs-root}/ --out /tmp/roots.yaml
 
 # Объявить однозначные корни в паспорте (требует --actor); затем пересобрать seed-набор
 ./hound.py package satellites roots --package packages/{case_id} \

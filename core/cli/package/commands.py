@@ -3364,8 +3364,14 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
     ``--apply --actor`` пишет однозначные корни в ``satellites[].doc_domains`` паспорта,
     сохраняя комментарии и всё остальное дословно (:mod:`core.pipeline.passport_patch`).
     Паспорт после записи валидируется; невалидный — восстанавливается, запись отменяется.
+
+    Разведуются **установленные** сателлиты (``approved``/``edited_by_human``): корень
+    черновика объявить некуда (``passport_urls`` читает корни только у установленных), и
+    ``--apply`` на нём был бы молчаливым no-op. Черновик называется в выводе; наблюдение
+    его — ``--include-unestablished``, объявление — отказ.
     """
     from core.cli.wiring import LOCAL_PROFILE
+    from core.config.passports import ESTABLISHED_SATELLITE_STATES
     from core.pipeline.package_io import atomic_write_text
     from core.pipeline.passport_patch import patch_satellite_roots
     from core.pipeline.satellite_probe import SatelliteProbePorts, probe_satellite_roots
@@ -3385,17 +3391,83 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
         )
     passport, passports_dir = _satellites_load_passport(args)
     roles_filter = set(getattr(args, "role", None) or [])
-    satellites = [
+    # Корень объявляет только установленный сателлит (``passport_urls`` читает корни
+    # ровно у ``approved``/``edited_by_human``), поэтому и разведка по умолчанию идёт
+    # по установленным: наблюдать черновик можно (``--include-unestablished``), но его
+    # корень всё равно некуда объявить, а `--apply` на нём — молчаливый no-op.
+    established = [
         satellite
         for satellite in passport.satellites
+        if satellite.state in ESTABLISHED_SATELLITE_STATES
+    ]
+    drafts = [
+        satellite
+        for satellite in passport.satellites
+        if satellite.state not in ESTABLISHED_SATELLITE_STATES
+    ]
+    satellites = [
+        satellite
+        for satellite in (established + drafts if getattr(args, "include_unestablished", False) else established)
         if not roles_filter or satellite.role in roles_filter
     ]
-    if not satellites:
+    declared_roles = {satellite.role for satellite in passport.satellites}
+    requested_roles = roles_filter | {
+        str(item).partition("=")[0]
+        for item in (getattr(args, "seed", None) or []) + (getattr(args, "sitemap", None) or [])
+        if str(item).partition("=")[0]
+    }
+    unknown_roles = sorted(requested_roles - declared_roles)
+    if unknown_roles:
         raise CliError(
-            f"у продукта {passport.product_id!r} нет сателлитов под фильтр {sorted(roles_filter) or '—'}",
+            f"--role/--seed/--sitemap: роли не объявлены в паспорте: {unknown_roles}",
             code="usage",
             exit_code=EXIT_USAGE,
         )
+    if not satellites:
+        # Отличаем «сателлитов нет» от «есть только черновики»: второе лечится
+        # объявлением (или флагом наблюдения), первое — нет.
+        if roles_filter and not (established + drafts):
+            detail = "у продукта нет сателлитов вовсе"
+        elif roles_filter:
+            detail = f"под фильтр {sorted(roles_filter)} не подошёл ни один установленный сателлит"
+        else:
+            detail = (
+                f"установленных сателлитов нет (есть только {sorted({s.role for s in drafts})}: "
+                "наблюдение — с --include-unestablished)"
+            )
+        raise CliError(
+            f"у продукта {passport.product_id!r} нечего разведывать: {detail}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    # Роль — не уникальный ключ (у jatoba два `security_crypto`), а адресация вывода
+    # (`--seed ROLE=`, план, правка паспорта) идёт именно по роли. При совпадении
+    # объявление записалось бы не тому сателлиту, а `roots_by_role` оставил бы одну
+    # запись из двух — молча.
+    by_role: dict[str, list[str]] = {}
+    for satellite in satellites:
+        by_role.setdefault(satellite.role, []).append(satellite.component or "—")
+    collisions = {role: names for role, names in by_role.items() if len(names) > 1}
+    if collisions:
+        detail = "; ".join(f"{role}: {names}" for role, names in sorted(collisions.items()))
+        raise CliError(
+            f"роль сателлита не уникальна в паспорте ({detail}) — разведка и объявление "
+            "адресуются ролью; объявите разные роли",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
+    if getattr(args, "apply", False):
+        not_established = [
+            satellite for satellite in satellites if satellite.state not in ESTABLISHED_SATELLITE_STATES
+        ]
+        if not_established:
+            names = ", ".join(f"{s.role}[{s.state.value}]" for s in not_established)
+            raise CliError(
+                f"--apply: корень объявляет только установленный сателлит, а выбраны {names}; "
+                "уберите --include-unestablished или объявите сателлита",
+                code="usage",
+                exit_code=EXIT_USAGE,
+            )
     # Экстрактор нужен как мера «страница дала текст» (пригодность landing-страницы):
     # без него вердикт опирался бы на размер байт, а пустая оболочка выглядела бы живой.
     extractor = getattr(args, "extractor", None)
@@ -3421,11 +3493,12 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
         role, _, url = str(item).partition("=")
         if role and url:
             seed_urls[role] = url
-    declared_roles = {satellite.role for satellite in satellites}
-    unknown_roles = sorted((set(seed_urls) | set(sitemap_urls)) - declared_roles)
-    if unknown_roles:
+    selected_roles = {satellite.role for satellite in satellites}
+    not_selected = sorted((set(seed_urls) | set(sitemap_urls)) - selected_roles)
+    if not_selected:
         raise CliError(
-            f"--seed/--sitemap: роли не объявлены в паспорте: {unknown_roles}",
+            f"--seed/--sitemap: роли не участвуют в разведке: {not_selected} "
+            "(сателлит не установлен — наблюдение требует --include-unestablished)",
             code="usage",
             exit_code=EXIT_USAGE,
         )
@@ -3437,10 +3510,16 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
         seed_urls=seed_urls,
     )
     updates = roots_by_role(plans)
+    selected_ids = {id(satellite) for satellite in satellites}
     payload: dict[str, Any] = {
         "product_id": passport.product_id,
         "plans": [plan.as_dict() for plan in plans],
         "proposed_roots": {role: list(roots) for role, roots in updates.items()},
+        "not_established": [
+            {"role": satellite.role, "component": satellite.component, "state": satellite.state.value}
+            for satellite in drafts
+            if id(satellite) not in selected_ids
+        ],
         "applied": False,
     }
     out_path = getattr(args, "out", None)
@@ -3452,6 +3531,14 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
         _write_text(target, render_plan_yaml(plans))
         payload["plan_file"] = str(target)
     lines = [f"product: {passport.product_id}"]
+    for skipped in payload["not_established"]:
+        # Молчание здесь было бы хуже ошибки: «корней не нашлось» и «сателлит не
+        # установлен» — разные факты, и второй объясняет, почему объявлять нечего.
+        lines.append(
+            f"  (пропущен) {skipped['role']} [{skipped['component'] or '—'}] "
+            f"state={skipped['state']}: корень объявляет только установленный сателлит "
+            "(--include-unestablished — наблюдение)"
+        )
     for plan in plans:
         recommended = plan.recommended()
         lines.append(
