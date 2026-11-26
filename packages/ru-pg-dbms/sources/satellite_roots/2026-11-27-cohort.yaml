@@ -1,0 +1,4317 @@
+# Наблюдение разведки корней сателлитов когорты (2026-11-27).
+#
+# Прибор: `hound package satellites roots --product {pid} [--role R] [--seed R=URL] --out …`
+# (`core/pipeline/satellite_probe.py` → `core/pipeline/satellite_roots.py`).
+# Это **наблюдение**, не объявление: паспорт от него не меняется.
+#
+# Что прибор теперь делает и почему:
+#   * разведуются только **установленные** сателлиты (`approved`/`edited_by_human`);
+#     черновик называется в выводе пропущенным (до 27.11 разведывался и он, хотя
+#     объявить его корень некуда — `passport_urls` читает корни только у установленных);
+#   * рекомендация требует **объявленного** адреса наблюдения (`--seed ROLE=URL`).
+#     Без него причина названа: `site_root_seed` (свидетельство связи — корень сайта)
+#     или `evidence_seed` (страница продукта). Обе дают навигацию сайта, а не дерево
+#     документации: измерено на `tantorlabs.ru` — 88 ссылок, самый покрытый префикс
+#     `/products` (11), то есть объявление маркетингового раздела;
+#   * вложенные кандидаты (`/tp` → `/tp/7.1` → `/tp/7.1/instances`) не рекомендуются:
+#     это выбор масштаба, а не альтернативы.
+#
+# Измерено (шесть проходов):
+#   * postgrespro / backup: `/docs` даёт 8 вложенных кандидатов; объявленный адрес
+#     `…/pg_probackup3/3.5` — 62 ссылки, родитель `…/pg_probackup3` (все версии) — 68.
+#     Граница объявленной редакции 3.5 уже стоит в `doc_domains` продукта.
+#   * postgrespro / query_optimizer (AQO): собственного дерева документации в индексе
+#     `/docs` нет (есть `postgresql`, `postgrespro`, `enterprise`, `otelcol`,
+#     `pg_probackup3`, `ora2pgpro`, `shardman`, `axe`, `ppem`, `progate`); единственные
+#     кандидаты — маркетинговые `/products` и `/products/postgrespro`.
+#   * tantor / management_console (Tantor Platform): дерево `docs.tantorlabs.ru/tp/7.1`
+#     — 171 ссылка (`instances` 72, `admin` 52, `release_notes` 39). Версия в паспорте
+#     — Platform 7.0, в документации доступна 7.1: расхождение для человека.
+#   * tantor / streaming (PipelineDB): `docs.tantorlabs.ru/pipelinedb/ru/1.4-ru` — 18
+#     ссылок, родитель `/pipelinedb/ru` — 20. `robots` сайта запрещает seed-адрес —
+#     граница сайта, а не отсутствие материала (0.6.0).
+#   * tantor / database_appliance (XData): дерева документации в наблюдении нет
+#     (в `docs.tantorlabs.ru` есть `tdb`, `tp`, `pipelinedb`, `perseydb`).
+#   * jatoba / security_crypto (КриптоПро): на сайте продукта документации компонента
+#     нет; наблюдение дало разделы сертификатов (`/img/cert` 42, `…/tinymce` 70) —
+#     это не документация. Документация КриптоПро живёт у другого вендора и в
+#     объявленные хосты не входит: расширение корпуса — решение человека.
+- postgrespro_evidence:
+  - product_id: postgrespro
+    role: backup
+    component: pg_probackup
+    seed_url: https://postgrespro.ru/docs
+    final_url: https://postgrespro.ru/docs
+    ambiguous: false
+    nested: true
+    blocked: evidence_seed
+    recommended: null
+    candidates:
+    - key: postgrespro.ru/docs
+      documents: 55
+      depth: 1
+      urls:
+      - https://postgrespro.ru/docs/axe/1/index
+      - https://postgrespro.ru/docs/axe/2/index
+      - https://postgrespro.ru/docs/enterprise/10/index
+      - https://postgrespro.ru/docs/enterprise/11/index
+      - https://postgrespro.ru/docs/enterprise/12/index
+      - https://postgrespro.ru/docs/enterprise/13/index
+      - https://postgrespro.ru/docs/enterprise/14/index
+      - https://postgrespro.ru/docs/enterprise/15/index
+      - https://postgrespro.ru/docs/enterprise/16/index
+      - https://postgrespro.ru/docs/enterprise/17/index
+      - https://postgrespro.ru/docs/enterprise/18/index
+      - https://postgrespro.ru/docs/enterprise/9.6/index
+      - https://postgrespro.ru/docs/ora2pgpro/23/index
+      - https://postgrespro.ru/docs/ora2pgpro/24/index
+      - https://postgrespro.ru/docs/ora2pgpro/26/index
+      - https://postgrespro.ru/docs/otelcol/0.3/index
+      - https://postgrespro.ru/docs/otelcol/0.4/index
+      - https://postgrespro.ru/docs/otelcol/0.5/index
+      - https://postgrespro.ru/docs/otelcol/0.6/index
+      - https://postgrespro.ru/docs/otelcol/0.7/index
+      - https://postgrespro.ru/docs/otelcol/0/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.0/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.1/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.2/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.3/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.4/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/index
+      - https://postgrespro.ru/docs/postgrespro/10/index
+      - https://postgrespro.ru/docs/postgrespro/11/index
+      - https://postgrespro.ru/docs/postgrespro/12/index
+      - https://postgrespro.ru/docs/postgrespro/13/index
+      - https://postgrespro.ru/docs/postgrespro/14/index
+      - https://postgrespro.ru/docs/postgrespro/15/index
+      - https://postgrespro.ru/docs/postgrespro/16/index
+      - https://postgrespro.ru/docs/postgrespro/17/index
+      - https://postgrespro.ru/docs/postgrespro/18/index
+      - https://postgrespro.ru/docs/postgrespro/9.5/index
+      - https://postgrespro.ru/docs/postgrespro/9.6/index
+      - https://postgrespro.ru/docs/postgresql/10/index
+      - https://postgrespro.ru/docs/postgresql/11/index
+      - https://postgrespro.ru/docs/postgresql/12/index
+      - https://postgrespro.ru/docs/postgresql/13/index
+      - https://postgrespro.ru/docs/postgresql/14/index
+      - https://postgrespro.ru/docs/postgresql/15/index
+      - https://postgrespro.ru/docs/postgresql/16/index
+      - https://postgrespro.ru/docs/postgresql/17/index
+      - https://postgrespro.ru/docs/postgresql/18/index
+      - https://postgrespro.ru/docs/postgresql/9.4/index
+      - https://postgrespro.ru/docs/postgresql/9.5/index
+      - https://postgrespro.ru/docs/postgresql/9.6/index
+      - https://postgrespro.ru/docs/ppem/2/index
+      - https://postgrespro.ru/docs/progate/1/index
+      - https://postgrespro.ru/docs/shardman/14/index
+      - https://postgrespro.ru/docs/shardman/17/index
+      - https://postgrespro.ru/docs/shardman/18/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/postgresql
+      documents: 12
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/postgresql/10/index
+      - https://postgrespro.ru/docs/postgresql/11/index
+      - https://postgrespro.ru/docs/postgresql/12/index
+      - https://postgrespro.ru/docs/postgresql/13/index
+      - https://postgrespro.ru/docs/postgresql/14/index
+      - https://postgrespro.ru/docs/postgresql/15/index
+      - https://postgrespro.ru/docs/postgresql/16/index
+      - https://postgrespro.ru/docs/postgresql/17/index
+      - https://postgrespro.ru/docs/postgresql/18/index
+      - https://postgrespro.ru/docs/postgresql/9.4/index
+      - https://postgrespro.ru/docs/postgresql/9.5/index
+      - https://postgrespro.ru/docs/postgresql/9.6/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/postgrespro
+      documents: 11
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/postgrespro/10/index
+      - https://postgrespro.ru/docs/postgrespro/11/index
+      - https://postgrespro.ru/docs/postgrespro/12/index
+      - https://postgrespro.ru/docs/postgrespro/13/index
+      - https://postgrespro.ru/docs/postgrespro/14/index
+      - https://postgrespro.ru/docs/postgrespro/15/index
+      - https://postgrespro.ru/docs/postgrespro/16/index
+      - https://postgrespro.ru/docs/postgrespro/17/index
+      - https://postgrespro.ru/docs/postgrespro/18/index
+      - https://postgrespro.ru/docs/postgrespro/9.5/index
+      - https://postgrespro.ru/docs/postgrespro/9.6/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/enterprise
+      documents: 10
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/enterprise/10/index
+      - https://postgrespro.ru/docs/enterprise/11/index
+      - https://postgrespro.ru/docs/enterprise/12/index
+      - https://postgrespro.ru/docs/enterprise/13/index
+      - https://postgrespro.ru/docs/enterprise/14/index
+      - https://postgrespro.ru/docs/enterprise/15/index
+      - https://postgrespro.ru/docs/enterprise/16/index
+      - https://postgrespro.ru/docs/enterprise/17/index
+      - https://postgrespro.ru/docs/enterprise/18/index
+      - https://postgrespro.ru/docs/enterprise/9.6/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/otelcol
+      documents: 6
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/otelcol/0.3/index
+      - https://postgrespro.ru/docs/otelcol/0.4/index
+      - https://postgrespro.ru/docs/otelcol/0.5/index
+      - https://postgrespro.ru/docs/otelcol/0.6/index
+      - https://postgrespro.ru/docs/otelcol/0.7/index
+      - https://postgrespro.ru/docs/otelcol/0/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/pg_probackup3
+      documents: 6
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/pg_probackup3/3.0/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.1/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.2/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.3/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.4/index
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/ora2pgpro
+      documents: 3
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/ora2pgpro/23/index
+      - https://postgrespro.ru/docs/ora2pgpro/24/index
+      - https://postgrespro.ru/docs/ora2pgpro/26/index
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/shardman
+      documents: 3
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/shardman/14/index
+      - https://postgrespro.ru/docs/shardman/17/index
+      - https://postgrespro.ru/docs/shardman/18/index
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 112
+      examples:
+      - https://max.ru/id7729445882_biz
+      - https://postgrespro.com/
+      - https://repo.postgrespro.ru/doc/axe/1.1.2/ru/postgres-pro-axe.epub
+      - https://repo.postgrespro.ru/doc/axe/1.1.2/ru/postgres-pro-axe.pdf
+      - https://repo.postgrespro.ru/doc/axe/2.0.1/ru/postgres-pro-axe.epub
+    - reason: below_min_links
+      key: postgrespro.ru/user
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/cases
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/order
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/18
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/18/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/17
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/17/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/16
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/16/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/15
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/15/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/14
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/14/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/13
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/13/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/12
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/12/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/11
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/11/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/10
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/10/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/9.6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/enterprise/9.6/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media/docs
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media/docs/enterprise
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media/docs/enterprise/9.6
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media/docs/enterprise/9.6/ru
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media/docs/enterprise/9.6/ru/postgres.epub
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/media/docs/enterprise/9.6/ru/postgres-A4-fop.pdf
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/18
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/18/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/17
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/17/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/16
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/16/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/15
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/15/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/14
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/14/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/13
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/13/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/12
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/12/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/11
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/11/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/10
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/10/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/9.6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/9.6/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/9.5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgrespro/9.5/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/18
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/18/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/17
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/17/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/16
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/16/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/15
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/15/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/14
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/14/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/13
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/13/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/12
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/12/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/11
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/11/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/10
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/10/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/9.6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/9.6/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/9.5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/9.5/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/9.4
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/postgresql/9.4/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/axe
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/axe/2
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/axe/2/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/axe/1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/axe/1/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/shardman/18
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/shardman/18/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/shardman/17
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/shardman/17/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/shardman/14
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/shardman/14/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ppem
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ppem/2
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ppem/2/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.7
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.7/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.6
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.6/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.5/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.4
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.4/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0.3/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/otelcol/0/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.4
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.4/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.3/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.2
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.2/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.1/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.0/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/progate
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/progate/1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/progate/1/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ora2pgpro/26
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ora2pgpro/26/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ora2pgpro/24
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ora2pgpro/24/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ora2pgpro/23
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/ora2pgpro/23/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/useragreement
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/legal
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/privacy
+      documents: 1
+      min_links: 3
+    notes:
+    - 'evidence_seed: адрес взят из свидетельства связи, а не объявлен оператором;
+      страница продукта даёт навигацию сайта, а не дерево документации — задайте --seed
+      ROLE=URL'
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'transport: http'
+    - 'text_chars: 823'
+    - 'links: 177'
+  - product_id: postgrespro
+    role: query_optimizer
+    component: AQO
+    seed_url: https://postgrespro.ru/products/postgrespro
+    final_url: https://postgrespro.ru/products
+    ambiguous: false
+    nested: true
+    blocked: evidence_seed
+    recommended: null
+    candidates:
+    - key: postgrespro.ru/products
+      documents: 7
+      depth: 1
+      urls:
+      - https://postgrespro.ru/products
+      - https://postgrespro.ru/products/enterprise-certified-1c
+      - https://postgrespro.ru/products/postgrespro/certified
+      - https://postgrespro.ru/products/postgrespro/enterprise
+      - https://postgrespro.ru/products/postgrespro/enterprise-1c
+      - https://postgrespro.ru/products/postgrespro/enterprisecertified
+      - https://postgrespro.ru/products/postgrespro/standard
+      evidence:
+      - links
+    - key: postgrespro.ru/products/postgrespro
+      documents: 5
+      depth: 2
+      urls:
+      - https://postgrespro.ru/products/postgrespro/certified
+      - https://postgrespro.ru/products/postgrespro/enterprise
+      - https://postgrespro.ru/products/postgrespro/enterprise-1c
+      - https://postgrespro.ru/products/postgrespro/enterprisecertified
+      - https://postgrespro.ru/products/postgrespro/standard
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 5
+      examples:
+      - https://max.ru/id7729445882_biz
+      - https://postgrespro.com/
+      - https://t.me/postgres_pro
+      - https://vk.com/public101507899
+      - https://www.youtube.com/@PostgresProfessional
+    - reason: below_min_links
+      key: postgrespro.ru/user
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/cases
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/order
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/products/postgrespro/enterprise
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/products/postgrespro/enterprise-1c
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/products/postgrespro/enterprisecertified
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/products/enterprise-certified-1c
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/products/postgrespro/standard
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/products/postgrespro/certified
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/legal
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/privacy
+      documents: 1
+      min_links: 3
+    notes:
+    - 'evidence_seed: адрес взят из свидетельства связи, а не объявлен оператором;
+      страница продукта даёт навигацию сайта, а не дерево документации — задайте --seed
+      ROLE=URL'
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'transport: http'
+    - 'text_chars: 979'
+    - 'links: 19'
+- postgrespro_backup_declared_seed:
+  - product_id: postgrespro
+    role: backup
+    component: pg_probackup
+    seed_url: https://postgrespro.ru/docs/pg_probackup3/3.5
+    final_url: https://postgrespro.ru/docs/pg_probackup3/3.5
+    ambiguous: false
+    nested: true
+    blocked: null
+    recommended: null
+    candidates:
+    - key: postgrespro.ru/docs/pg_probackup3
+      documents: 68
+      depth: 2
+      urls:
+      - https://postgrespro.ru/docs/pg_probackup3/3.0/index?lang=ru
+      - https://postgrespro.ru/docs/pg_probackup3/3.1/index?lang=ru
+      - https://postgrespro.ru/docs/pg_probackup3/3.2/index?lang=ru
+      - https://postgrespro.ru/docs/pg_probackup3/3.3/index?lang=ru
+      - https://postgrespro.ru/docs/pg_probackup3/3.4/index?lang=ru
+      - https://postgrespro.ru/docs/pg_probackup3/3.5
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/app-pgprobackup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/libpgpbk
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-adding-new-backup-instance
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-advanced
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-catalog
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-process
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-reference
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-bookindex
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-compatibility
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-compatibility-with-postgres
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-pg-probackup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-retention-policy
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-the-database-cluster
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-connection-parameter-priority
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-creating-backup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-creating-backup-to-catchup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-develop
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-full-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-incremental-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-initializing-a-backup-catalog
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-install-and-setup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-installation
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-key-features
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-known-issues
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-known-issues-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-legal-notice
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-limitations
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-limitations-versions
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-managing-the-backup-catalog
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-more-examples
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-new-features
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-page-validation
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-partial-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-performing-point-in-time-pitr-recovery
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-0-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-0-2
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-1-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-1-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-2-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-2-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-3-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-4-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-4-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-5-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-5-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-notes
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-remote-mode
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-remote-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-restore-process
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-restoring-a-cluster-limitations
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-running-pg-probackup-on-parallel-threads
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-server-access-modes
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-continuous-wal-archiving
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-fuse
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-ptrack-backups
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-stream-backups
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-solution-intro
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-supported-os
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/upgrading-pg-probackup3
+      - https://postgrespro.ru/docs/pg_probackup3/3.5?lang=en
+      - https://postgrespro.ru/docs/pg_probackup3/3.5?lang=ru-en
+      - https://postgrespro.ru/docs/pg_probackup3/current
+      evidence:
+      - links
+    - key: postgrespro.ru/docs/pg_probackup3/3.5
+      documents: 62
+      depth: 3
+      urls:
+      - https://postgrespro.ru/docs/pg_probackup3/3.5
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/app-pgprobackup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/libpgpbk
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-adding-new-backup-instance
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-advanced
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-catalog
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-process
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-reference
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-bookindex
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-compatibility
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-compatibility-with-postgres
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-pg-probackup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-retention-policy
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-the-database-cluster
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-connection-parameter-priority
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-creating-backup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-creating-backup-to-catchup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-develop
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-full-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-incremental-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-initializing-a-backup-catalog
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-install-and-setup
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-installation
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-key-features
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-known-issues
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-known-issues-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-legal-notice
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-limitations
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-limitations-versions
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-managing-the-backup-catalog
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-more-examples
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-new-features
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-page-validation
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-partial-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-performing-point-in-time-pitr-recovery
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-0-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-0-2
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-1-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-1-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-2-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-2-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-3-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-4-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-4-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-5-0
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-5-1
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-notes
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-remote-mode
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-remote-restore
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-restore-process
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-restoring-a-cluster-limitations
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-running-pg-probackup-on-parallel-threads
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-server-access-modes
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-continuous-wal-archiving
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-fuse
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-ptrack-backups
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-stream-backups
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-solution-intro
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-supported-os
+      - https://postgrespro.ru/docs/pg_probackup3/3.5/upgrading-pg-probackup3
+      - https://postgrespro.ru/docs/pg_probackup3/3.5?lang=en
+      - https://postgrespro.ru/docs/pg_probackup3/3.5?lang=ru-en
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 8
+      examples:
+      - https://max.ru/id7729445882_biz
+      - https://postgrespro.com/
+      - https://repo.postgrespro.ru/doc/pg_probackup3/3.5.1/ru/libpgprobackup3.pdf
+      - https://repo.postgrespro.ru/doc/pg_probackup3/3.5.1/ru/pg_probackup3.epub
+      - https://repo.postgrespro.ru/doc/pg_probackup3/3.5.1/ru/pg_probackup3.pdf
+    - reason: below_min_links
+      key: postgrespro.ru/user
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/cases
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/education
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/order
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/current
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.4
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.4/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.3/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.2
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.2/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.1/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.0/index
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-solution-intro
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-legal-notice
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-key-features
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-new-features
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-limitations
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-install-and-setup
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-installation
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/upgrading-pg-probackup3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-remote-mode
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-initializing-a-backup-catalog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-adding-new-backup-instance
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-pg-probackup
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-connection-parameter-priority
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-the-database-cluster
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-more-examples
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-process
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-server-access-modes
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-stream-backups
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-continuous-wal-archiving
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-ptrack-backups
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-creating-backup
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-page-validation
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-restore-process
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-restoring-a-cluster-limitations
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-full-restore
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-incremental-restore
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-partial-restore
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-performing-point-in-time-pitr-recovery
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-remote-restore
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-catalog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-managing-the-backup-catalog
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-configuring-retention-policy
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-advanced
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-running-pg-probackup-on-parallel-threads
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-creating-backup-to-catchup
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-fuse
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-backup-reference
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/app-pgprobackup
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-develop
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/libpgpbk
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-notes
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-5-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-5-0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-4-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-4-0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-3-0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-2-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-2-0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-1-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-1-0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-0-2
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-release-3-0-0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-known-issues
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-known-issues-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-compatibility
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-compatibility-with-postgres
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-limitations-versions
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-supported-os
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/docs/pg_probackup3/3.5/pbk-bookindex
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/legal
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: postgrespro.ru/privacy
+      documents: 1
+      min_links: 3
+    notes:
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://postgrespro.ru/docs/pg_probackup3/3.5 (объявлен оператором)'
+    - 'transport: http'
+    - 'text_chars: 667'
+    - 'links: 83'
+- tantor_evidence:
+  - product_id: tantor
+    role: management_console
+    component: Tantor Platform
+    seed_url: https://tantorlabs.ru
+    final_url: https://tantorlabs.ru
+    ambiguous: false
+    nested: false
+    blocked: site_root_seed
+    recommended: null
+    candidates:
+    - key: tantorlabs.ru/products
+      documents: 11
+      depth: 1
+      urls:
+      - https://tantorlabs.ru/products/compare
+      - https://tantorlabs.ru/products/dbms
+      - https://tantorlabs.ru/products/dbms/cve
+      - https://tantorlabs.ru/products/di
+      - https://tantorlabs.ru/products/dlh
+      - https://tantorlabs.ru/products/pipelinedb
+      - https://tantorlabs.ru/products/platform
+      - https://tantorlabs.ru/products/se
+      - https://tantorlabs.ru/products/xdata
+      - https://tantorlabs.ru/products/xdata-gen3
+      - https://tantorlabs.ru/products/xdata-gen3/tpost/zioiy9l091-u-nas-nastoyaschaya-gibridnaya-htap-sist
+      evidence:
+      - links
+    - key: tantorlabs.ru/policy
+      documents: 7
+      depth: 1
+      urls:
+      - http://tantorlabs.ru/policy/cookies
+      - http://tantorlabs.ru/policy/eula-dlh
+      - https://tantorlabs.ru/policy/confidentiality
+      - https://tantorlabs.ru/policy/cookies
+      - https://tantorlabs.ru/policy/licensing
+      - https://tantorlabs.ru/policy/licensing_platformatantor
+      - https://tantorlabs.ru/policy/licensing_tantor
+      evidence:
+      - links
+    - key: tantorlabs.ru/edu
+      documents: 4
+      depth: 1
+      urls:
+      - https://tantorlabs.ru/edu
+      - https://tantorlabs.ru/edu/dba
+      - https://tantorlabs.ru/edu/open/tantor-platform-2-1
+      - https://tantorlabs.ru/edu/program
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 34
+      examples:
+      - https://cisoclub.ru/
+      - https://disk.360.yandex.ru/d/488cJmo_xQ_nWg
+      - https://disk.360.yandex.ru/d/DZOVKLfkIA7reg
+      - https://docs.tantorlabs.ru/patroni/
+      - https://docs.tantorlabs.ru/perseydb/ru/latest/index.html
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dbms
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tantor-se-1c
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/certified
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/pipelinedb
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/platform
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/di
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/compare
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/pgconfigurator
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tools
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tools/pg_anon
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dbms/cve
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/dba
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/educationcenter
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/educationcenter-dbms
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/program
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/open
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/open/tantor-platform-2-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/docs
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/download-page
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/customers
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/content
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/content/talks
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/company
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/partners
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/powered-by-tantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/events
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/branding
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/career
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/kontakty
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/news
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/cookies
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/confidentiality
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/ack-user
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dlh
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/se
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3/tpost
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3/tpost/zioiy9l091-u-nas-nastoyaschaya-gibridnaya-htap-sist
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/postgresql-professionalnaya-subd
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/articles
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/articles/db-dev
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/agreement
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing_platformatantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing_tantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/eula-dlh
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/docs/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/blog
+      documents: 1
+      min_links: 3
+    notes:
+    - 'site_root_seed: адрес наблюдения — корень сайта, его дерево ссылок это навигация,
+      а не документация компонента; задайте --seed ROLE=URL'
+    - 'transport: http'
+    - 'text_chars: 6811'
+    - 'links: 88'
+  - product_id: tantor
+    role: streaming
+    component: PipelineDB
+    seed_url: https://tantorlabs.ru/products/dbms
+    final_url: https://tantorlabs.ru/products/dbms
+    ambiguous: false
+    nested: false
+    blocked: evidence_seed
+    recommended: null
+    candidates:
+    - key: tantorlabs.ru/products
+      documents: 8
+      depth: 1
+      urls:
+      - https://tantorlabs.ru/products/compare
+      - https://tantorlabs.ru/products/dbms
+      - https://tantorlabs.ru/products/dbms/cve
+      - https://tantorlabs.ru/products/di
+      - https://tantorlabs.ru/products/pipelinedb
+      - https://tantorlabs.ru/products/platform
+      - https://tantorlabs.ru/products/xdata
+      - https://tantorlabs.ru/products/xdata-gen3
+      evidence:
+      - links
+    - key: tantorlabs.ru/policy
+      documents: 7
+      depth: 1
+      urls:
+      - http://tantorlabs.ru/policy/cookies
+      - http://tantorlabs.ru/policy/eula-dlh
+      - https://tantorlabs.ru/policy/confidentiality
+      - https://tantorlabs.ru/policy/cookies
+      - https://tantorlabs.ru/policy/licensing
+      - https://tantorlabs.ru/policy/licensing_platformatantor
+      - https://tantorlabs.ru/policy/licensing_tantor
+      evidence:
+      - links
+    - key: tantorlabs.ru/edu
+      documents: 4
+      depth: 1
+      urls:
+      - https://tantorlabs.ru/edu
+      - https://tantorlabs.ru/edu/dba
+      - https://tantorlabs.ru/edu/open/tantor-platform-2-1
+      - https://tantorlabs.ru/edu/program
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 32
+      examples:
+      - https://disk.360.yandex.ru/d/488cJmo_xQ_nWg
+      - https://disk.360.yandex.ru/d/DZOVKLfkIA7reg
+      - https://disk.360.yandex.ru/i/QYjJM8fWH4dvjA
+      - https://docs.tantorlabs.ru/patroni/
+      - https://docs.tantorlabs.ru/perseydb/ru/latest/index.html
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dbms
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tantor-se-1c
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/certified
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/pipelinedb
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/platform
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/di
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/compare
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/pgconfigurator
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tools
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tools/pg_anon
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dbms/cve
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/dba
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/educationcenter
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/educationcenter-dbms
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/program
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/open
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/open/tantor-platform-2-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/docs
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/download-page
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/customers
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/content
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/content/talks
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/company
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/partners
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/powered-by-tantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/events
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/branding
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/career
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/kontakty
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/news
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/cookies
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/confidentiality
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/ack-user
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/information
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/agreement
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing_platformatantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing_tantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/eula-dlh
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/docs/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/blog
+      documents: 1
+      min_links: 3
+    notes:
+    - 'evidence_seed: адрес взят из свидетельства связи, а не объявлен оператором;
+      страница продукта даёт навигацию сайта, а не дерево документации — задайте --seed
+      ROLE=URL'
+    - 'transport: http'
+    - 'text_chars: 15485'
+    - 'links: 81'
+  - product_id: tantor
+    role: database_appliance
+    component: XData
+    seed_url: https://tantorlabs.ru
+    final_url: https://tantorlabs.ru
+    ambiguous: false
+    nested: false
+    blocked: site_root_seed
+    recommended: null
+    candidates:
+    - key: tantorlabs.ru/products
+      documents: 11
+      depth: 1
+      urls:
+      - https://tantorlabs.ru/products/compare
+      - https://tantorlabs.ru/products/dbms
+      - https://tantorlabs.ru/products/dbms/cve
+      - https://tantorlabs.ru/products/di
+      - https://tantorlabs.ru/products/dlh
+      - https://tantorlabs.ru/products/pipelinedb
+      - https://tantorlabs.ru/products/platform
+      - https://tantorlabs.ru/products/se
+      - https://tantorlabs.ru/products/xdata
+      - https://tantorlabs.ru/products/xdata-gen3
+      - https://tantorlabs.ru/products/xdata-gen3/tpost/zioiy9l091-u-nas-nastoyaschaya-gibridnaya-htap-sist
+      evidence:
+      - links
+    - key: tantorlabs.ru/policy
+      documents: 7
+      depth: 1
+      urls:
+      - http://tantorlabs.ru/policy/cookies
+      - http://tantorlabs.ru/policy/eula-dlh
+      - https://tantorlabs.ru/policy/confidentiality
+      - https://tantorlabs.ru/policy/cookies
+      - https://tantorlabs.ru/policy/licensing
+      - https://tantorlabs.ru/policy/licensing_platformatantor
+      - https://tantorlabs.ru/policy/licensing_tantor
+      evidence:
+      - links
+    - key: tantorlabs.ru/edu
+      documents: 4
+      depth: 1
+      urls:
+      - https://tantorlabs.ru/edu
+      - https://tantorlabs.ru/edu/dba
+      - https://tantorlabs.ru/edu/open/tantor-platform-2-1
+      - https://tantorlabs.ru/edu/program
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 34
+      examples:
+      - https://cisoclub.ru/
+      - https://disk.360.yandex.ru/d/488cJmo_xQ_nWg
+      - https://disk.360.yandex.ru/d/DZOVKLfkIA7reg
+      - https://docs.tantorlabs.ru/patroni/
+      - https://docs.tantorlabs.ru/perseydb/ru/latest/index.html
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dbms
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tantor-se-1c
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/certified
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/pipelinedb
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/platform
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/di
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/compare
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/pgconfigurator
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tools
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/tools/pg_anon
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dbms/cve
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/dba
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/educationcenter
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/educationcenter-dbms
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/program
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/open
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/edu/open/tantor-platform-2-1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/docs
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/download-page
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/customers
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/content
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/content/talks
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/company
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/partners
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/powered-by-tantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/events
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/branding
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/career
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/kontakty
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/news
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/cookies
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/confidentiality
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/ack-user
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/dlh
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/se
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3/tpost
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/products/xdata-gen3/tpost/zioiy9l091-u-nas-nastoyaschaya-gibridnaya-htap-sist
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/postgresql-professionalnaya-subd
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/articles
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/articles/db-dev
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/agreement
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing_platformatantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/licensing_tantor
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/policy/eula-dlh
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/docs/support
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: tantorlabs.ru/blog
+      documents: 1
+      min_links: 3
+    notes:
+    - 'site_root_seed: адрес наблюдения — корень сайта, его дерево ссылок это навигация,
+      а не документация компонента; задайте --seed ROLE=URL'
+    - 'transport: http'
+    - 'text_chars: 6811'
+    - 'links: 88'
+- tantor_management_console_declared_seed:
+  - product_id: tantor
+    role: management_console
+    component: Tantor Platform
+    seed_url: https://docs.tantorlabs.ru/tp/latest/
+    final_url: https://docs.tantorlabs.ru/tp/7.1/index.html
+    ambiguous: false
+    nested: true
+    blocked: null
+    recommended: null
+    candidates:
+    - key: docs.tantorlabs.ru/tp
+      documents: 178
+      depth: 1
+      urls:
+      - https://docs.tantorlabs.ru/tp/5.3/index.html
+      - https://docs.tantorlabs.ru/tp/6.0/index.html
+      - https://docs.tantorlabs.ru/tp/6.1/index.html
+      - https://docs.tantorlabs.ru/tp/6.2/index.html
+      - https://docs.tantorlabs.ru/tp/6.3/index.html
+      - https://docs.tantorlabs.ru/tp/6.4/index.html
+      - https://docs.tantorlabs.ru/tp/7.0/index.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/aa_s3.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/additional_elems_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_diagnostic_utility.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_firststart.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_licensing.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_multitenants.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_new_workspace.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_reports.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_tokens.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_users.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/ai_assistant_notifications.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/assistant_llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/assistant_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/backup.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/backup_info.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/components_llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/delete_platform.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/gpu_requirements.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/group_page.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/groups_common.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/groups_new.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/health_score.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/integrations.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/ldap.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/llm_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/monitoring_with_prometheus_and_grafana.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_anon_stateless.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_monitor_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_stat_statements_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_store_plans_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/platform_maintenance.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/postgresPro_type_connection.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/quickstart.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_email.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_mattermost.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_max.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_telegram.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_yuchat.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/siem_integration.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/smtp.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/swagger_ui.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/system_owners.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/triafly_bi.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/update_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/user_page.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_common.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_new.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_owner_transfer.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/wizard.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/xdata.html
+      - https://docs.tantorlabs.ru/tp/7.1/administration.html
+      - https://docs.tantorlabs.ru/tp/7.1/glossary.html
+      - https://docs.tantorlabs.ru/tp/7.1/index.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/DB_browser.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/access_rules.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/activity.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_anonymizer.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_instances.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_scheduler.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_tiles.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_ansible.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_instance_cli.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_update.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ai-assistant.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring_tenant.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/charts.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cluster_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cluster_monitoring.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/clusters_management.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/configurations.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cve.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/event_log.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_adding.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_configuration.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_health.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instances_list.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/maintenance.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/monitoring_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/param_groups.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_ANALYZE.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_query.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_time.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_CHECKPOINT.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Errors.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Locks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Logs.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_mega_diff.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_p_q_r.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Plans.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Problematic_queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_PSA_PS.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_Statistics_by_table.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_VACUUM.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_accesses_to_table_to_index.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_glossary.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_node.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_page_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_system_actions_pidstat.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_templates.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_monitor.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/query_plan_analysis.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/polar_overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/query_profiler.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/replication.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/self_healing.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/self_healing_history.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/tablespaces.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/tasks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/topology.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_agents.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_agents_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_alerts.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_cluster_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_pages.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_instance_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_platform_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_workspace_overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/introduction.html
+      - https://docs.tantorlabs.ru/tp/7.1/platform_architecture.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_10.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_12.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_13.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_4.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_6.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_7.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_9.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/requirements.html
+      - https://docs.tantorlabs.ru/tp/7.1/user_guide.html
+      evidence:
+      - links
+    - key: docs.tantorlabs.ru/tp/7.1
+      documents: 171
+      depth: 2
+      urls:
+      - https://docs.tantorlabs.ru/tp/7.1/admin/aa_s3.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/additional_elems_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_diagnostic_utility.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_firststart.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_licensing.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_multitenants.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_new_workspace.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_reports.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_tokens.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_users.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/ai_assistant_notifications.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/assistant_llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/assistant_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/backup.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/backup_info.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/components_llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/delete_platform.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/gpu_requirements.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/group_page.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/groups_common.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/groups_new.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/health_score.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/integrations.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/ldap.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/llm_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/monitoring_with_prometheus_and_grafana.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_anon_stateless.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_monitor_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_stat_statements_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_store_plans_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/platform_maintenance.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/postgresPro_type_connection.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/quickstart.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_email.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_mattermost.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_max.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_telegram.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_yuchat.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/siem_integration.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/smtp.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/swagger_ui.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/system_owners.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/triafly_bi.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/update_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/user_page.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_common.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_new.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_owner_transfer.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/wizard.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/xdata.html
+      - https://docs.tantorlabs.ru/tp/7.1/administration.html
+      - https://docs.tantorlabs.ru/tp/7.1/glossary.html
+      - https://docs.tantorlabs.ru/tp/7.1/index.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/DB_browser.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/access_rules.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/activity.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_anonymizer.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_instances.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_scheduler.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_tiles.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_ansible.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_instance_cli.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_update.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ai-assistant.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring_tenant.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/charts.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cluster_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cluster_monitoring.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/clusters_management.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/configurations.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cve.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/event_log.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_adding.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_configuration.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_health.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instances_list.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/maintenance.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/monitoring_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/param_groups.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_ANALYZE.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_query.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_time.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_CHECKPOINT.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Errors.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Locks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Logs.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_mega_diff.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_p_q_r.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Plans.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Problematic_queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_PSA_PS.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_Statistics_by_table.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_VACUUM.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_accesses_to_table_to_index.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_glossary.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_node.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_page_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_system_actions_pidstat.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_templates.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_monitor.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/query_plan_analysis.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/polar_overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/query_profiler.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/replication.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/self_healing.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/self_healing_history.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/tablespaces.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/tasks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/topology.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_agents.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_agents_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_alerts.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_cluster_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_pages.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_instance_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_platform_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_workspace_overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/introduction.html
+      - https://docs.tantorlabs.ru/tp/7.1/platform_architecture.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_10.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_12.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_13.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_4.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_6.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_7.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_9.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/requirements.html
+      - https://docs.tantorlabs.ru/tp/7.1/user_guide.html
+      evidence:
+      - links
+    - key: docs.tantorlabs.ru/tp/7.1/instances
+      documents: 72
+      depth: 3
+      urls:
+      - https://docs.tantorlabs.ru/tp/7.1/instances/DB_browser.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/access_rules.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/activity.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_anonymizer.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_instances.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_scheduler.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/admin_tiles.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_ansible.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_instance_cli.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/agent_update.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ai-assistant.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring_tenant.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/charts.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cluster_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cluster_monitoring.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/clusters_management.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/configurations.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/cve.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/event_log.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_adding.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_configuration.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instance_health.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/instances_list.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/maintenance.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/monitoring_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/param_groups.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_ANALYZE.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_query.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_time.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_CHECKPOINT.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Errors.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Locks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Logs.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_mega_diff.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_p_q_r.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Plans.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Problematic_queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_PSA_PS.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_Statistics_by_table.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_VACUUM.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_accesses_to_table_to_index.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_glossary.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_node.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_page_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_system_actions_pidstat.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_templates.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_monitor.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/query_plan_analysis.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/polar_overview.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/query_profiler.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/replication.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/self_healing.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/self_healing_history.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/tablespaces.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/tasks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/topology.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_agents.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_agents_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_alerts.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_cluster_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_pages.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_instance_config.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_platform_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/ug_workspace_overview.html
+      evidence:
+      - links
+    - key: docs.tantorlabs.ru/tp/7.1/admin
+      documents: 52
+      depth: 3
+      urls:
+      - https://docs.tantorlabs.ru/tp/7.1/admin/aa_s3.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/additional_elems_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_diagnostic_utility.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_firststart.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_licensing.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_multitenants.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_new_workspace.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_reports.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_tokens.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/admin_users.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/ai_assistant_notifications.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/assistant_llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/assistant_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/backup.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/backup_info.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/components_llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/delete_platform.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/gpu_requirements.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/group_page.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/groups_common.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/groups_new.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/health_score.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/integrations.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/ldap.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/llm.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/llm_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/monitoring_with_prometheus_and_grafana.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_anon_stateless.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_monitor_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_stat_statements_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/pg_store_plans_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/platform_maintenance.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/postgresPro_type_connection.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/quickstart.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_email.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_mattermost.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_max.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_telegram.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/reports_yuchat.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/siem_integration.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/smtp.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/swagger_ui.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/system_owners.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/triafly_bi.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/update_installation.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/user_page.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_common.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_new.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/users_owner_transfer.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/wizard.html
+      - https://docs.tantorlabs.ru/tp/7.1/admin/xdata.html
+      evidence:
+      - links
+    - key: docs.tantorlabs.ru/tp/7.1/release_notes
+      documents: 39
+      depth: 3
+      urls:
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_10.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_12.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_13.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_4.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_6.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_7.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_1_9.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_4_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_5_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_3.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_2.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_0.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_1.html
+      - https://docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_2.html
+      evidence:
+      - links
+    - key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor
+      documents: 26
+      depth: 4
+      urls:
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_ANALYZE.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_query.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_time.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_CHECKPOINT.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Errors.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Locks.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Logs.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_mega_diff.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_p_q_r.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Plans.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Problematic_queries.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_PSA_PS.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_Statistics_by_table.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_VACUUM.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_accesses_to_table_to_index.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_glossary.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_node.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_page_control_panel.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_settings.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_system_actions_pidstat.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_templates.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_monitor.html
+      - https://docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/query_plan_analysis.html
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 20
+      examples:
+      - http://tantorlabs.ru/docs/support
+      - https://habr.com/ru/companies/astralinux/articles/
+      - https://rutube.ru/channel/31876555/
+      - https://t.me/+oZfNJpB7xu5jNTQy
+      - https://tantorlabs.ru/agreement
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.0/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.4
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.4/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.3/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.2
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.2/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.1
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.1/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.0
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/6.0/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/5.3
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/5.3/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/introduction.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/platform_architecture.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/requirements.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_7_1_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_7_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_4.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_3.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_3.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_6_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_5_3.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_5_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_5_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_5_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_4_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_4_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_4_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_3_3.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_3_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_3_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_3_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1_2.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_2_1.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_2_0.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_13.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_12.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_10.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_9.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_7.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_6.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/release_notes/release_1_4.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/administration.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/wizard.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/additional_elems_installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/pg_stat_statements_installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/pg_store_plans_installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/postgresPro_type_connection.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/pg_monitor_installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/aa_s3.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/pg_anon_stateless.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/update_installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/delete_platform.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_firststart.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/quickstart.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_licensing.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_multitenants.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_new_workspace.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_users.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/system_owners.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/users_common.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/users_new.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/user_page.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/users_owner_transfer.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/groups_common.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/groups_new.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/group_page.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/ldap.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/integrations.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/xdata.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/triafly_bi.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/siem_integration.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/smtp.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_reports.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/reports_telegram.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/reports_email.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/reports_mattermost.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/reports_yuchat.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/reports_max.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_tokens.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/swagger_ui.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/backup_info.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/backup.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/assistant_llm.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/assistant_settings.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/ai_assistant_notifications.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/components_llm.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/llm.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/gpu_requirements.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/llm_settings.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/platform_maintenance.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/health_score.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/admin_diagnostic_utility.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/admin/monitoring_with_prometheus_and_grafana.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/user_guide.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_platform_control_panel.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/admin_tiles.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_workspace_overview.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_agents_config.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/instance_adding.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/agent_ansible.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/agent_instance_cli.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/agent_update.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_agents.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_instance_config.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/admin_instances.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/instances_list.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/overview.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/configurations.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/instance_configuration.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_cluster_config.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/param_groups.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/access_rules.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/maintenance.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/DB_browser.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/query_profiler.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/activity.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/replication.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/tablespaces.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/charts.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/monitoring_config.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_monitor.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/query_plan_analysis.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_page_control_panel.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_settings.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Problematic_queries.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Plans.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_node.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_templates.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_p_q_r.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Mega-queries_mega_diff.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Locks.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Errors.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_PSA_PS.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_system_actions_pidstat.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_System_actions_Statistics_by_table.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_ANALYZE.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_VACUUM.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_CHECKPOINT.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_accesses_to_table_to_index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Logs.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_query.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_Archive_time.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/pg_monitor/pg_m_glossary.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/cve.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/admin_scheduler.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/tasks.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/actions.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_config.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_clusters_pages.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/clusters_management.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/cluster_monitoring.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/cluster_config.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/polar_overview.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/backup_monitoring_tenant.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/topology.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/event_log.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ug_alerts.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/admin_anonymizer.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/ai-assistant.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/instance_health.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/self_healing.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/instances/self_healing_history.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/tp/7.1/glossary.html
+      documents: 1
+      min_links: 3
+    notes:
+    - robots_disallow_seed
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://docs.tantorlabs.ru/tp/latest/ (объявлен оператором)'
+    - 'transport: browser'
+    - 'text_chars: 1183'
+    - 'links: 198'
+- tantor_streaming_declared_seed:
+  - product_id: tantor
+    role: streaming
+    component: PipelineDB
+    seed_url: https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/
+    final_url: https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/
+    ambiguous: false
+    nested: true
+    blocked: null
+    recommended: null
+    candidates:
+    - key: docs.tantorlabs.ru/pipelinedb/ru
+      documents: 20
+      depth: 2
+      urls:
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.2-ru/index.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.3-ru/index.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/aggregates.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/backups.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/builtin.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/clients.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/conf.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/continuous-transforms.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/continuous-views.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/index.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/installation.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/introduction.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/joins.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/probabilistic.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/quickstart.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/release-notes.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/replication.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/sliding-windows.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/stats.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/streams.html
+      evidence:
+      - links
+    - key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru
+      documents: 18
+      depth: 3
+      urls:
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/aggregates.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/backups.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/builtin.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/clients.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/conf.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/continuous-transforms.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/continuous-views.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/index.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/installation.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/introduction.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/joins.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/probabilistic.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/quickstart.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/release-notes.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/replication.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/sliding-windows.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/stats.html
+      - https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/streams.html
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 20
+      examples:
+      - http://tantorlabs.ru/docs/support
+      - https://habr.com/ru/companies/astralinux/articles/
+      - https://rutube.ru/channel/31876555/
+      - https://t.me/+oZfNJpB7xu5jNTQy
+      - https://tantorlabs.ru/agreement
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.3-ru
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.3-ru/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.2-ru
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.2-ru/index.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/introduction.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/quickstart.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/installation.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/continuous-views.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/continuous-transforms.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/streams.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/builtin.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/aggregates.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/clients.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/probabilistic.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/sliding-windows.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/joins.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/backups.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/replication.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/stats.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/conf.html
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/release-notes.html
+      documents: 1
+      min_links: 3
+    notes:
+    - robots_disallow_seed
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'seed: https://docs.tantorlabs.ru/pipelinedb/ru/1.4-ru/ (объявлен оператором)'
+    - 'transport: http'
+    - 'text_chars: 393'
+    - 'links: 41'
+- jatoba_evidence:
+  - product_id: jatoba
+    role: security_crypto
+    component: КриптоПро
+    seed_url: https://jatoba.ru
+    final_url: https://jatoba.ru
+    ambiguous: false
+    nested: true
+    blocked: site_root_seed
+    recommended: null
+    candidates:
+    - key: jatoba.ru/img/cert
+      documents: 42
+      depth: 2
+      urls:
+      - https://jatoba.ru/img/cert/DoczillaPro.jpg
+      - https://jatoba.ru/img/cert/InnostagePAM.jpg
+      - https://jatoba.ru/img/cert/StarVault.jpg
+      - https://jatoba.ru/img/cert/alt.jpg
+      - https://jatoba.ru/img/cert/altagd.jpg
+      - https://jatoba.ru/img/cert/alteros.jpg
+      - https://jatoba.ru/img/cert/aqua.jpg
+      - https://jatoba.ru/img/cert/bars.jpg
+      - https://jatoba.ru/img/cert/boss.jpg
+      - https://jatoba.ru/img/cert/cyberprotect_backup.jpg
+      - https://jatoba.ru/img/cert/cyberprotect_protego.jpg
+      - https://jatoba.ru/img/cert/dallas.jpg
+      - https://jatoba.ru/img/cert/emdf.jpg
+      - https://jatoba.ru/img/cert/etos.jpg
+      - https://jatoba.ru/img/cert/formit.jpg
+      - https://jatoba.ru/img/cert/fors.jpg
+      - https://jatoba.ru/img/cert/grada.jpg
+      - https://jatoba.ru/img/cert/icon.jpg
+      - https://jatoba.ru/img/cert/iflex.jpg
+      - https://jatoba.ru/img/cert/incomand.jpg
+      - https://jatoba.ru/img/cert/itbastion.jpg
+      - https://jatoba.ru/img/cert/itilium.jpg
+      - https://jatoba.ru/img/cert/makves_dcap.jpg
+      - https://jatoba.ru/img/cert/makves_iam.jpg
+      - https://jatoba.ru/img/cert/makves_irp.jpg
+      - https://jatoba.ru/img/cert/pix.jpg
+      - https://jatoba.ru/img/cert/polycode.jpg
+      - https://jatoba.ru/img/cert/red.jpg
+      - https://jatoba.ru/img/cert/redcheck.jpg
+      - https://jatoba.ru/img/cert/rokit.jpg
+      - https://jatoba.ru/img/cert/rosa.jpg
+      - https://jatoba.ru/img/cert/rubi.jpg
+      - https://jatoba.ru/img/cert/rudesktop.jpg
+      - https://jatoba.ru/img/cert/safib.jpg
+      - https://jatoba.ru/img/cert/savrus.jpg
+      - https://jatoba.ru/img/cert/spargo_f3llo.jpg
+      - https://jatoba.ru/img/cert/spargo_f3tailweb.jpg
+      - https://jatoba.ru/img/cert/spargo_mlk.jpg
+      - https://jatoba.ru/img/cert/trueconf.jpg
+      - https://jatoba.ru/img/cert/xs.jpg
+      - https://jatoba.ru/img/cert/yunivers.jpg
+      - https://jatoba.ru/img/cert/zvirt.jpg
+      evidence:
+      - links
+    - key: jatoba.ru/assets/_cms/uploads/tinymce
+      documents: 70
+      depth: 4
+      urls:
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/BI.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Certificate_RuBackup.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/DATAPK_ITM_Jatoba.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Dozor7.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/HandyBackup.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/JaCarta.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Jatoba-Staffcop.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/JatobaEveryTag.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/MetasferaPlatform.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/MetasferaxD.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/OMP_Jatoba.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/SILA_UNION-2.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/SUBD_Jatoba-Directum_RX.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Scan_00012.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/acronis.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/along.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/altgt.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/baikal.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altserver.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altsp.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/debian.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/haspbox.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/jacarta.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/kaspersky-security-center-linux-15-4.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/luxms-bi.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/oracle.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/osnova.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redhat.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redos.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/rosa.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-dozor.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-web-proxy.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/ubuntu.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windows.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windowsserver.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificate-jatoba-business-avtomatika.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificate-jatoba-safephone.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificateFSTEK1.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility/IBS.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility/astra1.7-Jatoba5.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/esprom.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/indeed.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/info.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/analitics.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/control.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/funkcii.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/monitoring.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenieparametrama.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/uvedomlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/vievlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/kiberstab.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/linux-jatoba2.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/logoitcontur2.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/msdoft.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/orig1.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/parus.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/peak.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2022-11-01 15.48.53.jpeg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2022-11-01%2015.48.53.jpeg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2023-04-03 16.32.52.jpeg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/politerm.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/qwer4.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/safetak.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/sert-garda.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/skala-r.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/standart.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/sv_sert.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/zecution.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/thumbs/certificate_socit_logo.jpg
+      evidence:
+      - links
+    - key: jatoba.ru/assets/_cms/uploads/tinymce/source
+      documents: 69
+      depth: 5
+      urls:
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/BI.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Certificate_RuBackup.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/DATAPK_ITM_Jatoba.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Dozor7.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/HandyBackup.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/JaCarta.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Jatoba-Staffcop.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/JatobaEveryTag.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/MetasferaPlatform.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/MetasferaxD.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/OMP_Jatoba.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/SILA_UNION-2.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/SUBD_Jatoba-Directum_RX.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/Scan_00012.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/acronis.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/along.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/altgt.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/baikal.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altserver.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altsp.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/debian.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/haspbox.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/jacarta.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/kaspersky-security-center-linux-15-4.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/luxms-bi.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/oracle.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/osnova.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redhat.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redos.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/rosa.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-dozor.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-web-proxy.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/ubuntu.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windows.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windowsserver.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificate-jatoba-business-avtomatika.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificate-jatoba-safephone.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/certificateFSTEK1.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility/IBS.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility/astra1.7-Jatoba5.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/esprom.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/indeed.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/info.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/analitics.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/control.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/funkcii.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/monitoring.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenieparametrama.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/uvedomlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/vievlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/kiberstab.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/linux-jatoba2.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/logoitcontur2.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/msdoft.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/orig1.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/parus.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/peak.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2022-11-01 15.48.53.jpeg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2022-11-01%2015.48.53.jpeg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2023-04-03 16.32.52.jpeg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/politerm.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/qwer4.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/safetak.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/sert-garda.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/skala-r.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/standart.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/sv_sert.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/zecution.jpg
+      evidence:
+      - links
+    - key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert
+      documents: 17
+      depth: 6
+      urls:
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altserver.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altsp.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/debian.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/haspbox.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/jacarta.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/kaspersky-security-center-linux-15-4.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/luxms-bi.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/oracle.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/osnova.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redhat.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redos.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/rosa.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-dozor.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-web-proxy.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/ubuntu.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windows.jpg
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windowsserver.jpg
+      evidence:
+      - links
+    - key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs
+      documents: 8
+      depth: 6
+      urls:
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/analitics.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/control.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/funkcii.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/monitoring.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenieparametrama.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/uvedomlenie.png
+      - https://jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/vievlenie.png
+      evidence:
+      - links
+    rejected:
+    - reason: external_host
+      count: 2
+      examples:
+      - https://reestr.digital.gov.ru/request/200783/?sphrase_id=828626
+      - https://www.gaz-is.ru/
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/certificateFSTEK1.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/monitoring.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenie.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/upravlenieparametrama.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/control.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/analitics.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/vievlenie.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/uvedomlenie.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/jvs/funkcii.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/sv_sert.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/qwer4.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/msdoft.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/thumbs
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/thumbs/certificate_socit_logo.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/orig1.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/standart.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/parus.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/politerm.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/peak.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/SILA_UNION-2.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/indeed.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/acronis.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/logoitcontur2.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/BI.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/info.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/baikal.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/along.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2022-11-01 15.48.53.jpeg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/JatobaEveryTag.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/esprom.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility
+      documents: 2
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility/IBS.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/zecution.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/sert-garda.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2023-04-03 16.32.52.jpeg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/SUBD_Jatoba-Directum_RX.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/Certificate_RuBackup.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/DATAPK_ITM_Jatoba.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/Jatoba-Staffcop.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/certificate-jatoba-business-avtomatika.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/certificate-jatoba-safephone.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/linux-jatoba2.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/skala-r.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/Dozor7.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/OMP_Jatoba.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/Scan_00012.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/altgt.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/safetak.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/compatibility/astra1.7-Jatoba5.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altsp.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/altserver.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/osnova.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redos.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/rosa.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/debian.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/oracle.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/redhat.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/ubuntu.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windows.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/windowsserver.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/polycode.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/itbastion.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/iflex.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/MetasferaPlatform.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/MetasferaxD.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/HandyBackup.png
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/alteros.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/DoczillaPro.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/emdf.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/grada.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/InnostagePAM.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/altagd.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/StarVault.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/redcheck.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/alt.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/bars.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/boss.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/formit.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/itilium.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/icon.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/incomand.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/kiberstab.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/cyberprotect_protego.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/cyberprotect_backup.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/dallas.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/makves_dcap.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/makves_iam.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/makves_irp.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/rosa.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/zvirt.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/rudesktop.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/pix.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/aqua.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/photo_2022-11-01%2015.48.53.jpeg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/red.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/rokit.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/rubi.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/savrus.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/safib.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/JaCarta.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/spargo_f3tailweb.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/spargo_f3llo.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/spargo_mlk.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/etos.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/trueconf.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/fors.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/xs.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/img/cert/yunivers.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-dozor.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/solar-web-proxy.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/luxms-bi.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/kaspersky-security-center-linux-15-4.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/haspbox.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/assets/_cms/uploads/tinymce/source/cert/jacarta.jpg
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/opisanie.pdf
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/Jatoba2026.pdf
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/download
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/download/documentationJatoba18_6.zip
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/ЛицензионноеСоглашение3.pdf
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/Программа-ТП-2023.pdf
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/jatoba_vkcloud.pdf
+      documents: 1
+      min_links: 3
+    - reason: below_min_links
+      key: jatoba.ru/politic.pdf
+      documents: 1
+      min_links: 3
+    notes:
+    - 'site_root_seed: адрес наблюдения — корень сайта, его дерево ссылок это навигация,
+      а не документация компонента; задайте --seed ROLE=URL'
+    - 'nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) выбирается
+      человеком; самый короткий вернул бы в корпус весь раздел'
+    - 'transport: http'
+    - 'text_chars: 4535'
+    - 'links: 121'
