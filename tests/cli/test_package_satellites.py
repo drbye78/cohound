@@ -101,7 +101,11 @@ class _Crawler:
     def __init__(self, links: int = 5) -> None:
         self._links = links
 
-    def fetch(self, url: str, *args: Any, **kwargs: Any) -> _RawPage:
+    def fetch(self, url: str, plan: Any = None) -> _RawPage:
+        # Сигнатура повторяет контракт ``CrawlerPort``: фейк, принимающий ``*args``,
+        # скрыл бы неверный вызов (``fetch(url, FetchMode.HTTP)`` вместо ``FetchPlan``) —
+        # ровно так ошибка и дожила до первого реального прогона.
+        assert plan is not None
         anchors = "".join(
             f'<a href="/center/docs/backup/page-{index}.html">p{index}</a>'
             for index in range(self._links)

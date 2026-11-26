@@ -808,6 +808,16 @@ def add_package_parser(subparsers: Any) -> None:
         "--role", action="append", default=None, help="только эти роли сателлитов (повторяемо)"
     )
     p_sat_roots.add_argument(
+        "--seed",
+        action="append",
+        default=None,
+        metavar="ROLE=URL",
+        help=(
+            "адрес наблюдения для роли, если свидетельство связи указывает не туда "
+            "(маркетинговый корень, антибот-заглушка); повторяемо"
+        ),
+    )
+    p_sat_roots.add_argument(
         "--sitemap",
         action="append",
         default=None,

@@ -3416,11 +3416,25 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
         role, _, url = str(item).partition("=")
         if role and url:
             sitemap_urls[role] = url
+    seed_urls: dict[str, str] = {}
+    for item in getattr(args, "seed", None) or []:
+        role, _, url = str(item).partition("=")
+        if role and url:
+            seed_urls[role] = url
+    declared_roles = {satellite.role for satellite in satellites}
+    unknown_roles = sorted((set(seed_urls) | set(sitemap_urls)) - declared_roles)
+    if unknown_roles:
+        raise CliError(
+            f"--seed/--sitemap: роли не объявлены в паспорте: {unknown_roles}",
+            code="usage",
+            exit_code=EXIT_USAGE,
+        )
     plans = probe_satellite_roots(
         product_id=passport.product_id,
         satellites=satellites,
         ports=ports,
         sitemap_urls=sitemap_urls,
+        seed_urls=seed_urls,
     )
     updates = roots_by_role(plans)
     payload: dict[str, Any] = {
@@ -3450,6 +3464,15 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
                 f"    {candidate.key} docs={candidate.documents} "
                 f"depth={candidate.depth} via={','.join(candidate.evidence)}"
             )
+        for rejected in plan.rejected:
+            if rejected.get("reason") == "below_min_links":
+                # Отвергнутое — половина наблюдения: именно здесь видно, **какие** разделы
+                # у сайта есть. Без этого «корней не нашлось» не отличить от «сайт не
+                # открылся», а оператору нужен состав, а не только победитель.
+                lines.append(
+                    f"    (не корень) {rejected['key']} docs={rejected['documents']} "
+                    f"— ниже порога {rejected['min_links']} ссылок"
+                )
         for note in plan.notes:
             lines.append(f"    note: {note}")
     if getattr(args, "apply", False) and updates:
@@ -3490,5 +3513,10 @@ def cmd_package_satellites_roots(args: argparse.Namespace) -> int:
             )
     elif updates:
         lines.append("dry-run: паспорт не изменён (--apply --actor чтобы объявить)")
+    else:
+        lines.append(
+            "корни не предложены: неоднозначность/вложенность/нет наблюдений — "
+            "границу корня объявляет человек (--seed ROLE=URL задаёт адрес наблюдения)"
+        )
     _emit(args, payload, lines)
     return EXIT_OK

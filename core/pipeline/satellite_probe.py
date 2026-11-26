@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from core.domain.enums import ExtractionRoute, FetchMode
 from core.pipeline.satellite_roots import SatelliteRootPlan, derive_roots
+from core.ports.types import FetchPlan
 from core.util.html_links import extract_links
 
 __all__ = ["SatelliteProbePorts", "probe_satellite_roots"]
@@ -41,6 +42,31 @@ class SatelliteProbePorts:
     robots: Any | None = None
 
 
+#: Маркеры страницы-заглушки антибот-защиты. Это не «сайт пуст»: страница отдала
+#: скрипт проверки, и ссылок в ней нет по построению. Прибор обязан назвать это своим
+#: именем, иначе «0 ссылок» читается как «дерева нет».
+CHALLENGE_MARKERS = ("__qrator", "jschl", "cf-browser-verification", "captcha")
+
+#: Сколько символов сообщения об ошибке транспорта сохранять в замечании.
+_ERROR_BRIEF = 160
+
+
+def _brief(exc: BaseException) -> str:
+    """``Тип: сообщение`` — коротко, но с диагнозом (тип без текста ничего не говорит)."""
+    text = " ".join(str(exc).split())
+    if len(text) > _ERROR_BRIEF:
+        text = text[:_ERROR_BRIEF] + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _challenge_marker(content: bytes) -> str | None:
+    """Маркер антибот-заглушки в теле страницы (``None`` — обычная страница)."""
+    if not content:
+        return None
+    lowered = content[:20000].decode("utf-8", "ignore").lower()
+    return next((marker for marker in CHALLENGE_MARKERS if marker in lowered), None)
+
+
 @dataclass
 class _Page:
     final_url: str
@@ -49,6 +75,7 @@ class _Page:
     status: int | None
     transport: str
     error: str | None = None
+    challenge: str | None = None
 
 
 def _fetch(url: str, ports: SatelliteProbePorts) -> _Page:
@@ -59,11 +86,17 @@ def _fetch(url: str, ports: SatelliteProbePorts) -> _Page:
         if crawler is None:
             attempts.append(f"{transport}: unavailable")
             continue
-        mode = FetchMode.HTTP if transport == "http" else FetchMode.BROWSER
+        # План получения передаётся готовым (контракт ``CrawlerPort``): адаптер лишь
+        # исполняет его. Передача голого ``FetchMode`` компилируется, но падает в
+        # адаптере на ``plan.fetch`` — ошибка типа, которую ловит только реальный вызов.
+        plan = FetchPlan(FetchMode.HTTP if transport == "http" else FetchMode.BROWSER)
         try:
-            page = crawler.fetch(url, mode)
+            page = crawler.fetch(url, plan)
         except Exception as exc:  # noqa: BLE001 — сбой транспорта изолируется
-            attempts.append(f"{transport}: {type(exc).__name__}")
+            # Причина сохраняется **с текстом**: «AttributeError» без сообщения и
+            # «401 Unauthorized» — разные диагнозы, и первый читается как «ничего не
+            # нашли», хотя это был отказ сайта или дефект вызова.
+            attempts.append(f"{transport}: {_brief(exc)}")
             continue
         content = getattr(page, "content", b"") or b""
         text_chars = 0
@@ -82,6 +115,7 @@ def _fetch(url: str, ports: SatelliteProbePorts) -> _Page:
             text_chars=text_chars,
             status=getattr(page, "status_code", None),
             transport=transport,
+            challenge=_challenge_marker(content),
         )
     return _Page(
         final_url=url,
@@ -126,6 +160,7 @@ def probe_satellite_roots(
     satellites: Sequence[Any],
     ports: SatelliteProbePorts,
     sitemap_urls: dict[str, str] | None = None,
+    seed_urls: dict[str, str] | None = None,
     max_links: int = MAX_LINKS,
 ) -> list[SatelliteRootPlan]:
     """Разведывает корни каждого сателлита, у которого известно место (evidence URL).
@@ -135,15 +170,22 @@ def probe_satellite_roots(
     неотличимо от «адреса не знаем», а это разные факты.
 
     :param sitemap_urls: ``{role: sitemap_url}`` — объявленные оператором карты сайта.
+    :param seed_urls: ``{role: url}`` — адрес наблюдения, если свидетельство связи
+        указывает не туда (маркетинговый корень, антибот-заглушка). Это **вход
+        наблюдения**, объявленный оператором, а не догадка прибора: без него разведка
+        корней на таком сайте не начинается вообще.
     :param max_links: предел разбора ссылок одной страницы (порог наблюдения).
     """
     plans: list[SatelliteRootPlan] = []
     sitemap_by_role = sitemap_urls or {}
+    seeds_by_role = seed_urls or {}
     for satellite in satellites:
         role = str(getattr(satellite, "role", "") or "")
         component = getattr(satellite, "component", None)
         evidence = getattr(satellite, "relationship_evidence", None)
-        seed_url = str(getattr(evidence, "url", "") or "") if evidence is not None else ""
+        seed_url = seeds_by_role.get(role) or (
+            str(getattr(evidence, "url", "") or "") if evidence is not None else ""
+        )
         if not seed_url:
             plan = SatelliteRootPlan(
                 product_id=product_id,
@@ -179,9 +221,16 @@ def probe_satellite_roots(
             sitemap_urls=sitemap,
             robots_allows=robots_allows,
         )
+        if role in seeds_by_role:
+            plan.notes.append(f"seed: {seed_url} (объявлен оператором)")
         plan.notes.append(f"transport: {page.transport}")
         plan.notes.append(f"text_chars: {page.text_chars}")
         plan.notes.append(f"links: {len(links)}")
+        if page.challenge:
+            plan.notes.append(
+                f"antibot_challenge: страница отдала проверку ({page.challenge}) — "
+                "ссылок в ней нет по построению, это не пустое дерево"
+            )
         if page.error:
             plan.notes.append(f"fetch_error: {page.error}")
         elif _host_of(page.final_url) != _host_of(seed_url):

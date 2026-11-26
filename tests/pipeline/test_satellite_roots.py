@@ -102,6 +102,37 @@ def test_redirect_to_other_host_moves_the_root() -> None:
     assert any(note.startswith("redirect_host") for note in plan.notes)
 
 
+def test_nested_ladder_is_not_recommended() -> None:
+    """Вложенные кандидаты — лестница масштаба, а не альтернативы: рекомендации нет.
+
+    Пин держит измеренный дефект: на индексе портала (31 ссылка) прибор рекомендовал
+    самый короткий префикс — `/center`, то есть **весь портал**. `--apply` записал бы
+    его корнем сателлита и вернул в корпус всё, что сужение только что вывело.
+    """
+    links = (
+        _urls("center/docs/7/about", 4)
+        + [f"https://{HOST}/center/docs/7/page-{i}.html" for i in range(6)]
+        + [f"https://{HOST}/center/knowledge-base/{i}" for i in range(3)]
+        + [f"https://{HOST}/center/blog/{i}" for i in range(3)]
+    )
+    plan = _plan(links=links)
+    keys = [item.key for item in plan.candidates]
+    # `/center` — самый короткий префикс лестницы; он и был бы записан корнем.
+    assert f"{HOST}/center" in keys
+    assert any(key.startswith(f"{HOST}/center/") for key in keys)
+    assert plan.nested
+    assert plan.recommended() is None
+    assert roots_by_role([plan]) == {}
+    assert any(note.startswith("nested_roots") for note in plan.notes)
+
+
+def test_flat_sections_are_recommended_normally() -> None:
+    """Независимые разделы (не вложенные) — обычная рекомендация по покрытию."""
+    plan = _plan(links=_urls("docs", 6) + _urls("api", 3))
+    assert not plan.nested
+    assert plan.recommended() is not None
+
+
 def test_no_links_is_named_not_invented() -> None:
     plan = _plan(links=[], sitemap_urls=[])
     assert plan.candidates == []

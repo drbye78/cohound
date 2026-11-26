@@ -111,9 +111,28 @@ class SatelliteRootPlan:
         ]
         return len(rivals) > 1
 
+    @property
+    def nested(self) -> bool:
+        """Кандидаты вложены друг в друга — масштаб корня наблюдением не определяется.
+
+        Лестница ``/center`` → ``/center/docs`` → ``/center/docs/7`` покрывает всё меньше
+        ссылок на каждом шаге, и **все** шаги — законные корни: какой из них объявить,
+        решает граница корпуса, а не покрытие ссылок. Прибор, выбравший самый короткий,
+        молча вернул бы в корпус весь портал; выбравший самый длинный — потерял бы
+        соседние разделы. Поэтому вложенный набор не рекомендуется вовсе.
+        """
+        keys = [candidate.key for candidate in self.candidates]
+        return any(
+            other.startswith(f"{key}/") for key in keys for other in keys if other != key
+        )
+
     def recommended(self) -> RootCandidate | None:
-        """Первый кандидат по (глубина ↑, документы ↓) — рекомендация, не решение."""
-        if not self.candidates or self.ambiguous:
+        """Первый кандидат по (глубина ↑, документы ↓) — рекомендация, не решение.
+
+        ``None`` при неоднозначности покрытия и при вложенном наборе (:attr:`nested`):
+        в обоих случаях выбор корня — решение человека о границе корпуса.
+        """
+        if not self.candidates or self.ambiguous or self.nested:
             return None
         return min(self.candidates, key=lambda item: (item.depth, -item.documents, item.key))
 
@@ -126,6 +145,7 @@ class SatelliteRootPlan:
             "seed_url": self.seed_url,
             "final_url": self.final_url,
             "ambiguous": self.ambiguous,
+            "nested": self.nested,
             "recommended": recommended.key if recommended is not None else None,
             "candidates": [item.as_dict() for item in self.candidates],
             "rejected": list(self.rejected),
@@ -272,6 +292,11 @@ def derive_roots(
         plan.notes.append("no_links")
     if plan.ambiguous:
         plan.notes.append("ambiguous_roots: выбор корня — решение человека")
+    if plan.nested:
+        plan.notes.append(
+            "nested_roots: кандидаты вложены друг в друга — масштаб корня (глубина) "
+            "выбирается человеком; самый короткий вернул бы в корпус весь раздел"
+        )
     return plan
 
 
