@@ -263,7 +263,7 @@ min` по порядку `capability_ranked ⊐ coverage_fallback ⊐ unranked` 
 | `discovery_llm` | **core** (инференс; без веб-тула) | `gateway` | **core**→edge (транспорт) |
 
 **`extractor_zone` объявлено, но не действует (D-9).** Значения `edge|core|separate`
-(`core/config/deploy.py:98`, поле `core/config/deploy.py:791`) валидируются, но выбора реализации
+(`core/config/deploy.py:113`, поле `core/config/deploy.py:1200`) валидируются, но выбора реализации
 не делают: `RemoteExtractor` поднимается **по профилю** `split` (`core/cli/wiring.py:3369`), а не
 по этой оси.
 Экстрактор всегда в ядре; в `split` ядро получает байты через шов `extract/{upload,submit,collect,abort}`.
