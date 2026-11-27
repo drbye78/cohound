@@ -26,7 +26,7 @@
 
 Один каталог ``corpus_raw`` делят несколько ``state.db``: у пакета есть канонная БД под
 ``{home}/state/{package}/state.db`` и отдельные БД стендов, а байты у них общие. Замер
-27.11.2026 на ``ru-pg-dbms``: канонная БД — 8 738 версий, стенд — 43 825, пересечение
+27.11.2026 на пилотном пакете: канонная БД — 8 738 версий, стенд — 43 825, пересечение
 живых путей — **3 283**. Прогон по одной стендовой БД давал 74 879 кандидатов, из которых
 **5 455 файлов / 1.09 GB нужны канонной БД**: ``--apply`` по одной БД уничтожил бы чужой
 корпус. Поэтому ``--state-db`` повторяемый, ``--state-root`` добавляет все найденные под
@@ -149,9 +149,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -173,9 +174,11 @@ __all__ = [
     "AUDIT_NAME",
     "CACHE_BUDGET_CLASS",
     "CLASS_ORDER",
+    "DEFAULT_DOCS_ROOT",
     "DELETABLE_CLASSES",
     "ONLY_GROUPS",
     "REPORT_ONLY_CLASSES",
+    "REPO_ROOT",
     "RUN_CLASS_ORDER",
     "CacheBudget",
     "GcRefused",
@@ -185,11 +188,14 @@ __all__ = [
     "RunCensus",
     "RunDb",
     "RunPrice",
+    "WipePlan",
     "apply_gc",
     "build_gc_plan",
     "declared_scopes",
+    "http_cache_files",
     "human_bytes",
     "in_space",
+    "plan_wipe_http_cache",
     "scan_gc",
 ]
 
@@ -202,6 +208,9 @@ DELETABLE_CLASSES: tuple[str, ...] = (
     "corpus_raw_unreferenced",
     "corpus_raw_run_history",
     "http_cache_outside_space",
+    # Вытеснение по объявленному бюджету (``cache.http_max_bytes``) — последним в порядке
+    # печати: это не потеря доказательства, а граница роста кэша (см. ``cache/http``).
+    "http_cache_over_budget",
 )
 
 #: Классы, которые только считаются и печатаются.
@@ -233,7 +242,11 @@ ONLY_GROUPS: dict[str, tuple[str, ...]] = {
         "corpus_raw_run_history",
         "corpus_raw_foreign_product",
     ),
-    "http-cache": ("http_cache_outside_space", "http_cache_unattributed"),
+    "http-cache": (
+        "http_cache_outside_space",
+        "http_cache_unattributed",
+        "http_cache_over_budget",
+    ),
     "runs": RUN_CLASS_ORDER,
     "cache-budget": (CACHE_BUDGET_CLASS,),
 }
@@ -252,6 +265,16 @@ _NEIGHBOUR_LEVELS = 4
 
 #: Имя файла подложки.
 STATE_DB_NAME = "state.db"
+
+#: Корень репозитория — от ``__file__``, а не от CWD: цензус цитирования не должен
+#: зависеть от того, откуда запущена команда.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Корень документов по умолчанию (``--docs-root``): ``docs/`` репозитория.
+DEFAULT_DOCS_ROOT = REPO_ROOT / "docs"
+
+#: Хвост ``run_id``, который документы называют вместо полного имени: 12 hex-символов.
+_RUN_HASH_RE = re.compile(r"[0-9a-f]{12}")
 
 
 class GcRefused(Exception):
@@ -283,6 +306,13 @@ class RunDb:
     ``g4`` — именно подпись G4: по ней прогон попадает в ``runs_signed`` и не может быть
     удалён. ``cells``/``outputs``/``bytes`` печатаются рядом с ``run_id``, иначе
     1267-ячеечная карта неотличима от пустой пробы.
+
+    ``cited_in`` — относительные пути документов из ``--docs-root``, в которых встречается
+    ``run_id``. Это цензус цитирования, а не вердикт: замер 28.11.2026 показал, что 12 из
+    19 незанятых прогонов — **подложка опубликованных замеров** (3.18 GiB из 3.19), в том
+    числе прогоны с нулём вердиктов (``208472049479`` — перепись CJK, ``48bf65507223`` —
+    датапоинт text-layer). «Нет G4» и «нет ячеек» не отвечают на вопрос «на что это
+    опирается».
     """
 
     path: Path
@@ -293,6 +323,7 @@ class RunDb:
     cells: int = 0
     outputs: int = 0
     bytes: int = 0
+    cited_in: tuple[str, ...] = ()
 
     @property
     def run_dir(self) -> Path:
@@ -318,6 +349,7 @@ class RunDb:
             "cells": self.cells,
             "outputs": self.outputs,
             "bytes": self.bytes,
+            "cited_in": list(self.cited_in),
         }
 
 
@@ -897,8 +929,75 @@ def _read_run_db(path: Path) -> tuple[RunDb, dict[Path, None], set[Path]]:
     )
 
 
+def _read_docs(docs_root: Path | None) -> list[tuple[str, str]]:
+    """Документы цензуса: ``(относительный путь, текст)``; отсутствующий корень — пусто.
+
+    Обычное текстовое чтение, а не grep: цензус обязан работать там, где внешней утилиты
+    нет, и быть воспроизводимым без окружения.
+    """
+    if docs_root is None or not docs_root.is_dir():
+        return []
+    documents: list[tuple[str, str]] = []
+    for path in sorted(docs_root.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            relative = str(path.relative_to(docs_root))
+        except ValueError:  # pragma: no cover - rglob всегда внутри корня
+            relative = str(path)
+        documents.append((relative, text))
+    return documents
+
+
+def _citation_keys(run_id: str) -> tuple[str, ...]:
+    """Подстроки, которыми прогон цитируется в документах.
+
+    Полное ``run_id`` — не единственная форма: в замерах прогон почти всегда называют
+    **коротким хешем** (``9c8dd0345f3f``), потому что префикс пакета одинаков во всех
+    строках таблицы. Замер 28.11.2026: прогон, из которого измерен потолок согласия 0.9381,
+    встречается в четырёх документах только в короткой форме, и цензус по полному
+    ``run_id`` объявлял его нецитируемым. Это тот самый прогон, ради которого цензус и
+    заведён, поэтому форма обязана быть частью правила, а не догадкой читателя.
+
+    Хвост берётся только если он похож на хеш прогона (12 hex): имя вида
+    ``{пакет}-{роль}`` хеша не несёт, и его короткая форма совпала бы со словом.
+    """
+    parts = run_id.rsplit("-", 1)
+    if len(parts) == 2 and _RUN_HASH_RE.fullmatch(parts[1]):
+        return (run_id, parts[1])
+    return (run_id,)
+
+
+def _citations(
+    documents: list[tuple[str, str]], run_ids: list[str]
+) -> dict[str, tuple[str, ...]]:
+    """``run_id`` → отсортированные относительные пути документов, где он встречается.
+
+    Подстрочное вхождение, а не регулярка: ``run_id`` — имя каталога прогона, и его
+    упоминание в тексте и есть цитирование (замер 28.11.2026: 12 из 19 незанятых
+    прогонов цитируются, 3.18 GiB из 3.19 — подложка опубликованных замеров).
+    Принимается и полная, и короткая форма (:func:`_citation_keys`).
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for run_id in run_ids:
+        keys = _citation_keys(run_id)
+        found[run_id] = tuple(
+            relative
+            for relative, text in documents
+            if any(key in text for key in keys)
+        )
+    return found
+
+
 def _load_runs(
-    runs_dirs: list[Path] | None, runs_roots: list[Path] | None
+    runs_dirs: list[Path] | None,
+    runs_roots: list[Path] | None,
+    *,
+    docs_root: Path | None = None,
 ) -> RunCensus:
     """Прочитать все прогонные БД в один цензус.
 
@@ -912,8 +1011,12 @@ def _load_runs(
     live_runs: set[str] = set()
     resumable_paths: set[Path] = set()
     dbs: list[RunDb] = []
-    for path in _find_run_dbs(runs_dirs, runs_roots):
+    located = _find_run_dbs(runs_dirs, runs_roots)
+    documents = _read_docs(docs_root)
+    citations = _citations(documents, [_run_id_of(path) for path in located])
+    for path in located:
         db, refs, resumable = _read_run_db(path)
+        db = replace(db, cited_in=citations.get(db.run_id, ()))
         dbs.append(db)
         if db.live:
             live_runs.add(db.run_id)
@@ -1075,6 +1178,26 @@ def _package_space(package: Path) -> tuple[dict[str, list[str]], dict[str, froze
     return declared_scopes(package)
 
 
+def _key_mtime(files: list[Path]) -> float:
+    """Время последней записи пары ``{key}.bin`` + ``{key}.meta.json``.
+
+    Сайдкар пишется после байтов, поэтому ``max`` — это «когда пара была записана».
+    Отсутствующий файл (уже удалён) в расчёт не идёт; пара без единого файла — ``0.0``
+    (самая старая), чтобы порядок был определён и без статистики.
+    """
+    stamps: list[float] = [
+        stamp for path in files if (stamp := _stat_mtime(path)) is not None
+    ]
+    return max(stamps) if stamps else 0.0
+
+
+def _stat_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _scan_http_cache(
     *,
     cache: Path,
@@ -1082,8 +1205,31 @@ def _scan_http_cache(
     spaces: list[tuple[dict[str, list[str]], dict[str, frozenset[str]]]],
     products: set[str],
     wanted: frozenset[str],
-) -> tuple[list[Orphan], dict[str, int]]:
-    """Ключи кэша вне пространства **всех** пакетов набора и ключи без атрибуции.
+    budget: int | None = None,
+) -> tuple[list[Orphan], dict[str, int], dict[str, int] | None]:
+    """Ключи кэша вне пространства **всех** пакетов набора, ключи без атрибуции и вытеснение.
+
+    ``cache/http`` — глобальный каталог раскладки, общий для всех пакетов. Поэтому ключ
+    удаляется, только если **ни один** атрибутированный адрес не входит в пространство
+    **ни одного** пакета набора (``spaces[0]`` — основной пакет, дальше
+    ``--also-package``). Иначе прогон по одному профилю удалял бы байты, объявленные
+    соседним.
+
+    Атрибуция — через ``url_state.normalized_url`` **продуктов набора**: ключ, чей адрес
+    лежит в строке чужого продукта, считается неатрибутированным.
+
+    **Вытеснение по бюджету** (``cache.http_max_bytes``) считается **после** классов
+    пространства: файл, который иначе удалялся бы как «вне пространства», в бюджетном
+    классе уже не участвует (его и так нет). Ключи отчётных классов (атрибуция
+    неизвестна) бюджетом **не** вытесняются, но занимают место в сумме — решение о них не
+    принимается ни по пространству, ни по возрасту.
+
+    Возвращает записи, счёт «спасённых набором» и **что останется в каталоге после
+    вытеснения** (``None`` — бюджет не объявлен либо класс не запрошен).
+
+    ``mtime`` здесь — «последняя **запись**», а не «последнее **использование**»: попадание
+    в кэш ``mtime`` не обновляет. Поэтому это граница РОСТА, а не уборка — та же оговорка,
+    что у ``extract.cache_max_bytes``.
 
     ``cache/http`` — глобальный каталог раскладки, общий для всех пакетов. Поэтому ключ
     удаляется, только если **ни один** атрибутированный адрес не входит в пространство
@@ -1099,7 +1245,11 @@ def _scan_http_cache(
     """
     key_files = _cache_key_files(cache / "http")
     if not key_files:
-        return [], {"files": 0, "bytes": 0}
+        return [], {"files": 0, "bytes": 0}, (
+            {"files": 0, "bytes": 0}
+            if budget is not None and "http_cache_over_budget" in wanted
+            else None
+        )
 
     attributed: dict[str, list[tuple[str, str]]] = {}
     for conn in connections:
@@ -1118,9 +1268,14 @@ def _scan_http_cache(
 
     orphans: list[Orphan] = []
     rescued = {"files": 0, "bytes": 0}
+    #: Ключи, чьи файлы уже назначены удалению как «вне пространства».
+    outside: set[str] = set()
+    #: Ключи отчётных классов: бюджетом не вытесняются (решение о них не принимается).
+    report_only: set[str] = set()
     for key, files in sorted(key_files.items()):
         rows = attributed.get(key)
         if not rows:
+            report_only.add(key)
             if "http_cache_unattributed" in wanted:
                 orphans.extend(
                     Orphan("http_cache_unattributed", f, _size_of(f)) for f in files
@@ -1135,10 +1290,40 @@ def _scan_http_cache(
                 rescued["files"] += len(files)
                 rescued["bytes"] += sum(_size_of(f) for f in files)
             continue
+        outside.add(key)
         orphans.extend(
             Orphan("http_cache_outside_space", f, _size_of(f)) for f in files
         )
-    return orphans, rescued
+
+    if budget is None or "http_cache_over_budget" not in wanted:
+        return orphans, rescued, None
+
+    # Сумма — по тому, что физически останется: удалённое «вне пространства» не считается.
+    remaining = {
+        key: files for key, files in key_files.items() if key not in outside
+    }
+    total = sum(_size_of(path) for files in remaining.values() for path in files)
+    evictable = [
+        (key, files) for key, files in remaining.items() if key not in report_only
+    ]
+    evictable.sort(key=lambda item: (_key_mtime(item[1]), item[0]))
+    evicted_files = 0
+    evicted_bytes = 0
+    for _key, files in evictable:
+        if total <= budget:
+            break
+        for path in files:
+            size = _size_of(path)
+            orphans.append(Orphan("http_cache_over_budget", path, size))
+            total -= size
+            evicted_files += 1
+            evicted_bytes += size
+    after_files = sum(len(files) for files in remaining.values()) - evicted_files
+    return (
+        orphans,
+        rescued,
+        {"files": after_files, "bytes": total, "evicted_files": evicted_files, "evicted_bytes": evicted_bytes, "budget": budget},
+    )
 
 
 class _SpaceLookup:
@@ -1193,16 +1378,20 @@ def _cache_budgets(
     extract_cache: Path | None,
     embed_cache: Path | None,
     eval_cache: Path | None,
+    http_cache: Path | None,
     extract_cache_budget: int | None,
+    http_cache_budget: int | None,
 ) -> list[CacheBudget]:
     """Объём кэшей на диске против объявленных бюджетов.
 
-    Бюджет объявлен только у ``extract_cache`` (``deploy.extract.cache_max_bytes``, D8);
-    у ``embed_cache``/``eval_cache`` его нет — ``None`` значит «без бюджета», а не «0».
+    Бюджет объявлен у ``extract_cache`` (``deploy.extract.cache_max_bytes``, D8) и у
+    ``http_cache`` (``deploy.cache.http_max_bytes``); у ``embed_cache``/``eval_cache`` его
+    нет — ``None`` значит «без бюджета», а не «0».
     """
     rows: list[CacheBudget] = []
     for name, path, budget in (
         ("extract_cache", extract_cache, extract_cache_budget),
+        ("http_cache", http_cache, http_cache_budget),
         ("embed_cache", embed_cache, None),
         ("eval_cache", eval_cache, None),
     ):
@@ -1249,6 +1438,13 @@ def _resolve_prune_runs(census: RunCensus, run_ids: list[str]) -> tuple[list[Pru
             warnings.append(
                 f"ВНИМАНИЕ: {run_id}: {db.cells} ячеек и {db.outputs} файлов outputs/ — "
                 "это произведённые вердикты, восстановить их без прогона нельзя"
+            )
+        if db.cited_in:
+            shown = ", ".join(db.cited_in[:5])
+            warnings.append(
+                f"ВНИМАНИЕ: {run_id} цитируется в {len(db.cited_in)} документах — "
+                "удаление уничтожит подложку опубликованного замера: "
+                f"{shown}"
             )
         chosen.append(PruneRun(db=db))
     return chosen, warnings
@@ -1322,6 +1518,10 @@ class Plan:
     prune_runs: list[PruneRun] = field(default_factory=list)
     #: Громкие предупреждения о названных прогонах (печатаются до удаления).
     prune_warnings: list[str] = field(default_factory=list)
+    #: Что останется в ``cache/http`` после вытеснения по бюджету (``None`` — бюджет не
+    #: объявлен либо класс не запрошен): ``{files, bytes, evicted_files, evicted_bytes,
+    #: budget}``.
+    http_cache_after: dict[str, int] | None = None
 
     @property
     def price(self) -> RunPrice:
@@ -1347,6 +1547,8 @@ def build_gc_plan(
     embed_cache: Path | None = None,
     eval_cache: Path | None = None,
     extract_cache_budget: int | None = None,
+    http_cache_budget: int | None = None,
+    docs_root: Path | None = None,
     prune_runs: list[str] | None = None,
     only: frozenset[str] | None = None,
 ) -> Plan:
@@ -1366,6 +1568,10 @@ def build_gc_plan(
     :param embed_cache: каталог кэша векторов (отчёт ``cache_budget``).
     :param eval_cache: каталог кэша вердиктов (отчёт ``cache_budget``).
     :param extract_cache_budget: объявленный бюджет ``extract_cache`` (``None`` — нет).
+    :param http_cache_budget: объявленный бюджет ``{cache}/http`` (``None`` — нет
+        вытеснения; класс ``http_cache_over_budget`` тогда пуст).
+    :param docs_root: корень документов для цензуса цитирования прогонов (``None`` —
+        ``docs/`` корня репозитория, определённого от ``__file__``, а не от CWD).
     :param prune_runs: ``run_id``, названные явно для удаления (``--prune-run``).
     :param only: имена классов из :data:`ALL_CLASSES`; ``None`` — все.
     :raises GcRefused: условие, при котором удаление было бы ложным.
@@ -1387,7 +1593,7 @@ def build_gc_plan(
 
     paths = _resolve_state_dbs(state_dbs, state_root)
     state = _load_state(paths)
-    runs = _load_runs(runs_dirs, runs_roots)
+    runs = _load_runs(runs_dirs, runs_roots, docs_root=docs_root)
     try:
         declared = set().union(*(_declared_products(item) for item in packages))
         products = declared | state.products
@@ -1420,13 +1626,15 @@ def build_gc_plan(
                 "неизвестно, удаление было бы удалением всего корпуса"
             )
         rescued = {"files": 0, "bytes": 0}
+        http_after: dict[str, int] | None = None
         if wanted & set(ONLY_GROUPS["http-cache"]):
-            found_cache, rescued = _scan_http_cache(
+            found_cache, rescued, http_after = _scan_http_cache(
                 cache=cache,
                 connections=state.connections,
                 spaces=spaces,
                 products=products,
                 wanted=wanted,
+                budget=http_cache_budget,
             )
             orphans.extend(found_cache)
         uncovered: list[dict[str, Any]] = []
@@ -1440,7 +1648,9 @@ def build_gc_plan(
                 extract_cache=extract_cache,
                 embed_cache=embed_cache,
                 eval_cache=eval_cache,
+                http_cache=cache / "http",
                 extract_cache_budget=extract_cache_budget,
+                http_cache_budget=http_cache_budget,
             )
         chosen, prune_warnings = (
             _resolve_prune_runs(runs, list(prune_runs or []))
@@ -1457,6 +1667,7 @@ def build_gc_plan(
             cache_budgets=budgets,
             prune_runs=chosen,
             prune_warnings=prune_warnings,
+            http_cache_after=http_after,
         )
     finally:
         state.close()
@@ -1475,6 +1686,8 @@ def scan_gc(
     embed_cache: Path | None = None,
     eval_cache: Path | None = None,
     extract_cache_budget: int | None = None,
+    http_cache_budget: int | None = None,
+    docs_root: Path | None = None,
     only: frozenset[str] | None = None,
 ) -> list[Orphan]:
     """План удаления без служебных полей — удобно тестам и приборам.
@@ -1511,6 +1724,8 @@ def scan_gc(
         embed_cache=embed_cache,
         eval_cache=eval_cache,
         extract_cache_budget=extract_cache_budget,
+        http_cache_budget=http_cache_budget,
+        docs_root=docs_root,
         only=only,
     )
     return plan.orphans
@@ -1532,6 +1747,19 @@ def _delete(orphans: list[Orphan]) -> list[tuple[Path, str]]:
     return failures
 
 
+def _delete_paths(paths: tuple[Path, ...] | list[Path]) -> list[tuple[Path, str]]:
+    """Удалить перечисленные файлы; вернуть неудачи ``(путь, причина)``."""
+    failures: list[tuple[Path, str]] = []
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append((path, str(exc)))
+    return failures
+
+
 def _delete_runs(runs: list[PruneRun]) -> list[tuple[Path, str]]:
     """Удалить каталоги названных прогонов; вернуть неудачи ``(путь, причина)``."""
     failures: list[tuple[Path, str]] = []
@@ -1545,6 +1773,43 @@ def _delete_runs(runs: list[PruneRun]) -> list[tuple[Path, str]]:
     return failures
 
 
+def http_cache_files(cache: Path) -> list[Path]:
+    """Файлы ``{cache}/http`` (``.bin`` + ``.meta.json``), в детерминированном порядке."""
+    http_dir = cache / "http"
+    if not http_dir.is_dir():
+        return []
+    return [
+        path
+        for path in sorted(http_dir.iterdir())
+        if path.is_file()
+        and (path.name.endswith(".bin") or path.name.endswith(".meta.json"))
+    ]
+
+
+@dataclass(frozen=True)
+class WipePlan:
+    """Что даст ``--wipe-http-cache``: каталог, файлы и их сумма."""
+
+    path: Path
+    files: tuple[Path, ...]
+
+    @property
+    def bytes(self) -> int:
+        return sum(_size_of(path) for path in self.files)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "files": len(self.files),
+            "bytes": self.bytes,
+        }
+
+
+def plan_wipe_http_cache(cache: Path) -> WipePlan:
+    """План полной очистки ``cache/http`` (dry-run считает, ``--apply`` удаляет)."""
+    return WipePlan(path=cache / "http", files=tuple(http_cache_files(cache)))
+
+
 @dataclass
 class ApplyResult:
     """Итог применения: что удалено, что не удалось, куда записан аудит."""
@@ -1553,6 +1818,10 @@ class ApplyResult:
     pruned: list[PruneRun]
     failures: list[tuple[Path, str]]
     audit_path: Path
+    wiped: list[Path] = field(default_factory=list)
+    #: Байты, освобождённые полной очисткой кэша: файлы уже удалены, и ``stat`` по ним
+    #: больше не ответит — сумма снимается до удаления.
+    wiped_bytes: int = 0
 
 
 def apply_gc(
@@ -1562,11 +1831,13 @@ def apply_gc(
     audit: Path,
     package: Path,
     totals: dict[str, dict[str, int]],
+    wipe: WipePlan | None = None,
 ) -> ApplyResult:
-    """Удалить файлы удаляемых классов и названные прогоны; дописать аудит.
+    """Удалить файлы удаляемых классов, названные прогоны и (по флагу) весь ``cache/http``.
 
-    Порядок — файлы, затем прогоны: если удаление файла упадёт, прогон всё равно уйдёт
-    (решение о нём принято человеком явно), а неудачи называются в отчёте.
+    Порядок — файлы, затем прогоны, затем полная очистка кэша: если удаление файла упадёт,
+    прогон всё равно уйдёт (решение о нём принято человеком явно), а неудачи называются в
+    отчёте. Полная очистка идёт последней, чтобы её счёт не смешивался с пофайловым.
     """
     to_delete = [item for item in plan.orphans if item.cls in DELETABLE_CLASSES]
     failures = _delete(to_delete)
@@ -1576,8 +1847,19 @@ def apply_gc(
     failed_runs = {path for path, _ in run_failures}
     pruned = [item for item in plan.prune_runs if item.path not in failed_runs]
     failures.extend(run_failures)
+    wiped: list[Path] = []
+    wiped_bytes = 0
+    if wipe is not None:
+        # Сумма снимается ДО удаления: после него ``stat`` по этим путям уже не ответит,
+        # и «сколько освободили» пришлось бы считать по плану, включая неудачные файлы.
+        sizes = {path: _size_of(path) for path in wipe.files}
+        wipe_failures = _delete_paths(wipe.files)
+        wiped_failed = {path for path, _ in wipe_failures}
+        wiped = [path for path in wipe.files if path not in wiped_failed]
+        wiped_bytes = sum(sizes.get(path, 0) for path in wiped)
+        failures.extend(wipe_failures)
     audit_path = audit
-    if deleted or pruned:
+    if deleted or pruned or wiped:
         _write_audit(
             audit=audit_path,
             actor=actor,
@@ -1587,9 +1869,15 @@ def apply_gc(
             totals=totals,
             deleted=deleted,
             pruned=pruned,
+            wiped=wipe if wipe is not None else None,
         )
     return ApplyResult(
-        deleted=deleted, pruned=pruned, failures=failures, audit_path=audit_path
+        deleted=deleted,
+        pruned=pruned,
+        failures=failures,
+        audit_path=audit_path,
+        wiped=wiped,
+        wiped_bytes=wiped_bytes,
     )
 
 
@@ -1603,6 +1891,7 @@ def _write_audit(
     totals: dict[str, dict[str, int]],
     deleted: list[Orphan],
     pruned: list[PruneRun] | None = None,
+    wiped: WipePlan | None = None,
 ) -> None:
     """Дописать в аудит строку-сводку, по строке на файл и на удалённый прогон.
 
@@ -1622,6 +1911,7 @@ def _write_audit(
         },
         "run_census": runs.as_dict(),
         "runs_pruned": [item.as_dict() for item in (pruned or [])],
+        "wiped": wiped.as_dict() if wiped is not None else None,
         "total": _sum(totals, DELETABLE_CLASSES),
     }
     with audit.open("a", encoding="utf-8") as handle:
@@ -1648,6 +1938,19 @@ def _write_audit(
                         "path": str(run.path),
                         "bytes": run.db.bytes,
                         "cells": run.db.cells,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        if wiped is not None:
+            handle.write(
+                json.dumps(
+                    {
+                        "class": "wipe_http_cache",
+                        "path": str(wiped.path),
+                        "files": len(wiped.files),
+                        "bytes": wiped.bytes,
                     },
                     ensure_ascii=False,
                 )

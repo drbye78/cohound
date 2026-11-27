@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -1120,3 +1121,274 @@ def test_space_predicate_parity_with_instrument(tmp_path: Path) -> None:
     ]
     for url in urls:
         assert in_space(url, frontiers, {}) == _in_space(url, frontiers, {}), url
+
+
+# ------------------------------------------------------- бюджет http-кэша (mtime-LRU)
+
+
+def _cache_pair(cache: Path, url: str, *, body: bytes, mtime: float) -> list[Path]:
+    """Пара ``{key}.bin`` + ``{key}.meta.json`` с заданным ``mtime`` (порядок вытеснения)."""
+    made = _cache_file(cache, url, meta=True)
+    for path in made:
+        os.utime(path, (mtime, mtime))
+    for path in made:
+        path.write_bytes(body)
+    return made
+
+
+def test_http_cache_over_budget_evicts_oldest(tmp_path: Path) -> None:
+    """Бюджет меньше объёма: вытесняется самая старая пара, а не любая."""
+    package = _package(tmp_path)
+    cache = tmp_path / "cache"
+    old = _cache_pair(cache, IN_SPACE, body=b"x" * 10, mtime=1_000.0)
+    mid = _cache_pair(cache, "https://p1.test/docs/b.html", body=b"x" * 10, mtime=2_000.0)
+    new = _cache_pair(cache, "https://p1.test/docs/c.html", body=b"x" * 10, mtime=3_000.0)
+    db = _state(tmp_path / "state", urls=[("p1", IN_SPACE)])
+
+    orphans = scan_gc(
+        package=package,
+        state_db=db,
+        corpus_raw=tmp_path / "corpus_raw",
+        cache=cache,
+        http_cache_budget=40,
+        only=frozenset({"http_cache_over_budget"}),
+    )
+
+    evicted = {item.path for item in orphans}
+    assert evicted == set(old), "вытесняется самая старая ЗАПИСЬ (mtime), а не произвольная"
+    assert all(path.exists() for path in mid + new), "свежие пары остаются"
+
+
+def test_http_cache_without_budget_has_no_eviction(tmp_path: Path) -> None:
+    """Бюджет не объявлен — класс пуст: «границы нет» не значит «всё в порядке»."""
+    package = _package(tmp_path)
+    cache = tmp_path / "cache"
+    _cache_pair(cache, IN_SPACE, body=b"x" * 10, mtime=1_000.0)
+    db = _state(tmp_path / "state", urls=[("p1", IN_SPACE)])
+
+    orphans = scan_gc(
+        package=package,
+        state_db=db,
+        corpus_raw=tmp_path / "corpus_raw",
+        cache=cache,
+        http_cache_budget=None,
+        only=frozenset({"http_cache_over_budget"}),
+    )
+
+    assert orphans == []
+
+
+# ------------------------------------------------------------ полная очистка кэша
+
+
+def test_wipe_http_cache_dry_run_keeps_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Без ``--apply`` очистка только считается: файлы на месте, цена названа."""
+    package = _package(tmp_path)
+    made = _cache_file(tmp_path / "cache", IN_SPACE, meta=True)
+    db = _state(tmp_path / "state", urls=[("p1", IN_SPACE)])
+
+    assert _run(tmp_path, package, db, "--wipe-http-cache") == 0
+
+    assert all(path.exists() for path in made), "dry-run ничего не удаляет"
+    out = capsys.readouterr().out
+    assert "wipe_http_cache" in out
+    assert "кэш R7 — не evidence" in out, "объём без цены читался бы как «просто место»"
+
+
+def test_wipe_http_cache_apply_deletes_and_audits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """С ``--apply`` каталог очищается целиком, и это видно в аудите."""
+    package = _package(tmp_path)
+    made = _cache_file(tmp_path / "cache", IN_SPACE, meta=True)
+    db = _state(tmp_path / "state", urls=[("p1", IN_SPACE)])
+    audit = tmp_path / "audit.jsonl"
+
+    assert (
+        _run(
+            tmp_path,
+            package,
+            db,
+            "--wipe-http-cache",
+            "--apply",
+            "--actor",
+            "tester",
+            "--audit",
+            str(audit),
+        )
+        == 0
+    )
+
+    assert not any(path.exists() for path in made), "весь каталог http-кэша удалён"
+    capsys.readouterr()
+    lines = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    assert any(line.get("class") == "wipe_http_cache" for line in lines)
+
+
+def test_wipe_http_cache_missing_dir_is_not_a_refusal(tmp_path: Path) -> None:
+    """Каталога нет — не отказ: очищать нечего, и это печатается, а не молчится."""
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+
+    assert _run(tmp_path, package, db, "--wipe-http-cache") == 0
+
+
+# --------------------------------------------------------- цензус цитирования прогонов
+
+
+def _docs(tmp_path: Path, body: str) -> Path:
+    root = tmp_path / "docs"
+    (root / "reports").mkdir(parents=True)
+    (root / "reports" / "note.md").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_cited_run_is_marked_and_warns_before_prune(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Цитируемый прогон помечается, а ``--prune-run`` предупреждает, но не отказывает."""
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    target = _run_db(runs / "run_cited", run_id="run_cited")
+    docs = _docs(tmp_path, "замер снят на прогоне `run_cited` (28.11.2026)\n")
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--docs-root",
+            str(docs),
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "цитируется: 1" in out, "цитируемый прогон обязан быть отличим от пробы"
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--docs-root",
+            str(docs),
+            "--prune-run",
+            "run_cited",
+            "--apply",
+            "--actor",
+            "tester",
+        )
+        == 0
+    )
+    err = capsys.readouterr().err
+    assert "цитируется в 1 документах" in err, "цена удаления называется ДО удаления"
+    assert not target.parent.exists(), "предупреждение — не отказ: решение принял человек"
+
+
+def test_uncited_run_has_empty_citations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Нецитируемый прогон не притворяется подложкой замера."""
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_plain", run_id="run_plain")
+    docs = _docs(tmp_path, "текст без упоминания прогонов\n")
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--docs-root",
+            str(docs),
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "не цитируется" in out
+
+
+def test_short_hash_form_counts_as_citation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Прогон, названный в замере коротким хешем, цитируется.
+
+    Замер 28.11.2026: ``ru-pg-dbms-9c8dd0345f3f`` (из него измерен потолок согласия
+    0.9381) встречается в документах только как ``9c8dd0345f3f`` — полного имени в них
+    нет. Цензус по полному ``run_id`` объявлял его нецитируемым, то есть ровно тот прогон,
+    ради которого проверка заведена, выглядел мусором.
+    """
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "ru-pg-dbms-0123456789ab", run_id="ru-pg-dbms-0123456789ab")
+    docs = _docs(tmp_path, "потолок снят на прогоне `0123456789ab` (28.11.2026)\n")
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--docs-root",
+            str(docs),
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "цитируется: 1" in out, "короткий хеш — тоже цитирование, а не совпадение"
+
+
+def test_run_id_without_hash_is_not_matched_by_tail(tmp_path: Path) -> None:
+    """``run_id`` без хеша сверяется только целиком: хвост слова не считается ссылкой."""
+    from core.pipeline.gc import _citation_keys
+
+    assert _citation_keys("gaussdb-probe") == ("gaussdb-probe",)
+    assert _citation_keys("recon-pangolin_root") == ("recon-pangolin_root",)
+    assert _citation_keys("pkg-0123456789ab") == ("pkg-0123456789ab", "0123456789ab")
+
+
+def test_wipe_reports_size_after_deletion(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Объём очистки снимается ДО удаления: иначе отчёт печатал бы «0 B».
+
+    Дефект был настоящим: ``WipePlan.bytes`` — свойство, суммирующее ``stat`` по файлам, а
+    после ``--apply`` этих файлов уже нет. На реальном прогоне 28.11.2026 это дало строку
+    «14 870 файлов 0 B (удаляется)» при освобождённых 1.5 GB.
+    """
+    package = _package(tmp_path)
+    made = _cache_file(tmp_path / "cache", IN_SPACE, meta=True)
+    db = _state(tmp_path / "state", urls=[("p1", IN_SPACE)])
+    size = sum(path.stat().st_size for path in made)
+    assert size > 0
+
+    assert (
+        _run(
+            tmp_path,
+            package,
+            db,
+            "--wipe-http-cache",
+            "--apply",
+            "--actor",
+            "tester",
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    line = next(item for item in out.splitlines() if "wipe_http_cache" in item)
+    assert f"{size} B" in line, f"объём снят до удаления, а не после: {line}"
+    assert "освобождено" in out

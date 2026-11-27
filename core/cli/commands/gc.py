@@ -33,6 +33,7 @@ from core.pipeline.gc import (
     ALL_CLASSES,
     CACHE_BUDGET_CLASS,
     CLASS_ORDER,
+    DEFAULT_DOCS_ROOT,
     DELETABLE_CLASSES,
     ONLY_GROUPS,
     REPORT_ONLY_CLASSES,
@@ -46,6 +47,7 @@ from core.pipeline.gc import (
     apply_gc,
     build_gc_plan,
     human_bytes,
+    plan_wipe_http_cache,
     total,
 )
 
@@ -56,8 +58,16 @@ _SAMPLES = 3
 
 #: Текст, который обязан стоять под классом ``runs_unsigned``: класс отчётный.
 _UNSIGNED_NOTE = (
-    "runs_unsigned — НЕ кандидаты на удаление: waiver вместо G4 легален, а прогон "
-    "с ячейками\n   уже произвёл вердикты; удаление только явным --prune-run RUN_ID"
+    "runs_unsigned — НЕ кандидаты на удаление: waiver вместо G4 легален, прогон с ячейками\n"
+    "   уже произвёл вердикты, а ЦИТИРУЕМЫЙ прогон — подложка опубликованного замера\n"
+    "   (замер 28.11.2026: 12 из 19 цитируются, 3.18 GiB из 3.19; короткий хеш считается)"
+)
+
+#: Цена полной очистки ``cache/http`` — не украшение: промах кэша = повторный фетч.
+_WIPE_PRICE = (
+    "кэш R7 — не evidence; промах = повторный фетч (замер 27.11.2026: model_free "
+    "49.5 мс/док, docling text 0.030 с/стр, "
+    "docs/reports/measurements/2026-11-23-work-class-cost.md)"
 )
 
 
@@ -143,6 +153,22 @@ def _add_gc_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help="каталог кэша вердиктов для отчёта cache_budget (дефолт — paths.eval_cache)",
+    )
+    parser.add_argument(
+        "--docs-root",
+        type=Path,
+        default=None,
+        help=(
+            "корень документов для цензуса цитирования прогонов "
+            "(дефолт — docs/ корня репозитория)"
+        ),
+    )
+    parser.add_argument(
+        "--wipe-http-cache",
+        action="store_true",
+        help=(
+            "удалить ВЕСЬ каталог --cache/http (R7; без --apply — только отчёт о размере)"
+        ),
     )
     parser.add_argument(
         "--only",
@@ -288,6 +314,8 @@ def _print_report(
     orphans: list[Any],
     totals: dict[str, dict[str, int]],
     price: RunPrice,
+    *,
+    http_after: dict[str, int] | None = None,
 ) -> None:
     for cls in CLASS_ORDER:
         bucket = totals[cls]
@@ -302,6 +330,16 @@ def _print_report(
             print(f"    {orphan.path}")
         if cls == "corpus_raw_run_history":
             _print_price(price)
+        if cls == "http_cache_over_budget" and http_after is not None:
+            budget = http_after.get("budget")
+            budget_text = human_bytes(budget) if budget else "—"
+            print(
+                f"    бюджет {budget_text}, mtime-LRU (последняя ЗАПИСЬ, не использование)"
+            )
+            print(
+                f"    остаётся после вытеснения: {http_after['files']} файлов "
+                f"{human_bytes(http_after['bytes'])}"
+            )
     deletable = total(totals, DELETABLE_CLASSES)
     reported = total(totals, REPORT_ONLY_CLASSES)
     print(
@@ -334,9 +372,12 @@ def _print_runs(plan: Plan) -> None:
         if cls == "runs_unsigned":
             print(f"   {_UNSIGNED_NOTE}")
         for db in dbs:
+            cited = (
+                f"цитируется: {len(db.cited_in)}" if db.cited_in else "не цитируется"
+            )
             print(
                 f"    {db.run_id:<40} ячеек {db.cells:>6}  outputs {db.outputs:>4}  "
-                f"{human_bytes(db.bytes):>10}"
+                f"{human_bytes(db.bytes):>10}  {cited}"
             )
     if not printed:
         print("прогоны: ни одной прогонной БД не прочитано")
@@ -453,13 +494,19 @@ def run(args: argparse.Namespace) -> int:
         only = _parse_only(args.only)
         wanted = ALL_CLASSES if only is None else only
         deploy = getattr(args, "deploy", None)
-        budget: int | None = None
-        if CACHE_BUDGET_CLASS in wanted:
+        # Бюджеты нужны, если запрошен отчёт по кэшам **или** вытеснение по бюджету:
+        # второе считает класс ``http_cache_over_budget``, и без бюджета он пуст не
+        # потому, что «всё в порядке», а потому, что границы не объявлено.
+        needs_budget = CACHE_BUDGET_CLASS in wanted or "http_cache_over_budget" in wanted
+        extract_budget: int | None = None
+        http_budget: int | None = None
+        if needs_budget:
             if deploy is None:
                 from core.config.deploy import load_deploy_config
 
                 deploy = load_deploy_config()
-            budget = deploy.extract.cache_max_bytes
+            extract_budget = deploy.extract.cache_max_bytes
+            http_budget = deploy.cache.http_max_bytes
         plan = build_gc_plan(
             package=args.package,
             also_packages=args.also_package,
@@ -472,10 +519,19 @@ def run(args: argparse.Namespace) -> int:
             extract_cache=extract_cache,
             embed_cache=embed_cache,
             eval_cache=eval_cache,
-            extract_cache_budget=budget,
+            extract_cache_budget=extract_budget,
+            http_cache_budget=http_budget,
+            docs_root=Path(args.docs_root) if args.docs_root else DEFAULT_DOCS_ROOT,
             prune_runs=args.prune_run,
             only=only,
         )
+        # Полная очистка http-кэша — отдельное решение, а не класс: она удаляет и то,
+        # что внутри объявленного пространства. План считается всегда (dry-run печатает
+        # объём и цену), а удаляется только под ``--apply``.
+        wipe = plan_wipe_http_cache(cache) if args.wipe_http_cache else None
+        # Объём снимается ДО удаления: после ``--apply`` ``stat`` по этим путям уже не
+        # ответит, и отчёт напечатал бы «0 B», освободив гигабайты.
+        wipe_bytes = wipe.bytes if wipe is not None else 0
     except GcRefused as exc:
         print(f"ОТКАЗ: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -485,6 +541,8 @@ def run(args: argparse.Namespace) -> int:
     failures: list[tuple[Path, str]] = []
     deleted: list[Any] = []
     pruned: list[Any] = []
+    wiped: list[Any] = []
+    wiped_bytes = 0
     audit_path = args.audit or (plan.state.dbs[0].path.parent / "prune_orphans.jsonl")
 
     if not plan.runs.known:
@@ -511,42 +569,60 @@ def run(args: argparse.Namespace) -> int:
     for warning in plan.prune_warnings:
         print(warning, file=sys.stderr)
 
-    if args.apply and (any(item.cls in DELETABLE_CLASSES for item in orphans) or plan.prune_runs):
+    if args.apply and (
+        any(item.cls in DELETABLE_CLASSES for item in orphans)
+        or plan.prune_runs
+        or (wipe is not None and wipe.files)
+    ):
         result = apply_gc(
             plan,
             actor=str(args.actor),
             audit=audit_path,
             package=args.package,
             totals=totals,
+            wipe=wipe,
         )
         deleted = list(result.deleted)
         pruned = list(result.pruned)
         failures = list(result.failures)
+        wiped = list(result.wiped)
+        wiped_bytes = result.wiped_bytes
+
+    if wipe is not None:
+        # Печатается **до** удаления и в обоих режимах: объём без цены читался бы как
+        # «просто место». Кэш R7 — не evidence, но промах стоит повторного фетча.
+        state = "удаляется" if args.apply else "к удалению"
+        print(
+            f"{'wipe_http_cache':<28}{len(wipe.files):>8} файлов "
+            f"{human_bytes(wipe_bytes):>12}  ({state})"
+        )
+        print(f"    {wipe.path}")
+        print(f"    {_WIPE_PRICE}")
 
     if args.json:
-        print(
-            json.dumps(
-                _payload(
-                    plan=plan,
-                    args=args,
-                    corpus_raw=corpus_raw,
-                    cache=cache,
-                    totals=totals,
-                    deleted=deleted,
-                    pruned=pruned,
-                    failures=failures,
-                    missing_roots=missing_roots,
-                ),
-                ensure_ascii=False,
-                indent=1,
-            )
+        payload = _payload(
+            plan=plan,
+            args=args,
+            corpus_raw=corpus_raw,
+            cache=cache,
+            totals=totals,
+            deleted=deleted,
+            pruned=pruned,
+            failures=failures,
+            missing_roots=missing_roots,
         )
+        payload["wipe_http_cache"] = wipe.as_dict() if wipe is not None else None
+        payload["wiped"] = {
+            "files": len(wiped),
+            "bytes": wiped_bytes,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=1))
     else:
         _print_packages(plan)
         _print_state_dbs(plan)
         _print_run_census(plan.runs)
         print()
-        _print_report(orphans, totals, plan.price)
+        _print_report(orphans, totals, plan.price, http_after=plan.http_cache_after)
         _print_runs(plan)
         _print_cache_budget(plan.cache_budgets)
         for root in missing_roots:
@@ -554,14 +630,16 @@ def run(args: argparse.Namespace) -> int:
         if not args.apply:
             print("dry-run: ничего не удалено (--apply --actor NAME для удаления)")
         else:
-            freed = sum(item.size for item in deleted) + sum(
-                item.db.bytes for item in pruned
+            freed = (
+                sum(item.size for item in deleted)
+                + sum(item.db.bytes for item in pruned)
+                + wiped_bytes
             )
             print(
                 f"удалено файлов: {len(deleted)}, прогонов: {len(pruned)}, "
-                f"освобождено {human_bytes(freed)}"
+                f"в кэше: {len(wiped)}, освобождено {human_bytes(freed)}"
             )
-            if deleted or pruned:
+            if deleted or pruned or wiped:
                 print(f"аудит: {audit_path}")
         for path, reason in failures:
             print(f"НЕ УДАЛЕНО: {path}: {reason}", file=sys.stderr)

@@ -21,6 +21,7 @@ from core.config.deploy import (
     LEXICAL_PROFILES,
     RETRIEVAL_PROFILES,
     SPLIT_HARDENED_WARNING,
+    CacheDeployConfig,
     CrawlBrowserConfig,
     CrawlConfig,
     CrawlShardConfig,
@@ -1302,6 +1303,22 @@ def test_extract_cache_budget_positive_only() -> None:
         with pytest.raises(ValidationError) as excinfo:
             ExtractDeployConfig(cache_max_bytes=bad)
         assert "cache_max_bytes" in str(excinfo.value)
+        assert "null" in str(excinfo.value)
+
+
+def test_http_cache_budget_positive_only() -> None:
+    """Бюджет ``cache/http``: та же граница, что у ``extract.cache_max_bytes``.
+
+    ``0`` отвергается по той же причине: он вытеснял бы всё, включая только что
+    записанную пару, то есть кэш никогда не попадал бы. ``null`` — «границы роста не
+    объявлено», и это не то же самое, что «всё в порядке» (A3).
+    """
+    assert CacheDeployConfig().http_max_bytes is None
+    assert CacheDeployConfig(http_max_bytes=1).http_max_bytes == 1
+    for bad in (0, -1):
+        with pytest.raises(ValidationError) as excinfo:
+            CacheDeployConfig(http_max_bytes=bad)
+        assert "http_max_bytes" in str(excinfo.value)
         assert "null" in str(excinfo.value)
 
 
