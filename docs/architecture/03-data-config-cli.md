@@ -1212,7 +1212,8 @@ retrieval:                     # I16/D2: объявленный дефолт п�
 lexical:                       # O16: профиль анализатора лексического индекса
   profile: stemmed             # stemmed | identifier | ngram (raw → identifier)
 extract:                       # D8: операционный бюджет межпрогонного кэша экстракции
-  cache_max_bytes: null        # null = без вытеснения; число = LRU по mtime
+  cache_max_bytes: 2147483648  # 2 GiB = 4× живого множества (0.43 GB, замер 27.11.2026);
+                               # число = LRU по mtime; `null` = без вытеснения
 tools:                         # план 28: локальные инструменты оценщика (условие измерения)
   profile: none                # none | t1 | t4 | t7 | список через + (t1+t4+t7)
                                # приоритет: --tool-profile > этот ключ > none; auto нет
