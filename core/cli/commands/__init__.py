@@ -21,6 +21,7 @@ from core.cli.commands import (
     experiment,
     extract,
     gate,
+    gc,
     golden,
     passport_scout,
     plan,
@@ -74,6 +75,10 @@ COMMANDS = (
     # но ``review`` — очередь решений человека, а ``search`` — материал для них.
     search,
     gate,
+    # ``gc`` стоит сразу за ``gate``: обе команды — про готовый результат, но
+    # ``gate`` решает публиковать ли, а ``gc`` убирает то, на что уже никто не
+    # ссылается (и печатает отчёт по прогонам, прежде чем их тронуть).
+    gc,
     deploy,
     experiment,
 )

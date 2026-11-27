@@ -1,4 +1,4 @@
-"""``scripts/prune_orphans.py``: удаляется только то, на что не ссылается ``state.db``.
+"""``hound gc`` (``core.pipeline.gc``): удаляется только то, на что не ссылается ``state.db``.
 
 Что эти тесты держат закрытым:
 
@@ -25,14 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from core.util.cache import http_key
-from scripts.prune_orphans import (
+from core.cli.commands.gc import main
+from core.pipeline.gc import (
     AUDIT_NAME,
     CLASS_ORDER,
-    PruneRefused,
-    main,
-    scan,
+    GcRefused,
+    scan_gc,
 )
+from core.util.cache import http_key
 
 ROOT = "https://p1.test/docs/"
 IN_SPACE = "https://p1.test/docs/guide.html"
@@ -177,7 +177,7 @@ def test_foreign_product_dir_is_reported_not_deleted(tmp_path: Path) -> None:
     foreign = _raw(root, "someone_else", "a.bin")
     db = _state(tmp_path)
 
-    orphans = scan(
+    orphans = scan_gc(
         package=package,
         state_db=db,
         corpus_raw=root,
@@ -268,7 +268,7 @@ def test_unattributed_cache_key_is_reported_and_kept(tmp_path: Path) -> None:
     unknown = _cache_file(tmp_path / "cache", "https://other.test/page.html")
     db = _state(tmp_path)
 
-    orphans = scan(
+    orphans = scan_gc(
         package=package,
         state_db=db,
         corpus_raw=tmp_path / "corpus_raw",
@@ -353,7 +353,7 @@ def test_scan_does_not_touch_state_db(tmp_path: Path) -> None:
     db = _state(tmp_path, raw_paths=[str(live)])
     before = db.read_bytes()
 
-    scan(
+    scan_gc(
         package=package,
         state_db=db,
         corpus_raw=tmp_path / "corpus_raw",
@@ -364,11 +364,11 @@ def test_scan_does_not_touch_state_db(tmp_path: Path) -> None:
 
 
 def test_scan_reports_refusal_type(tmp_path: Path) -> None:
-    """Отказы поднимаются как :class:`PruneRefused`, а не как пустой план."""
+    """Отказы поднимаются как :class:`GcRefused`, а не как пустой план."""
     package = _package(tmp_path)
     db = _state(tmp_path)
-    with pytest.raises(PruneRefused):
-        scan(
+    with pytest.raises(GcRefused):
+        scan_gc(
             package=package,
             state_db=db,
             corpus_raw=tmp_path / "corpus_raw",
@@ -849,3 +849,274 @@ def test_by_drain_excludes_live_run(
 
     assert payload["price"]["by_drain"] == {"files": 0, "bytes": 0}
     assert payload["price"]["by_resumable_session"]["files"] == 1
+
+
+# ------------------------------------------------------------------ отчёт по прогонам
+
+
+def test_runs_classes_split_signed_resumable_unsigned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``runs_signed``/``runs_resumable``/``runs_unsigned`` — три разных факта, не один.
+
+    Подпись G4 — опубликованное evidence; возобновляемый сеанс — переигровка без сети;
+    всё остальное — не кандидаты на удаление (waiver легален, ячейки уже произведены).
+    """
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_signed", run_id="run_signed", g4=True, cells=3)
+    _run_db(
+        runs / "run_resumable",
+        run_id="run_resumable",
+        session_status="running",
+        session_refs=[],
+    )
+    _run_db(runs / "run_plain", run_id="run_plain", cells=7)
+
+    assert _run_dbs(tmp_path, package, [db], "--json", "--runs-dir", str(runs)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["classes"]["runs_signed"]["runs"] == 1
+    assert payload["classes"]["runs_resumable"]["runs"] == 1
+    assert payload["classes"]["runs_unsigned"]["runs"] == 1
+    for cls in ("runs_signed", "runs_resumable", "runs_unsigned"):
+        assert payload["classes"][cls]["deletable"] is False, cls
+    assert payload["classes"]["runs_unsigned"]["cells"] == 7
+    assert [item["run_id"] for item in payload["runs"]["runs_unsigned"]] == ["run_plain"]
+    assert payload["runs"]["runs_unsigned"][0]["cells"] == 7
+    assert payload["runs"]["runs_unsigned"][0]["bytes"] > 0
+
+
+def test_runs_report_prints_cells_and_size(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Человекочитаемый отчёт печатает ячейки и размер, а не только ``run_id``.
+
+    Иначе 1267-ячеечная карта неотличима от пустой пробы — и решение «удалить прогон»
+    принималось бы вслепую.
+    """
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_map", run_id="run_map", cells=1267)
+
+    assert _run_dbs(tmp_path, package, [db], "--runs-dir", str(runs)) == 0
+    out = capsys.readouterr().out
+
+    assert "runs_unsigned" in out
+    assert "1267" in out
+    assert "НЕ кандидаты на удаление" in out
+
+
+# ------------------------------------------------------------------ бюджеты кэшей
+
+
+def test_cache_budget_reports_over_and_without(tmp_path: Path) -> None:
+    """``cache_budget``: объявленный бюджет и его отсутствие — разные факты."""
+    from core.pipeline.gc import build_gc_plan
+
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    extract = tmp_path / "extract_cache"
+    extract.mkdir()
+    (extract / "a.json").write_bytes(b"x" * 20)
+    embed = tmp_path / "embed_cache"
+    embed.mkdir()
+    (embed / "b.npy").write_bytes(b"y" * 5)
+
+    plan = build_gc_plan(
+        package=package,
+        state_dbs=[db],
+        corpus_raw=tmp_path / "corpus_raw",
+        cache=tmp_path / "cache",
+        extract_cache=extract,
+        embed_cache=embed,
+        eval_cache=None,
+        extract_cache_budget=10,
+        only=frozenset({"cache_budget"}),
+    )
+    rows = {row.name: row for row in plan.cache_budgets}
+
+    assert rows["extract_cache"].bytes == 20
+    assert rows["extract_cache"].budget == 10
+    assert rows["extract_cache"].over_budget is True
+    assert rows["extract_cache"].share == pytest.approx(2.0)
+    assert rows["embed_cache"].budget is None
+    assert rows["embed_cache"].over_budget is False
+    assert rows["embed_cache"].share is None
+
+
+# ------------------------------------------------------------------ --prune-run
+
+
+def test_prune_run_refuses_signed(tmp_path: Path) -> None:
+    """Подписанный G4 прогон не удаляется ни при каких флагах."""
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    target = _run_db(runs / "run_signed", run_id="run_signed", g4=True)
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--prune-run",
+            "run_signed",
+            "--apply",
+            "--actor",
+            "t",
+        )
+        == 2
+    )
+    assert target.exists(), "опубликованное evidence удалять нельзя"
+
+
+def test_prune_run_refuses_resumable(tmp_path: Path) -> None:
+    """Возобновляемый сеанс: удаление потеряло бы переигровку без сети."""
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    target = _run_db(
+        runs / "run_resumable", run_id="run_resumable", session_status="running"
+    )
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--prune-run",
+            "run_resumable",
+            "--apply",
+            "--actor",
+            "t",
+        )
+        == 2
+    )
+    assert target.exists()
+
+
+def test_prune_run_refuses_unknown(tmp_path: Path) -> None:
+    """Несуществующий ``run_id`` — отказ, а не молчаливое «удалять нечего»."""
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_a", run_id="run_a")
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--prune-run",
+            "run_absent",
+            "--apply",
+            "--actor",
+            "t",
+        )
+        == 2
+    )
+
+
+def test_prune_run_deletes_unsigned_and_warns_about_cells(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Незанятый прогон удаляется явным именем; ячейки — громкое предупреждение.
+
+    Отказ на ``cells > 0`` сделал бы невозможным удаление законно отработавшего прогона,
+    а молчание сделало бы удаление слепым: печатается число ячеек и ``outputs/``.
+    """
+    package = _package(tmp_path)
+    db = _state(tmp_path / "state")
+    runs = _runs_dir(tmp_path)
+    target = _run_db(runs / "run_plain", run_id="run_plain", cells=42)
+    (target.parent / "outputs").mkdir()
+    (target.parent / "outputs" / "cells.csv").write_text("x", encoding="utf-8")
+    audit = tmp_path / "audit.jsonl"
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--runs-dir",
+            str(runs),
+            "--prune-run",
+            "run_plain",
+            "--apply",
+            "--actor",
+            "t",
+            "--audit",
+            str(audit),
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert not target.parent.exists(), "названный прогон удаляется целиком"
+    assert "ВНИМАНИЕ: run_plain: 42 ячеек и 1 файлов outputs/" in captured.err
+    lines = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    summary, *events = lines
+    assert summary["runs_pruned"][0]["run_id"] == "run_plain"
+    assert summary["runs_pruned"][0]["cells"] == 42
+    assert events[0]["class"] == "prune_run"
+    assert events[0]["run_id"] == "run_plain"
+
+
+# ------------------------------------------------------------------ паритет предиката
+
+
+def test_space_predicate_parity_with_instrument(tmp_path: Path) -> None:
+    """``core.pipeline.gc`` и ``scripts.measure_substrate_reuse`` решают пространство одинаково.
+
+    Две копии предиката расходятся молча — в этом репозитории это уже случалось
+    (``catalog_digest`` без ``semantics``). Гейт сверяет и построение корней, и решения
+    на наборе адресов, где ответ известен: поддомен, ``www.``, граница сегмента пути,
+    percent-encoded traversal.
+    """
+    from core.pipeline.crawl_frontier import CrawlLimits, Frontier
+    from core.pipeline.gc import declared_scopes, in_space
+    from scripts.measure_substrate_reuse import _in_space
+    from scripts.measure_substrate_reuse import declared_scopes as instrument_scopes
+
+    package = tmp_path / "pkg"
+    (package / "sources").mkdir(parents=True)
+    (package / "sources" / "corpus_urls.yaml").write_text(
+        "p1:\n- https://p1.test/docs/\n- https://www.p1.test/docs/\n", encoding="utf-8"
+    )
+    (package / "domain_profiles.yaml").write_text(
+        "p1.test/docs:\n  max_depth: 3\nsub.p1.test:\n  max_depth: 1\n",
+        encoding="utf-8",
+    )
+
+    core_roots, core_hosts = declared_scopes(package)
+    inst_roots, inst_hosts = instrument_scopes(package)
+    assert core_roots == inst_roots
+    assert core_hosts == inst_hosts
+
+    frontiers = [
+        Frontier(root, CrawlLimits(), scope_hosts=core_hosts.get("p1", frozenset()))
+        for root in core_roots["p1"]
+    ]
+    urls = [
+        "https://p1.test/docs/guide.html",
+        "https://p1.test/docs/",
+        "https://p1.test/docs-old/page.html",
+        "https://p1.test/docs/%2e%2e/private",
+        "https://sub.p1.test/docs/page.html",
+        "https://unlisted.p1.test/docs/page.html",
+        "https://www.p1.test/docs/page.html",
+        "https://other.test/docs/page.html",
+        "https://p1.test/elsewhere",
+        "not-a-url",
+    ]
+    for url in urls:
+        assert in_space(url, frontiers, {}) == _in_space(url, frontiers, {}), url
