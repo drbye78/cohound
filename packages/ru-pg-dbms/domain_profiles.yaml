@@ -12,6 +12,17 @@
 #  - tantorlabs.ru/products/dbms/ — 403 обычному HTTP → browser.
 #  - остальные отдают 200 обычному HTTP — браузер не требуется.
 #
+# strategy объявлена по ЗАМЕРУ 27.11.2026 (scripts/measure_hybrid_hosts.py; отчёт
+# docs/reports/measurements/2026-11-27-hybrid-hosts.md). hybrid — липкий на хост режим:
+# браузер платит за хост один раз (cookie + эталон рендера), дальше адреса хоста идут
+# лёгким HTTP, а документы/контейнеры в браузере не навигируются вовсе. Переведены ключи,
+# где мост отдал тот же текст, что honest-рендер: pangolin.sbertech.ru, tantorlabs.ru,
+# tantorlabs.ru/products/dbms, sbertech.ru/documents. Остались honest:
+# platformv.sbertech.ru (лёгкий GET получает челлендж на каждом адресе: 18 на 6 URL)
+# и sbertech.ru как host-ключ (мост отдаёт 0.79 текста рендера).
+# Перевод strategy — execution_change: оси получения контента входят в
+# crawl_config_digest с 27.11.2026 (_declared_plan_axes).
+#
 # Бюджеты (P7, execution_change §13, не методология): глубина — потолок, но НЕ ограничитель
 # полноты; где sitemap есть, хватает 2–3 уровней (sitemap сам даёт depth-0 seeds), 8 — там,
 # где sitemap отсутствует (404/500 у хоста) и глубина измеряется только эмпирически.
@@ -193,6 +204,14 @@ pangolin.sbertech.ru:
   # граница: лимитер резервирует слот **на origin**, поэтому два потока не удваивают темп,
   # а убирают простой на хвосте — фетчей дольше 1.6 с в замере **2.0 %** (p99 2 356 мс).
   # Ускорение от параллелизма объявлено, но не измерено.
+  #
+  # strategy: hybrid — ЗАМЕР 27.11.2026 (scripts/measure_hybrid_hosts.py, 6 URL ключа):
+  # мост 6/6, браузерных прогрева 1, челленджей 0, текст 1.00 от honest-рендера того же
+  # адреса (побайтово те же символы). wait_for остаётся: он нужен прогреву (JS-challenge
+  # перезагружает страницу ПОСЛЕ domcontentloaded), а лёгкий GET условия ждать не может —
+  # либо отдаёт материал, либо челлендж, который снимает подтверждение и стоит одного
+  # пере-прогрева.
+  # Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
   browser_workers: 2
   extract: auto
   fetch: browser
@@ -202,7 +221,7 @@ pangolin.sbertech.ru:
     max_s: 3.0
     min_s: 0.2
   sitemap: https://pangolin.sbertech.ru/sitemap.xml
-  strategy: honest
+  strategy: hybrid
   wait_for: () => document.body && document.body.innerText.length > 200
 # Оси хоста platformv.sbertech.ru **не однородны по пути** — измерено 29.10.2026, поэтому
 # профиль расщеплён: ключ профиля — `host[/path]`, побеждает самый длинный path_key
@@ -392,12 +411,18 @@ sbertech.ru/documents:
   # Живой краул этого корня не проводился: `platformv`/`sbertech` отдают 401 обычному HTTP,
   # а browser-фетч сериализован. 27 — статическая нижняя граница, не `truncated: false`.
   # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §2, §4.
+  # strategy: hybrid — ЗАМЕР 27.11.2026: мост 6/6, прогревов 0, челленджей 0, текст 1.00
+  # от honest. Оговорка прибора: на этих адресах ОБА плеча дают одну и ту же
+  # 1 679-символьную оболочку (страницы версий отдаются скриптом), то есть режим здесь не
+  # ограничитель — вопрос качества корпуса решается объявленным wait_for, которого на ключе
+  # нет, и это отдельная задача, не ось стратегии.
+  # Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
   extract: auto
   fetch: browser
   max_depth: 4
   max_documents: 100
   sitemap: https://sbertech.ru/sitemap.xml
-  strategy: honest
+  strategy: hybrid
 support.huaweicloud.com:
   # Документация GaussDB — единственный продукт профиля с **родным китайским** корпусом.
   #
@@ -444,12 +469,16 @@ tantorlabs.ru:
   # `/polardb`, `/patroni`, `/tp`, `/dlh`, `/xdata` — чужие продукты. Для полноты нужны
   # явные продуктовые сиды (`/products/dbms/`, `/tdb/…`), а не подъём этого бюджета.
   # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §3, §9.
+  # strategy: hybrid — ЗАМЕР 27.11.2026: мост 6/6, прогревов 1, челленджей 0, текст 1.00 от
+  # honest. fetch: browser остаётся — корень отдаёт 403 обычному HTTP без cookie, а гибрид
+  # берёт cookie именно прогревом (браузер платит за ХОСТ, не за URL).
+  # Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
   extract: auto
   fetch: browser
   max_depth: 3
   max_documents: 300
   sitemap: https://tantorlabs.ru/sitemap.xml
-  strategy: honest
+  strategy: hybrid
 tantorlabs.ru/products/dbms:
   # Seed — глубокий путь внутри sitemap-хоста ⇒ нужен запас глубины.
   # Sitemap намеренно не задан: path-scoped seed внутри host-wide sitemap (58 <loc>,
@@ -458,11 +487,15 @@ tantorlabs.ru/products/dbms:
   # --run-id recon-tantor_dbms` ⇒ **3 документа**, `truncated: false`; статика даёт те же 3.
   # Бюджет 50 — выше измерения; 200 не подтверждался ничем (весь хост — 283 URL).
   # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §1, §2.
+  #
+  # strategy: hybrid — ЗАМЕР 27.11.2026: мост 4/4, прогревов **0** (cookie уже сняты на
+  # host-ключе того же хоста), челленджей 0, текст 1.00 (одно плечо 0.968 на `/cve` —
+  # выше порога 0.9). Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
   extract: auto
   fetch: browser
   max_depth: 8
   max_documents: 50
-  strategy: honest
+  strategy: hybrid
 wiki.astralinux.ru:
   # Host-root seed (https://wiki.astralinux.ru/) — корень общего справочного центра
   # Astra Linux, а не продукта: discovery с depth > 0 затянет в партицию tantor чужие

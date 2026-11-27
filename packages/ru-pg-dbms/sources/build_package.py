@@ -839,6 +839,24 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
     ``domcontentloaded``); ``tantorlabs.ru/products/dbms`` — 403 обычному HTTP → ``browser``;
     остальные домены отдают 200 обычному HTTP.
 
+    **``strategy`` объявлена по замеру 27.11.2026** (``scripts/measure_hybrid_hosts.py``,
+    6 URL на ключ, парно ``hybrid`` → ``honest`` того же адреса; отчёт
+    ``docs/reports/measurements/2026-11-27-hybrid-hosts.md``). ``hybrid`` — липкий на хост
+    режим (``browser-crawler-2``): браузер платит за **хост** один раз, дальше адреса идут
+    лёгким HTTP с cookie-мостом, а документы/контейнеры в браузере не навигируются вовсе.
+    Переведены ключи, где мост отдал тот же текст, что рендер: ``pangolin.sbertech.ru``
+    (6/6, прогревов 1), ``tantorlabs.ru`` (6/6, прогревов 1), ``tantorlabs.ru/products/dbms``
+    (4/4, прогревов 0), ``sbertech.ru/documents`` (6/6, прогревов 0 — с оговоркой: оба плеча
+    дают одну и ту же оболочку версий, режим не ограничитель). Остались ``honest``:
+    ``platformv.sbertech.ru`` — лёгкий GET получает челлендж на **каждом** адресе (18
+    челленджей на 6 URL, 0 мостов), и ``sbertech.ru`` (host-ключ) — мост отдаёт 0.79 текста
+    рендера (лендинг дорендеривается скриптом), то есть режим теряет материал.
+
+    Перевод ``honest`` → ``hybrid`` — ``execution_change``: оси получения контента
+    (``fetch``/``extract``/``strategy``/``wait_for``) входят в ``crawl_config_digest``
+    с 27.11.2026 (``_declared_plan_axes``); до этого объявление ``strategy`` на ключе
+    меняло исполнение, не меняя ``run_id``.
+
     **Ловушка матчинга sitemap (P7).** ``_sitemap_url_for(seed)`` берёт **самый
     специфичный** профиль (``sbertech.ru/documents`` приоритетнее ``sbertech.ru``), поэтому
     host-wide ``https://sbertech.ru/sitemap.xml`` объявлен только на path-ключе
@@ -1038,11 +1056,19 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # граница: лимитер резервирует слот **на origin**, поэтому два потока не удваивают
         # темп, а убирают простой на хвосте — фетчей дольше 1.6 с в замере **2.0 %**
         # (p99 2 356 мс). Ускорение от параллелизма объявлено, но не измерено.
+        # `strategy: hybrid` — ИЗМЕРЕНО 27.11.2026 (`scripts/measure_hybrid_hosts.py`,
+        # 6 URL ключа): мост сработал на 6/6, браузерных прогрева **1**, челленджей 0,
+        # текст против `honest`-рендера того же адреса — отношение 1.00 (побайтово те же
+        # символы). `wait_for` остаётся объявленным: он нужен прогреву (JS-challenge
+        # завершается и перезагружает страницу ПОСЛЕ `domcontentloaded`), а лёгкий GET
+        # условия ждать не может — либо отдаёт материал, либо челлендж, который снимает
+        # подтверждение и стоит одного пере-прогрева.
+        # Замер: `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
         "pangolin.sbertech.ru": {
             "browser_workers": 2,
             "fetch": "browser",
             "extract": "auto",
-            "strategy": "honest",
+            "strategy": "hybrid",
             "wait_for": "() => document.body && document.body.innerText.length > 200",
             "max_depth": 8,
             "max_documents": 3500,
@@ -1190,10 +1216,17 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # проводился: 401 обычному HTTP, browser сериализован). 100 — выше измерения.
         # Глубина 4: sitemap даёт subordinate seeds на depth 0, дальше хватает двух хопов.
         # Замер: `docs/reports/measurements/2026-11-09-root-size-recon.md` §2, §4.
+        # `strategy: hybrid` — ИЗМЕРЕНО 27.11.2026 (`scripts/measure_hybrid_hosts.py`,
+        # 6 URL ключа): мост сработал на 6/6, прогревов 0, челленджей 0, текст 1.00 от
+        # `honest`. Оговорка прибора: на этих адресах **оба** плеча дают одну и ту же
+        # 1 679-символьную оболочку (страницы версий отдаются скриптом), то есть режим
+        # здесь не ограничитель — вопрос качества корпуса решается объявленным
+        # `wait_for`, которого на ключе нет, и это отдельная задача, не ось стратегии.
+        # Замер: `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
         "sbertech.ru/documents": {
             "fetch": "browser",
             "extract": "auto",
-            "strategy": "honest",
+            "strategy": "hybrid",
             "max_depth": 4,
             "max_documents": 100,
             "sitemap": "https://sbertech.ru/sitemap.xml",
@@ -1240,18 +1273,27 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "max_depth": 0,
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
+        # `strategy: hybrid` — ИЗМЕРЕНО 27.11.2026 (`scripts/measure_hybrid_hosts.py`,
+        # 6 URL ключа): мост 6/6, прогревов 1, челленджей 0, текст 1.00 от `honest`.
+        # `fetch: browser` остаётся: корень отдаёт 403 обычному HTTP без cookie, а
+        # гибрид берёт cookie именно прогревом (браузер платит за **хост**, не за URL).
+        # Замер: `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
         "tantorlabs.ru": {
             "fetch": "browser",
             "extract": "auto",
-            "strategy": "honest",
+            "strategy": "hybrid",
             "max_depth": 3,
             "max_documents": 300,
             "sitemap": "https://tantorlabs.ru/sitemap.xml",
         },
+        # `strategy: hybrid` — ИЗМЕРЕНО 27.11.2026: мост 4/4, прогревов **0** (cookie уже
+        # сняты на host-ключе того же хоста), челленджей 0, текст 1.00 (одно плечо 0.968
+        # на `/cve` — выше порога 0.9). Замер:
+        # `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
         "tantorlabs.ru/products/dbms": {
             "fetch": "browser",
             "extract": "auto",
-            "strategy": "honest",
+            "strategy": "hybrid",
             "max_depth": 8,
             # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд): 3 документа,
             # `truncated: false`; статика даёт те же 3. 50 — выше измерения, 200 не

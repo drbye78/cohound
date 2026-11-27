@@ -473,12 +473,16 @@ def test_pangolin_scope_is_announced_edition_only() -> None:
     assert "https://pangolin.sbertech.ru/" not in seeds["pangolin"]
 
     # 3. Оси: дерево PSQ — http (замер 26.11.2026: 200 обычному HTTP), портал — browser.
+    # Стратегия портала — `hybrid` по замеру 27.11.2026 (мост 6/6, текст 1.00 от honest;
+    # `docs/reports/measurements/2026-11-27-hybrid-hosts.md`). Пин держит различие
+    # «браузерная стратегия объявлена» против «AUTO по дефолту», а не конкретный режим:
+    # смена режима — `execution_change` и осознанная правка этого пина.
     psq = resolve_fetch_plan(expected[0], profiles)
     assert psq.fetch is FetchMode.HTTP
     for url in expected[1:]:
         portal = resolve_fetch_plan(url, profiles)
         assert portal.fetch is FetchMode.BROWSER, url
-        assert portal.strategy is CrawlStrategy.HONEST, url
+        assert portal.strategy is CrawlStrategy.HYBRID, url
 
     # Бюджет: ни одно из поддеревьев не усекается известным размером из `state.db`
     # (knowledge-base 135, copywala 344, kintsugi 122, gradely 186; PSQ/8.3.0 не измерен,
