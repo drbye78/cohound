@@ -16,12 +16,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import json
 import re
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -364,3 +366,90 @@ def test_state_carriers_refuse_two_declared_spaces(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert "разные отпечатки" in str(excinfo.value)
+
+
+def _provenance_payload(db: Path, records: list[dict[str, Any]]) -> None:
+    """Провенанс сеанса из готовых записей корней — как их пишет исполнение."""
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO crawl_sessions (session_id, run_id, profile, status, created_at,"
+            " provenance_json) VALUES ('crawl:y', ?, 'local', 'completed',"
+            " '2026-11-07T00:00:00+00:00', ?)",
+            (RUN_ID, json.dumps({"effective_limits": {"roots": records}})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_state_carriers_keep_capture_of_policy_skipped_root(tmp_path: Path) -> None:
+    """Пропуск политики — переиспользование, а не неполнота: состоявшееся снятие остаётся.
+
+    Запись пропуска несёт ``truncated=True`` и ``pages_fetched=0`` как провенанс решения
+    «сеть не трогаем» (0.7.0). Прочитанная буквально, она обнуляла бы снятие, которого
+    этот прогон не писал, — измерено 27.11.2026 на ``ru-pg-dbms-3a737f13962f``: прибор
+    отдал ``complete=0`` у всех продуктов вместо состоявшихся носителей.
+    """
+    db = _run_with_declared_roots(tmp_path, [ROOT])
+    _provenance_payload(
+        db,
+        [
+            {
+                "product_id": "p1",
+                "root": ROOT,
+                "pages_fetched": 0,
+                "truncated": True,
+                "truncated_reason": "crawl_policy_skipped",
+                "skipped_documents": [],
+                "network_mode": "deny",
+                "corpus_source": "chunks",
+            }
+        ],
+    )
+    state_path = tmp_path / "state.db"
+    with SqliteStateStore(state_path) as state:
+        # Снятие прошлого цикла: этот прогон корень не обходил и нового не писал.
+        state.record_capture(
+            dataclasses.replace(
+                _capture(complete=True, digest="d1"), run_id="run.previous"
+            )
+        )
+
+    conn = measure._open_run_db(db, allow_foreign=False)
+    try:
+        carriers = measure.read_carriers_from_state(conn, state_path, RUN_ID)
+    finally:
+        conn.close()
+    assert carriers["p1"].complete is True
+    assert carriers["p1"].bounded_ok() is True
+
+
+def test_state_carriers_count_replayed_pages_as_observed(tmp_path: Path) -> None:
+    """Страница ``drain`` прочитана из сохранённых байтов — пространство корня наблюдалось."""
+    db = _run_with_declared_roots(tmp_path, [ROOT])
+    _provenance_payload(
+        db,
+        [
+            {
+                "product_id": "p1",
+                "root": ROOT,
+                "pages_fetched": 0,
+                "replayed": 12,
+                "truncated": False,
+                "truncated_reason": None,
+                "skipped_documents": [],
+            }
+        ],
+    )
+    state_path = tmp_path / "state.db"
+    with SqliteStateStore(state_path) as state:
+        state.record_capture(_capture(complete=False, digest="d1"))
+
+    conn = measure._open_run_db(db, allow_foreign=False)
+    try:
+        carriers = measure.read_carriers_from_state(conn, state_path, RUN_ID)
+    finally:
+        conn.close()
+    assert carriers["p1"].complete is True
+    assert carriers["p1"].bounded_ok() is True

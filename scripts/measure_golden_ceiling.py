@@ -68,6 +68,7 @@ from core.pipeline.absence_reach import (  # noqa: E402
     agreement_with_ceiling,
     classify_reachability,
 )
+from core.pipeline.crawl_policy import CRAWL_POLICY_SKIPPED_REASON  # noqa: E402
 from core.pipeline.digests import catalog_digest  # noqa: E402
 from core.store.sqlite import SCHEMA_VERSION  # noqa: E402
 
@@ -245,10 +246,22 @@ def read_carriers_from_state(
     # (:func:`core.pipeline.corpus._root_capture_complete`), по первичным счётчикам
     # фронтьера из ``crawl_sessions.provenance_json``. Копии формулы здесь нет.
     #
-    # ``observed`` берётся как ``pages_fetched > 0``: список отказов ``robots`` в
-    # провенанс не пишется, и корень, у которого ноль страниц **только** из-за отказов,
-    # прочтётся как ненаблюдённый. Направление ошибки консервативное — прибор
-    # недосчитывает носители, а не выдумывает их.
+    # Пересчёт применяется **только к корням, которые этот прогон обходил**. Два класса
+    # записей провенанса его не описывают, и пересчёт по ним — не консерватизм, а подмена
+    # вопроса:
+    #
+    # * ``truncated_reason=crawl_policy_skipped`` — пропуск политики, то есть
+    #   **переиспользование**, а не неполнота (0.7.0). Сеть не трогалась, снятия этот
+    #   прогон не писал; запись несёт ``truncated=True`` как провенанс пропуска, и
+    #   прочитанный буквально флаг обнулял бы **состоявшееся** снятие substrate
+    #   (измерено 27.11.2026: на ``ru-pg-dbms-3a737f13962f`` прибор отдал
+    #   ``complete=0`` у всех продуктов и потолок 0.6961 вместо 0.9381).
+    # * ``replayed`` — страница политики ``drain``, прочитанная из сохранённых байтов:
+    #   сети не было, но пространство корня наблюдалось, и живая формула считает её в
+    #   ``observed`` (``corpus._record_capture``).
+    #
+    # ``observed`` по-прежнему не видит отказов ``robots`` (списка в провенансе нет), и
+    # это остаётся единственным консервативным допущением прибора.
     from core.pipeline.corpus import _root_capture_complete
 
     provenance: dict[tuple[str, str], dict[str, Any]] = {}
@@ -262,8 +275,16 @@ def read_carriers_from_state(
         if root is None:
             restored.append(capture)
             continue
+        if str(root.get("truncated_reason")) == CRAWL_POLICY_SKIPPED_REASON:
+            # Пропуск политики снятия не пишет: остаётся то, что записано в substrate.
+            restored.append(capture)
+            continue
         incomplete = bool(root.get("truncated") or root.get("skipped_documents"))
-        observed = int(root.get("pages_fetched") or 0) > 0
+        observed = (
+            int(root.get("pages_fetched") or 0)
+            + int(root.get("revalidation_fetched") or 0)
+            + int(root.get("replayed") or 0)
+        ) > 0
         restored.append(
             dataclasses.replace(
                 capture,
