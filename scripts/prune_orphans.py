@@ -38,15 +38,67 @@
 и в ней есть версии продукта пакета — печатается предупреждение (наблюдение, **не**
 отказ: иначе инструмент перестал бы работать на любой раскладке с чужими БД).
 
+Правило и его цена
+------------------
+
+Живость байтов определяется **только** ``state.db``: файл, на который не ссылается
+``document_version.raw_path`` или ``container_state.raw_path``, удаляется — по решению
+владельца 27.11.2026 это пересмотр прежнего «``corpus_raw`` хранится бессрочно» (I19).
+Причина: ``state.db`` держит **активную** версию документа, а прогонные БД
+(``runs/{run_id}/cohound.db``) — провенанс, а не живость; хранить байты ради прогонов,
+которые уже не будут переиспользованы, значит платить диском за архив.
+
+Но удаление имеет **цену**, и инструмент обязан её назвать, а не заплатить молча.
+Прогонные БД ссылаются на байты тремя путями: ``corpus_docs.raw_path`` (опубликованное
+evidence), ``extract_queue.raw_path`` (очередь конвертации) и
+``crawl_session_items.raw_path`` — последнее и есть **переигровка байтов без сети**
+(:func:`core.pipeline.corpus_ingest.retrieve_retained`, ``resume``/``frozen``): после
+удаления такой прогон пойдёт в сеть. Замер 27.11.2026 на ``ru-pg-dbms`` — из 69 424
+кандидатов ``corpus_raw_unreferenced`` **69 104 (99.5 %)** упомянуты прогонными БД:
+
+======================  =======  ======
+класс ссылки            файлов   GB
+======================  =======  ======
+нет ссылок вообще       320      0.07
+только мёртвые прогоны  14 499   1.70
+только прерванный       40 725   7.85
+дренаж ``e11e04cbb3d9``
+нужны живым прогонам    13 880   2.63
+======================  =======  ======
+
+Поэтому кандидат, на который ссылается **хотя бы одна** прогонная БД, выделяется в
+отдельный класс ``corpus_raw_run_history`` (удаляется так же — это цена, а не запрет), а
+его ссылки публикуются разбивкой ``by_live_runs``/``by_dead_runs``/
+``by_resumable_session``. Без ``--runs-dir``/``--runs-root`` цена **неизвестна**: класс не
+вычисляется, все кандидаты остаются в ``corpus_raw_unreferenced``, в stderr печатается
+предупреждение. Это наблюдение, а не отказ: инструмент обязан работать и без прогонных БД.
+
+Общее пространство — не только у ``corpus_raw``
+----------------------------------------------
+
+``cache/http`` тоже глобальный каталог раскладки: его делят **все** пакеты, а ключ кэша
+описывает адрес, а не пакет. Поэтому решение «вне объявленного пространства» принимается
+против пространства **всех** пакетов набора: ``--package`` (основной, всегда входит) и
+``--also-package`` (повторяемый). Ключ удаляется, только если ни один атрибутированный ему
+адрес не входит в пространство ни одного пакета набора; отчёт печатает
+``rescued_by_other_packages`` — сколько файлов осталось бы удалено при одном ``--package``.
+Замер 27.11.2026 (``ru-pg-dbms`` + ``demo-absence``): спасено **0 файлов / 0 байт** —
+сегодняшние раскладки не пересекаются, и это опубликовано числом, а не выдано за
+исправленный дефект.
+
 Классы
 ------
 
-Удаляемые (по умолчанию оба, ``--only`` ограничивает):
+Удаляемые (по умолчанию все, ``--only`` ограничивает):
 
 ``corpus_raw_unreferenced``
     ``{corpus_raw}/{product}/{hash}.bin``, где ``product`` — продукт **этого пакета**, а
     канонический путь файла не входит в живое множество
-    ``document_version.raw_path ∪ container_state.raw_path``.
+    ``document_version.raw_path ∪ container_state.raw_path`` **и** не упомянут ни одной
+    прогонной БД (истинная сирота).
+``corpus_raw_run_history``
+    Тот же кандидат, но на него ссылается хотя бы одна прогонная БД. Удаляется наравне:
+    разница только в том, что цена названа. Разбивка — :attr:`RunPrice`.
 ``http_cache_outside_space``
     ``{cache}/http/{key}.bin`` вместе с парным ``{key}.meta.json``, где ``key``
     атрибутирован строке ``url_state`` продукта пакета и **все** атрибутированные адреса
@@ -83,14 +135,26 @@
 * набор продуктов пакета пуст (ни ``sources/corpus_urls.yaml``, ни ``url_state``, ни
   ``document_version`` не дают ни одного ``product_id``);
 * ``--only`` с неизвестным классом;
-* ``--apply`` без ``--actor``.
+* ``--apply`` без ``--actor``;
+* ``--runs-dir``/``--runs-root`` указывают на несуществующий каталог (это опечатка, а не
+  «прогонов нет»: отсутствие прогонных БД выражается их отсутствием, а не кривым путём);
+* ``--also-package`` указывает на каталог без ``sources/corpus_urls.yaml``: тихое «пакета
+  нет» расширило бы удаление вместо того, чтобы его ограничить.
+
+Прогонные БД **не** дают отказа ни в каком случае: нечитаемая или старая БД считается
+мёртвой (``live=False``, 0 сеансов) — «не прочитали» не доказывает ни живости, ни её
+отсутствия (A3).
 
 Аудит
 -----
 
 При ``--apply`` — JSONL в ``--audit`` (по умолчанию ``{каталог первой state.db}/prune_orphans.jsonl``,
-дописыванием): первая строка — сводка ``{at, actor, package, state_dbs, classes, total}``,
-далее по строке на каждый удалённый файл ``{class, path, bytes}``. Путь аудита печатается.
+дописыванием): первая строка — сводка
+``{at, actor, package, state_dbs, classes, run_census, total}``, где ``run_census`` =
+``{runs_dir, runs: [{path, run_id, live, resumable_sessions}], price: {by_live_runs,
+by_dead_runs, by_resumable_session}}``; далее по строке на каждый удалённый файл
+``{class, path, bytes, runs}``, где ``runs`` — отсортированные ``run_id``, ссылавшиеся на
+файл (пустой список = истинная сирота). Путь аудита печатается.
 
 Коды возврата
 -------------
@@ -110,9 +174,10 @@
     python3 scripts/prune_orphans.py --package packages/ru-pg-dbms \\
         --state-root ~/.cohound --json
 
-    # удаление с аудитом
+    # удаление с аудитом и ценой
     python3 scripts/prune_orphans.py --package packages/ru-pg-dbms \\
-        --state-root ~/.cohound --apply --actor roger
+        --state-root ~/.cohound/state \\
+        --runs-root ~/.cohound/stands/ru-pg-dbms/runs --apply --actor roger
 """
 
 from __future__ import annotations
@@ -151,9 +216,11 @@ __all__ = [
 #: Имя файла аудита рядом с ``state.db`` (дописывается, одна строка — одно событие).
 AUDIT_NAME = "prune_orphans.jsonl"
 
-#: Удаляемые классы. Порядок — от «цена ошибки больше» к «меньше».
+#: Удаляемые классы. Порядок — от «цена ошибки больше» к «меньше»; печать идёт в том же
+#: порядке, чтобы оператор видел цену раньше, чем итог.
 DELETABLE_CLASSES: tuple[str, ...] = (
     "corpus_raw_unreferenced",
+    "corpus_raw_run_history",
     "http_cache_outside_space",
 )
 
@@ -168,7 +235,11 @@ CLASS_ORDER: tuple[str, ...] = DELETABLE_CLASSES + REPORT_ONLY_CLASSES
 
 #: Группы для ``--only``: имя группы → классы, которые она включает.
 ONLY_GROUPS: dict[str, tuple[str, ...]] = {
-    "corpus-raw": ("corpus_raw_unreferenced", "corpus_raw_foreign_product"),
+    "corpus-raw": (
+        "corpus_raw_unreferenced",
+        "corpus_raw_run_history",
+        "corpus_raw_foreign_product",
+    ),
     "http-cache": ("http_cache_outside_space", "http_cache_unattributed"),
 }
 
@@ -197,11 +268,89 @@ class PruneRefused(Exception):
 
 @dataclass(frozen=True)
 class Orphan:
-    """Один файл в одном классе: путь и размер на момент замера."""
+    """Один файл в одном классе: путь, размер и (для байтов) ссылки прогонных БД.
+
+    ``runs`` — отсортированные ``run_id`` прогонов, чьи БД ссылаются на файл; пустой
+    список значит «истинная сирота». ``live``/``resumable`` — флаги цены: ссылка есть у
+    живого прогона и ссылка есть у возобновляемого сеанса (переигровка без сети).
+    """
 
     cls: str
     path: Path
     size: int
+    runs: tuple[str, ...] = ()
+    live: bool = False
+    resumable: bool = False
+
+
+@dataclass(frozen=True)
+class RunDb:
+    """Одна прогонная БД и её роль в цене удаления."""
+
+    path: Path
+    run_id: str
+    live: bool
+    resumable_sessions: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "run_id": self.run_id,
+            "live": self.live,
+            "resumable_sessions": self.resumable_sessions,
+        }
+
+
+@dataclass(frozen=True)
+class RunPrice:
+    """Цена удаления: сколько байтов прогоны потеряют и чем именно.
+
+    ``by_resumable_session`` — **флаг, а не третья категория**: он пересекается и с
+    ``by_live_runs``, и с ``by_dead_runs`` (сеанс может принадлежать и живому прогону).
+    ``by_drain`` — тоже флаг и подмножество ``by_dead_runs ∩ by_resumable_session``:
+    единственная ссылка на файл — возобновляемый сеанс мёртвого прогона. Именно эти байты
+    и есть незавершённая докачка: удалив их, дренаж начнётся заново (часы краула).
+    Складывать любые два числа здесь нельзя — это не разбиение.
+    """
+
+    by_live_runs: dict[str, int]
+    by_dead_runs: dict[str, int]
+    by_resumable_session: dict[str, int]
+    by_drain: dict[str, int]
+
+    def as_dict(self) -> dict[str, dict[str, int]]:
+        return {
+            "by_live_runs": dict(self.by_live_runs),
+            "by_dead_runs": dict(self.by_dead_runs),
+            "by_resumable_session": dict(self.by_resumable_session),
+            "by_drain": dict(self.by_drain),
+        }
+
+
+@dataclass
+class RunCensus:
+    """Прочитанные прогонные БД: список, карта «файл → прогоны» и флаги."""
+
+    runs_dirs: list[str]
+    dbs: list[RunDb]
+    #: Канонический путь байтов → ``run_id`` прогонов, чьи БД на него ссылаются.
+    paths: dict[Path, set[str]]
+    live_runs: set[str]
+    resumable_paths: set[Path]
+    #: Цена удаления; заполняется :func:`_run_price` после обхода ``corpus_raw``.
+    price: RunPrice | None = None
+
+    @property
+    def known(self) -> bool:
+        """Прогонные БД вообще передавались (иначе цена неизвестна)."""
+        return bool(self.runs_dirs)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "runs_dir": list(self.runs_dirs),
+            "runs": [db.as_dict() for db in self.dbs],
+            "price": (self.price or RunPrice({}, {}, {}, {})).as_dict(),
+        }
 
 
 @dataclass(frozen=True)
@@ -452,6 +601,185 @@ def _uncovered_products(neighbour: Path, products: set[str]) -> list[str] | None
         conn.close()
 
 
+# ------------------------------------------------------------------ прогонные БД
+
+#: Имя файла прогонной БД (``runs/{run_id}/cohound.db``).
+RUN_DB_NAME = "cohound.db"
+
+#: Таблицы прогонной БД, чьи ``raw_path`` ссылаются на байты ``corpus_raw``.
+#: ``crawl_session_items`` — переигровка без сети (``resume``/``frozen``), поэтому её
+#: ссылки отдельно помечаются как возобновляемые.
+RUN_RAW_TABLES: tuple[str, ...] = (
+    "corpus_docs",
+    "extract_queue",
+    "crawl_session_items",
+)
+
+#: Статусы сеанса, чьи байты ещё могут быть переиграны.
+RESUMABLE_STATUSES: tuple[str, ...] = ("running", "interrupted")
+
+
+def _find_run_dbs(
+    runs_dirs: list[Path] | None, runs_roots: list[Path] | None
+) -> list[Path]:
+    """Прогонные БД: ``{dir}/*/cohound.db`` из ``--runs-dir`` ∪ ``rglob`` из ``--runs-root``.
+
+    Дедуп по каноническому пути: один и тот же файл, названный дважды, не должен
+    читаться дважды (и не должен удваивать счёт в отчёте).
+    """
+    found: dict[Path, None] = {}
+    for directory in runs_dirs or []:
+        if not directory.is_dir():
+            raise PruneRefused(f"--runs-dir не каталог: {directory}")
+        for child in sorted(directory.iterdir()):
+            candidate = child / RUN_DB_NAME
+            if candidate.is_file():
+                found[_canonical(candidate)] = None
+    for runs_root in runs_roots or []:
+        if not runs_root.is_dir():
+            raise PruneRefused(f"--runs-root не каталог: {runs_root}")
+        for candidate in sorted(runs_root.rglob(RUN_DB_NAME)):
+            found[_canonical(candidate)] = None
+    return list(found)
+
+
+def _run_id_of(path: Path) -> str:
+    """``run_id`` прогонной БД — имя её каталога (``runs/{run_id}/cohound.db``)."""
+    return path.parent.name
+
+
+def _read_run_db(path: Path) -> tuple[RunDb, dict[Path, None], set[Path]]:
+    """Прочитать одну прогонную БД: ссылки на байты, живость, возобновляемые сеансы.
+
+    Таблиц может не быть (старая схема, недописанный прогон) — отсутствующая таблица
+    значит «ссылок этого вида нет», а не ошибку. Файл читается ``mode=ro``.
+    """
+    run_id = _run_id_of(path)
+    refs: dict[Path, None] = {}
+    resumable: set[Path] = set()
+    live = False
+    sessions = 0
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        # Нечитаемая прогонная БД не доказывает ни живости, ни её отсутствия: считаем
+        # прогон мёртвым и говорим об этом числом (live=False, 0 сеансов).
+        return RunDb(path=path, run_id=run_id, live=False, resumable_sessions=0), refs, resumable
+    try:
+        tables = _table_names(conn)
+        for table in RUN_RAW_TABLES:
+            if table not in tables:
+                continue
+            try:
+                rows = conn.execute(
+                    f"SELECT raw_path FROM {table} WHERE raw_path IS NOT NULL"  # noqa: S608 - имя из константы RUN_RAW_TABLES
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            for (raw,) in rows:
+                text = str(raw).strip()
+                if text:
+                    refs[_canonical(Path(text))] = None
+        if "gate_decisions" in tables:
+            live = live or bool(
+                conn.execute(
+                    "SELECT 1 FROM gate_decisions WHERE gate = 'G4' "
+                    "AND verdict = 'approved' LIMIT 1"
+                ).fetchone()
+            )
+        if "cells" in tables:
+            live = live or bool(
+                conn.execute("SELECT 1 FROM cells LIMIT 1").fetchone()
+            )
+        if "crawl_sessions" in tables:
+            # Статусы фильтруются в Python, а не в SQL: ``IN (...)`` со списком значений
+            # потребовал бы собирать текст запроса, а сеансов в прогоне десятки.
+            resumable_ids = {
+                str(row[0])
+                for row in conn.execute("SELECT session_id, status FROM crawl_sessions")
+                if str(row[1]) in RESUMABLE_STATUSES
+            }
+            sessions = len(resumable_ids)
+            if resumable_ids and "crawl_session_items" in tables:
+                for session_id, raw in conn.execute(
+                    "SELECT session_id, raw_path FROM crawl_session_items "
+                    "WHERE raw_path IS NOT NULL"
+                ):
+                    if str(session_id) not in resumable_ids:
+                        continue
+                    text = str(raw).strip()
+                    if text:
+                        resumable.add(_canonical(Path(text)))
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return RunDb(path=path, run_id=run_id, live=live, resumable_sessions=sessions), refs, resumable
+
+
+def _load_runs(
+    runs_dirs: list[Path] | None, runs_roots: list[Path] | None
+) -> RunCensus:
+    """Прочитать все прогонные БД в один цензус.
+
+    ``paths`` — объединение ссылок по всем БД: файл, упомянутый хотя бы одной, перестаёт
+    быть истинной сиротой. Живость прогона не влияет на то, попадёт ли файл в цензус, —
+    она влияет только на разбивку цены.
+    """
+    roots: list[str] = [str(path) for path in runs_dirs or []]
+    roots.extend(str(path) for path in runs_roots or [])
+    paths: dict[Path, set[str]] = {}
+    live_runs: set[str] = set()
+    resumable_paths: set[Path] = set()
+    dbs: list[RunDb] = []
+    for path in _find_run_dbs(runs_dirs, runs_roots):
+        db, refs, resumable = _read_run_db(path)
+        dbs.append(db)
+        if db.live:
+            live_runs.add(db.run_id)
+        for ref in refs:
+            paths.setdefault(ref, set()).add(db.run_id)
+        resumable_paths |= resumable
+    return RunCensus(
+        runs_dirs=roots,
+        dbs=dbs,
+        paths=paths,
+        live_runs=live_runs,
+        resumable_paths=resumable_paths,
+    )
+
+
+def _run_price(orphans: list[Orphan]) -> RunPrice:
+    """Цена удаления по классу ``corpus_raw_run_history``.
+
+    ``by_resumable_session`` пересекается с остальными двумя — это флаг, не категория.
+    """
+    live = {"files": 0, "bytes": 0}
+    dead = {"files": 0, "bytes": 0}
+    resumable = {"files": 0, "bytes": 0}
+    drain = {"files": 0, "bytes": 0}
+    for orphan in orphans:
+        if orphan.cls != "corpus_raw_run_history":
+            continue
+        bucket = live if orphan.live else dead
+        bucket["files"] += 1
+        bucket["bytes"] += orphan.size
+        if orphan.resumable:
+            resumable["files"] += 1
+            resumable["bytes"] += orphan.size
+        if orphan.resumable and not orphan.live:
+            # Ссылка есть только у возобновляемого сеанса мёртвого прогона — это и есть
+            # незавершённая докачка (дренаж), а не архив пройденного цикла.
+            drain["files"] += 1
+            drain["bytes"] += orphan.size
+    return RunPrice(
+        by_live_runs=live,
+        by_dead_runs=dead,
+        by_resumable_session=resumable,
+        by_drain=drain,
+    )
+
+
 # ------------------------------------------------------------------ corpus_raw
 
 
@@ -460,9 +788,15 @@ def _scan_corpus_raw(
     corpus_raw: Path,
     products: set[str],
     live: set[Path],
+    runs: RunCensus,
     wanted: frozenset[str],
 ) -> tuple[list[Orphan], int]:
-    """Файлы ``corpus_raw``: сироты и чужие продукты.
+    """Файлы ``corpus_raw``: сироты, история прогонов и чужие продукты.
+
+    Кандидат (нет в ``state.db``) делится на два класса: на него ссылается хотя бы одна
+    прогонная БД — ``corpus_raw_run_history`` (цена названа), иначе
+    ``corpus_raw_unreferenced`` (истинная сирота). Удаляются оба; разница только в цене.
+    Без прогонных БД (``runs.known`` ложно) класс истории не вычисляется.
 
     Возвращает найденные записи и **число файлов ``.bin``**, увиденных вообще — по нему
     ловится состояние «``document_version`` пуста, а байты на диске есть».
@@ -481,9 +815,25 @@ def _scan_corpus_raw(
                 if not file.is_file() or file.suffix != ".bin":
                     continue
                 seen += 1
-                if "corpus_raw_unreferenced" not in wanted:
+                canonical = _canonical(file)
+                if canonical in live:
                     continue
-                if _canonical(file) in live:
+                run_ids = tuple(sorted(runs.paths.get(canonical, ())))
+                if run_ids:
+                    if "corpus_raw_run_history" not in wanted:
+                        continue
+                    orphans.append(
+                        Orphan(
+                            "corpus_raw_run_history",
+                            file,
+                            _size_of(file),
+                            runs=run_ids,
+                            live=bool(runs.live_runs & set(run_ids)),
+                            resumable=canonical in runs.resumable_paths,
+                        )
+                    )
+                    continue
+                if "corpus_raw_unreferenced" not in wanted:
                     continue
                 orphans.append(
                     Orphan("corpus_raw_unreferenced", file, _size_of(file))
@@ -535,24 +885,42 @@ def _cache_key_files(http_dir: Path) -> dict[str, list[Path]]:
     return grouped
 
 
+def _package_space(package: Path) -> tuple[dict[str, list[str]], dict[str, frozenset[str]]]:
+    """Пространство одного пакета — тем же прибором, что у краула."""
+    if not (package / "sources" / "corpus_urls.yaml").is_file():
+        raise PruneRefused(
+            f"{package}: нет sources/corpus_urls.yaml — это не пакет, пространство "
+            "объявить нечем"
+        )
+    return declared_scopes(package)
+
+
 def _scan_http_cache(
     *,
     cache: Path,
     connections: list[sqlite3.Connection],
-    roots: dict[str, list[str]],
-    scope_hosts: dict[str, frozenset[str]],
+    spaces: list[tuple[dict[str, list[str]], dict[str, frozenset[str]]]],
     products: set[str],
     wanted: frozenset[str],
-) -> list[Orphan]:
-    """Ключи кэша вне объявленного пространства и ключи без атрибуции.
+) -> tuple[list[Orphan], dict[str, int]]:
+    """Ключи кэша вне пространства **всех** пакетов набора и ключи без атрибуции.
 
-    Атрибуция — через ``url_state.normalized_url`` **продуктов пакета**: ключ, чей адрес
-    лежит в строке другого продукта, считается неатрибутированным (кэш глобальный и общий
-    между пакетами, а чужая строка не описывает наш пакет).
+    ``cache/http`` — глобальный каталог раскладки, общий для всех пакетов (та же природа,
+    что у ``corpus_raw``). Поэтому ключ удаляется, только если **ни один**
+    атрибутированный адрес не входит в пространство **ни одного** пакета набора
+    (``spaces[0]`` — основной пакет, дальше ``--also-package``). Иначе прогон по одному
+    профилю удалял бы байты, объявленные соседним.
+
+    Атрибуция — через ``url_state.normalized_url`` **продуктов набора**: ключ, чей адрес
+    лежит в строке чужого продукта, считается неатрибутированным (кэш глобальный и общий
+    между пакетами, а чужая строка не описывает наши).
+
+    Возвращает записи и счёт «спасённых набором» — файлов, которые остались бы удалены при
+    одном основном пакете. Это измеренная цена правила, а не украшение отчёта.
     """
     key_files = _cache_key_files(cache / "http")
     if not key_files:
-        return []
+        return [], {"files": 0, "bytes": 0}
 
     attributed: dict[str, list[tuple[str, str]]] = {}
     for conn in connections:
@@ -564,40 +932,78 @@ def _scan_http_cache(
                 continue
             attributed.setdefault(http_key(str(url)), []).append((pid, str(url)))
 
-    frontiers: dict[str, list[Frontier]] = {}
-    host_caches: dict[str, dict[tuple[str, str], bool]] = {}
-
-    def in_space(pid: str, url: str) -> bool:
-        if pid not in roots or not roots[pid]:
-            # Пространство продукта не объявлено — «вне пространства» доказать нечем.
-            return True
-        built = frontiers.get(pid)
-        if built is None:
-            hosts = scope_hosts.get(pid, frozenset())
-            built = [
-                Frontier(root, CrawlLimits(), scope_hosts=hosts)
-                for root in roots[pid]
-            ]
-            frontiers[pid] = built
-            host_caches[pid] = {}
-        return _in_space(url, built, host_caches[pid])
+    # Построители frontiers — по одному набору на пакет: пространство у пакетов разное.
+    builders: list[_SpaceLookup] = [_SpaceLookup(roots, scope_hosts) for roots, scope_hosts in spaces]
 
     orphans: list[Orphan] = []
+    rescued = {"files": 0, "bytes": 0}
     for key, files in sorted(key_files.items()):
         rows = attributed.get(key)
         if not rows:
             if "http_cache_unattributed" in wanted:
-                orphans.extend(Orphan("http_cache_unattributed", f, _size_of(f)) for f in files)
+                orphans.extend(
+                    Orphan("http_cache_unattributed", f, _size_of(f)) for f in files
+                )
             continue
         if "http_cache_outside_space" not in wanted:
             continue
-        if any(in_space(pid, url) for pid, url in rows):
-            # Хотя бы один адрес в пространстве — файл может быть нужен живому прогону.
+        in_any = any(_admits_any(builders, pid, url) for pid, url in rows)
+        if in_any:
+            # Спасает ли набор то, что не спас бы один основной пакет?
+            if not any(_admits_any(builders[:1], pid, url) for pid, url in rows):
+                rescued["files"] += len(files)
+                rescued["bytes"] += sum(_size_of(f) for f in files)
             continue
         orphans.extend(
             Orphan("http_cache_outside_space", f, _size_of(f)) for f in files
         )
-    return orphans
+    return orphans, rescued
+
+
+class _SpaceLookup:
+    """Пространство одного пакета с кэшем frontiers и решений по host."""
+
+    def __init__(
+        self,
+        roots: dict[str, list[str]],
+        scope_hosts: dict[str, frozenset[str]],
+    ) -> None:
+        self._roots = roots
+        self._scope_hosts = scope_hosts
+        self._frontiers: dict[str, list[Frontier]] = {}
+        self._host_caches: dict[str, dict[tuple[str, str], bool]] = {}
+
+    def knows(self, product_id: str) -> bool:
+        """Объявляет ли этот пакет продукт вовсе (есть ли у него корни)."""
+        return bool(self._roots.get(product_id))
+
+    def admits(self, product_id: str, url: str) -> bool:
+        """Допускает ли адрес хоть один объявленный корень продукта этого пакета.
+
+        Пакет, который продукта не объявляет, **голоса не имеет**: иначе соседний пакет
+        «допускал» бы любой адрес чужого продукта просто потому, что ничего о нём не знает,
+        и объединение пространств расширяло бы удаление вместо того, чтобы его ограничить.
+        """
+        roots = self._roots.get(product_id) or []
+        built = self._frontiers.get(product_id)
+        if built is None:
+            hosts = self._scope_hosts.get(product_id, frozenset())
+            built = [Frontier(root, CrawlLimits(), scope_hosts=hosts) for root in roots]
+            self._frontiers[product_id] = built
+            self._host_caches[product_id] = {}
+        return _in_space(url, built, self._host_caches[product_id])
+
+
+def _admits_any(
+    builders: list[_SpaceLookup], pid: str, url: str
+) -> bool:
+    """Допускает ли адрес хоть один пакет, **объявляющий** этот продукт.
+
+    Ни один пакет набора продукта не объявляет — «вне пространства» доказать нечем, и
+    адрес считается допущенным (консервативно: файл остаётся).
+    """
+    opinions = [builder.admits(pid, url) for builder in builders if builder.knows(pid)]
+    return any(opinions) if opinions else True
 
 
 # ------------------------------------------------------------------ план и отчёт
@@ -656,22 +1062,41 @@ class Plan:
 
     orphans: list[Orphan]
     state: StateSet
+    runs: RunCensus
     uncovered_state_dbs: list[dict[str, Any]]
+    #: Все пакеты, чьи пространства участвовали в решении по http-кэшу (первый — основной).
+    packages: list[Path]
+    #: Файлы, которые остались бы удалены при одном основном пакете, но спасены набором.
+    rescued_by_other_packages: dict[str, int]
+
+    @property
+    def price(self) -> RunPrice:
+        """Цена удаления (нули, если прогонные БД не передавались)."""
+        return self.runs.price or RunPrice({}, {}, {}, {})
 
 
 def build_plan(
     *,
     package: Path,
+    also_packages: list[Path] | None = None,
     state_dbs: list[Path] | None = None,
     state_root: Path | None = None,
+    runs_dirs: list[Path] | None = None,
+    runs_roots: list[Path] | None = None,
     corpus_raw: Path,
     cache: Path,
     only: frozenset[str] | None = None,
 ) -> Plan:
     """Собрать план удаления (и отчётные классы) — без единой записи на диск.
 
+    :param package: основной пакет (``--package``); его пространство решает всегда.
+    :param also_packages: дополнительные пакеты (``--also-package``, повторяемый): их
+        пространства тоже участвуют в решении по http-кэшу, потому что ``cache/http``
+        глобальный и общий. Продукты дополнительных пакетов добавляются в набор.
     :param state_dbs: перечисленные БД (``--state-db``, повторяемый).
     :param state_root: каталог, под которым ищутся все ``state.db`` (``--state-root``).
+    :param runs_dirs: каталоги прогонов (``--runs-dir``, повторяемый) — для цены удаления.
+    :param runs_roots: каталоги, под которыми ищутся все ``cohound.db`` (``--runs-root``).
     :param only: имена классов из :data:`CLASS_ORDER`; ``None`` — все.
     :raises PruneRefused: условие, при котором удаление было бы ложным.
     """
@@ -681,10 +1106,20 @@ def build_plan(
         raise PruneRefused(
             f"неизвестные классы: {', '.join(sorted(unknown))}; известны: {', '.join(CLASS_ORDER)}"
         )
+    packages: list[Path] = [package]
+    for extra in also_packages or []:
+        if extra not in packages:
+            packages.append(extra)
+    # Пространства читаются до работы: пакет без ``corpus_urls.yaml`` — отказ, а не
+    # «пакета нет» (иначе опечатка в пути тихо расширила бы удаление).
+    spaces = [_package_space(item) for item in packages]
+
     paths = _resolve_state_dbs(state_dbs, state_root)
     state = _load_state(paths)
+    runs = _load_runs(runs_dirs, runs_roots)
     try:
-        products = _declared_products(package) | state.products
+        declared = set().union(*(_declared_products(item) for item in packages))
+        products = declared | state.products
         if not products:
             raise PruneRefused(
                 f"набор продуктов пакета пуст: {package}/sources/corpus_urls.yaml не даёт "
@@ -700,9 +1135,11 @@ def build_plan(
                 corpus_raw=corpus_raw,
                 products=products,
                 live=state.live,
+                runs=runs,
                 wanted=wanted,
             )
             orphans.extend(found)
+            runs.price = _run_price(found)
         if state.version_rows == 0 and seen_bins:
             # Опорожнённый набор БД — не основание удалять байты: «ссылок нет» и «таблица
             # пуста» неотличимы, а цена ошибки — весь корпус.
@@ -711,24 +1148,29 @@ def build_plan(
                 f"а в {corpus_raw} лежит {seen_bins} файлов .bin: живое множество "
                 "неизвестно, удаление было бы удалением всего корпуса"
             )
+        rescued = {"files": 0, "bytes": 0}
         if wanted & set(ONLY_GROUPS["http-cache"]):
-            roots, scope_hosts = declared_scopes(package)
-            orphans.extend(
-                _scan_http_cache(
-                    cache=cache,
-                    connections=state.connections,
-                    roots=roots,
-                    scope_hosts=scope_hosts,
-                    products=products,
-                    wanted=wanted,
-                )
+            found_cache, rescued = _scan_http_cache(
+                cache=cache,
+                connections=state.connections,
+                spaces=spaces,
+                products=products,
+                wanted=wanted,
             )
+            orphans.extend(found_cache)
         uncovered: list[dict[str, Any]] = []
         for neighbour in _neighbour_state_dbs(paths):
             hit = _uncovered_products(neighbour, products)
             if hit:
                 uncovered.append({"path": str(neighbour), "products": hit})
-        return Plan(orphans=orphans, state=state, uncovered_state_dbs=uncovered)
+        return Plan(
+            orphans=orphans,
+            state=state,
+            runs=runs,
+            uncovered_state_dbs=uncovered,
+            packages=packages,
+            rescued_by_other_packages=rescued,
+        )
     finally:
         state.close()
 
@@ -738,6 +1180,8 @@ def scan(
     package: Path,
     state_db: Path | list[Path] | None = None,
     state_root: Path | None = None,
+    runs_dir: Path | list[Path] | None = None,
+    runs_root: Path | list[Path] | None = None,
     corpus_raw: Path,
     cache: Path,
     only: frozenset[str] | None = None,
@@ -752,10 +1196,24 @@ def scan(
         dbs = list(state_db)
     else:
         dbs = [state_db]
+    if runs_dir is None:
+        dirs: list[Path] | None = None
+    elif isinstance(runs_dir, (list, tuple)):
+        dirs = list(runs_dir)
+    else:
+        dirs = [runs_dir]
+    if runs_root is None:
+        roots: list[Path] | None = None
+    elif isinstance(runs_root, (list, tuple)):
+        roots = list(runs_root)
+    else:
+        roots = [runs_root]
     plan = build_plan(
         package=package,
         state_dbs=dbs,
         state_root=state_root,
+        runs_dirs=dirs,
+        runs_roots=roots,
         corpus_raw=corpus_raw,
         cache=cache,
         only=only,
@@ -782,6 +1240,30 @@ def _sum(classes: dict[str, dict[str, int]], names: tuple[str, ...]) -> dict[str
     }
 
 
+def _print_packages(plan: Plan) -> None:
+    """Пакеты, чьи пространства решали судьбу http-кэша, и цена этого правила."""
+    if len(plan.packages) > 1:
+        print("пакеты (пространства объединены):")
+        for item in plan.packages:
+            print(f"  {item}")
+    rescued = plan.rescued_by_other_packages
+    print(
+        f"спасено соседними пакетами: {rescued['files']} файлов "
+        f"({_human_bytes(rescued['bytes'])}) — остались бы удалены при одном --package"
+    )
+
+
+def _print_run_census(runs: RunCensus) -> None:
+    """Сколько прогонных БД прочитано и сколько из них живых — контекст цены."""
+    if not runs.known:
+        print("прогонные БД: не переданы — цена удаления неизвестна")
+        return
+    print(
+        f"прогонных БД: {len(runs.dbs)}, живых {len(runs.live_runs)}, "
+        f"ссылок на байты {len(runs.paths)}"
+    )
+
+
 def _print_state_dbs(state: StateSet) -> None:
     """Список участвовавших БД и живых путей в каждой — что именно объединили."""
     print(f"state.db в наборе: {len(state.dbs)}")
@@ -792,7 +1274,42 @@ def _print_state_dbs(state: StateSet) -> None:
     print(f"  объединение: живых путей {len(state.live)} (объединение по всем БД)")
 
 
-def _print_report(orphans: list[Orphan], totals: dict[str, dict[str, int]]) -> None:
+def _print_price(price: RunPrice) -> None:
+    """Разбивка цены под классом ``corpus_raw_run_history``.
+
+    Три строки — **не** разбиение: ``by_resumable_session`` пересекается с обеими
+    остальными (флаг), поэтому и подписан флагом, а не категорией.
+    """
+    rows = (
+        ("цена: живые прогоны", price.by_live_runs, ""),
+        ("цена: только мёртвые прогоны", price.by_dead_runs, ""),
+        (
+            "цена: возобновляемые сеансы",
+            price.by_resumable_session,
+            "  (флаг, пересекается с двумя строками выше)",
+        ),
+    )
+    for label, bucket, note in rows:
+        print(
+            f"   {label:<28}{bucket['files']:>8} файлов "
+            f"{_human_bytes(bucket['bytes']):>12}{note}"
+        )
+    print(
+        "   цена: байты переигровки без сети и возобновляемых сеансов — "
+        "resume/frozen по этим прогонам пойдут в сеть"
+    )
+    drain = price.by_drain
+    print(
+        f"   цена: дренаж/возобновляемый сеанс — {drain['files']} файлов "
+        f"({_human_bytes(drain['bytes'])}); после удаления докачка начнётся заново"
+    )
+
+
+def _print_report(
+    orphans: list[Orphan],
+    totals: dict[str, dict[str, int]],
+    price: RunPrice,
+) -> None:
     for cls in CLASS_ORDER:
         bucket = totals[cls]
         if not bucket["files"]:
@@ -804,6 +1321,8 @@ def _print_report(orphans: list[Orphan], totals: dict[str, dict[str, int]]) -> N
         )
         for orphan in [item for item in orphans if item.cls == cls][:_SAMPLES]:
             print(f"    {orphan.path}")
+        if cls == "corpus_raw_run_history":
+            _print_price(price)
     deletable = _sum(totals, DELETABLE_CLASSES)
     reported = _sum(totals, REPORT_ONLY_CLASSES)
     print(
@@ -835,10 +1354,16 @@ def _write_audit(
     actor: str,
     package: Path,
     state_dbs: list[str],
+    runs: RunCensus,
     totals: dict[str, dict[str, int]],
     deleted: list[Orphan],
 ) -> None:
-    """Дописать в аудит строку-сводку и по строке на каждый удалённый файл."""
+    """Дописать в аудит строку-сводку и по строке на каждый удалённый файл.
+
+    Цензус прогонных БД входит в сводку: без него «удалено N файлов» не отличить от
+    «удалена история M прогонов». ``runs`` построчной записи — адреса, которые на файл
+    ссылались: пустой список значит «истинная сирота», и это тоже провенанс.
+    """
     audit.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "at": _utc_now_iso(),
@@ -849,6 +1374,7 @@ def _write_audit(
             cls: {"files": totals[cls]["files"], "bytes": totals[cls]["bytes"]}
             for cls in CLASS_ORDER
         },
+        "run_census": runs.as_dict(),
         "total": _sum(totals, DELETABLE_CLASSES),
     }
     with audit.open("a", encoding="utf-8") as handle:
@@ -860,6 +1386,7 @@ def _write_audit(
                         "class": orphan.cls,
                         "path": str(orphan.path),
                         "bytes": orphan.size,
+                        "runs": list(orphan.runs),
                     },
                     ensure_ascii=False,
                 )
@@ -926,6 +1453,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--package", required=True, type=Path)
     parser.add_argument(
+        "--also-package",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "дополнительный пакет: его пространство тоже участвует в решении по "
+            "http-кэшу (cache/http общий для всех пакетов); повторяемый"
+        ),
+    )
+    parser.add_argument(
         "--state-db",
         action="append",
         type=Path,
@@ -940,6 +1478,25 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DIR",
         help="добавить все найденные под DIR state.db (rglob) к набору",
     )
+    parser.add_argument(
+        "--runs-dir",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "каталог прогонов: добавляет {DIR}/*/cohound.db — по ним считается ЦЕНА "
+            "удаления (класс corpus_raw_run_history); повторяемый"
+        ),
+    )
+    parser.add_argument(
+        "--runs-root",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="добавить все найденные под DIR cohound.db (rglob); повторяемый",
+    )
     parser.add_argument("--corpus-raw", type=Path, default=None)
     parser.add_argument("--cache", type=Path, default=None)
     parser.add_argument(
@@ -953,7 +1510,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--actor", default=None, help="кто удаляет (обязателен с --apply)")
     parser.add_argument(
-        "--audit", type=Path, default=None, help="JSONL-аудит (по умолчанию рядом со state.db)"
+        "--audit", type=Path, default=None, help="JSONL-аудит (по умолчанию рядом с первой state.db набора)"
     )
     args = parser.parse_args(argv)
 
@@ -964,8 +1521,11 @@ def main(argv: list[str] | None = None) -> int:
         corpus_raw, cache = _resolve_dirs(args.corpus_raw, args.cache)
         plan = build_plan(
             package=args.package,
+            also_packages=args.also_package,
             state_dbs=args.state_db,
             state_root=args.state_root,
+            runs_dirs=args.runs_dir,
+            runs_roots=args.runs_root,
             corpus_raw=corpus_raw,
             cache=cache,
             only=only,
@@ -982,6 +1542,13 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[tuple[Path, str]] = []
     audit_path = args.audit or (state.dbs[0].path.parent / AUDIT_NAME)
     deleted: list[Orphan] = []
+
+    if not plan.runs.known:
+        print(
+            "ВНИМАНИЕ: прогонные БД не переданы (--runs-dir/--runs-root) — цена удаления "
+            "неизвестна; класс corpus_raw_run_history не вычисляется",
+            file=sys.stderr,
+        )
 
     for entry in plan.uncovered_state_dbs:
         print(
@@ -1007,6 +1574,7 @@ def main(argv: list[str] | None = None) -> int:
                 actor=str(args.actor),
                 package=args.package,
                 state_dbs=state_dbs,
+                runs=plan.runs,
                 totals=totals,
                 deleted=deleted,
             )
@@ -1016,10 +1584,14 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "package": str(args.package),
+                    "packages": [str(item) for item in plan.packages],
+                    "rescued_by_other_packages": plan.rescued_by_other_packages,
                     "state_dbs": state_dbs,
                     "state_db_info": state.as_dict()["state_dbs"],
                     "live_paths": len(state.live),
                     "uncovered_state_dbs": plan.uncovered_state_dbs,
+                    "run_census": plan.runs.as_dict(),
+                    "price": plan.price.as_dict(),
                     "corpus_raw": str(corpus_raw),
                     "cache": str(cache),
                     "apply": bool(args.apply),
@@ -1045,9 +1617,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     else:
+        _print_packages(plan)
         _print_state_dbs(state)
+        _print_run_census(plan.runs)
         print()
-        _print_report(orphans, totals)
+        _print_report(orphans, totals, plan.price)
         for root in missing_roots:
             print(f"ВНИМАНИЕ: каталога нет — {root}", file=sys.stderr)
         if not args.apply:
