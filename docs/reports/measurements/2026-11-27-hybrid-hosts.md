@@ -99,6 +99,7 @@ path-ключе — **0**: cookie уже сняты host-ключом, и это
 | дайджест исправлен, пакет ещё `honest` | `7e213739bd12dae868283ed6` | — |
 | + `pangolin` → `hybrid` (копия пакета) | `4193e31c52f9272257301a57` | `ru-pg-dbms-83b396470c30` |
 | итог: 4 ключа → `hybrid` | `326ac9b5ffaa794f658e43f4` | `ru-pg-dbms-2d0ba21827de` |
+| + `rate_limit` по замеру цены адреса (27.11, `2026-11-27-render-request-cost.md`) | `518f1eea764681acfe9437c5` | `ru-pg-dbms-951d4a13ea63` |
 
 Старый пин `tests/pipeline/test_crawl_frontier.py` утверждал обратное («поле профиля, не
 входящее в `CrawlLimits`, дайджест не двигает») — он фиксировал дефект, а не требование,

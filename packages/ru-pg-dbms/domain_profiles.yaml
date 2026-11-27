@@ -198,7 +198,8 @@ pangolin.sbertech.ru:
   # Замер 23.11.2026 на прогоне `3a737f13962f` (3 621 живой фетч): интервал между стартами
   # p50 **3.81 с** при `fetch_ms` p50 767 / p95 1 232 мс ⇒ ~3 с из 3.81 — пауза
   # `uniform(1.0, 5.0)` из `run.yaml:crawl.rate_limit`, а не сайт; `in_flight_max = 1`.
-  # Отсюда `rate_limit 0.2…3`: тот же порядок вежливости без 5-секундного хвоста (p50
+  # Отсюда `rate_limit 0.2…3` (историческое решение; с 27.11.2026 — `0.2…1`, см. ниже):
+  # тот же порядок вежливости без 5-секундного хвоста (p50
   # интервала ожидается ≈2.4 с, то есть корень 3 025 — ≈2 ч вместо 4 ч 20 мин).
   # `browser_workers: 2` — браузерный фетч перестал быть сериализованным. Честная
   # граница: лимитер резервирует слот **на origin**, поэтому два потока не удваивают темп,
@@ -212,13 +213,25 @@ pangolin.sbertech.ru:
   # либо отдаёт материал, либо челлендж, который снимает подтверждение и стоит одного
   # пере-прогрева.
   # Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
+  #
+  # rate_limit 0.2…1 (было 0.2…3) — ЗАМЕР 27.11.2026, живой обход на изолированной
+  # раскладке (`run_id` ru-pg-dbms-9d1ba4b6a99b): 896 адресов за 564 с = **1.586 req/s**
+  # при потолке `1/E[d]` = 1.67 (95 %), `fetch_ms` p50 **168**, ноль повторов, ноль
+  # `429`/`5xx`, ноль челленджей. Снижение законно не «на глаз», а потому что лёгкий GET
+  # липкого hybrid — **один** запрос к хосту против **21** у честного рендера того же
+  # адреса (прибор `scripts/measure_render_requests.py`): нагрузка с адреса упала в 21 раз,
+  # и прежний интервал `E[d]`=1.6 с был ценой рендер-плеча, а не этого.
+  # Честная граница: потолок терпимости хоста НЕ найден (это нижняя граница — отказов не
+  # было ни одного), а честный рендер теперь идёт с тем же интервалом, то есть в 21 раз
+  # плотнее по запросам; он случается редко (2 прогрева на 896 адресов), но это цена.
+  # Замер: docs/reports/measurements/2026-11-27-render-request-cost.md.
   browser_workers: 2
   extract: auto
   fetch: browser
   max_depth: 8
   max_documents: 3500
   rate_limit:
-    max_s: 3.0
+    max_s: 1.0
     min_s: 0.2
   sitemap: https://pangolin.sbertech.ru/sitemap.xml
   strategy: hybrid
@@ -473,10 +486,24 @@ tantorlabs.ru:
   # honest. fetch: browser остаётся — корень отдаёт 403 обычному HTTP без cookie, а гибрид
   # берёт cookie именно прогревом (браузер платит за ХОСТ, не за URL).
   # Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
+  #
+  # rate_limit 0.2…1 объявлен 27.11.2026 — ЗАМЕР живым обходом на изолированной раскладке
+  # (`run_id` ru-pg-dbms-0d4748d116fc, `--only-product tantor`): 1 270 адресов продукта,
+  # хост `tantorlabs.ru` — 63 запроса за 48 с = **1.32 req/s**, `fetch_ms` p50 **147**,
+  # `in_flight_max` 2 (`browser_workers`), ноль повторов, ноль `429`/`5xx`; из 1 275
+  # элементов браузером прошли **62** — остальное отдал лёгкий GET. До объявления здесь
+  # действовал run-level `(1.0, 5.0)` ⇒ `E[d]`=3 с, и хост ждал бы 3 с на адрес при
+  # `fetch_ms` 147 мс. Честная граница: потолок терпимости не найден (это нижняя граница),
+  # и на `docs.tantorlabs.ru` того же продукта темп держит уже не лимитер, а сам хост
+  # (p95 3 771 мс, 21 повтор) — там ось не менялась и не меняется.
+  # Замер: docs/reports/measurements/2026-11-27-render-request-cost.md.
   extract: auto
   fetch: browser
   max_depth: 3
   max_documents: 300
+  rate_limit:
+    max_s: 1.0
+    min_s: 0.2
   sitemap: https://tantorlabs.ru/sitemap.xml
   strategy: hybrid
 tantorlabs.ru/products/dbms:
@@ -491,10 +518,19 @@ tantorlabs.ru/products/dbms:
   # strategy: hybrid — ЗАМЕР 27.11.2026: мост 4/4, прогревов **0** (cookie уже сняты на
   # host-ключе того же хоста), челленджей 0, текст 1.00 (одно плечо 0.968 на `/cve` —
   # выше порога 0.9). Замер: docs/reports/measurements/2026-11-27-hybrid-hosts.md.
+  #
+  # rate_limit — тот же, что у host-ключа, и намеренно тот же: origin один, а лимитер
+  # ключуется по origin (`RateLimiter.wait_reserved`), поэтому разные значения на двух
+  # ключах одного хоста дали бы разный темп на одном счётчике. Число — из живого обхода
+  # 27.11.2026 (см. комментарий host-ключа и
+  # docs/reports/measurements/2026-11-27-render-request-cost.md).
   extract: auto
   fetch: browser
   max_depth: 8
   max_documents: 50
+  rate_limit:
+    max_s: 1.0
+    min_s: 0.2
   strategy: hybrid
 wiki.astralinux.ru:
   # Host-root seed (https://wiki.astralinux.ru/) — корень общего справочного центра

@@ -1049,7 +1049,8 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # `run_id`). Замер 23.11.2026 на прогоне `3a737f13962f` (3 621 живой фетч): интервал
         # между стартами p50 **3.81 с** при `fetch_ms` p50 767 / p95 1 232 мс ⇒ ~3 с из
         # 3.81 — пауза `uniform(1.0, 5.0)` из `run.yaml:crawl.rate_limit`, а не сайт;
-        # `in_flight_max = 1`. Отсюда `rate_limit 0.2…3`: тот же порядок вежливости без
+        # `in_flight_max = 1`. Отсюда `rate_limit 0.2…3` (историческое решение; с 27.11.2026 —
+        # `0.2…1`, см. ниже): тот же порядок вежливости без
         # 5-секундного хвоста (p50 интервала ожидается ≈2.4 с, то есть корень 3 025 —
         # ≈2 ч вместо 4 ч 20 мин).
         # `browser_workers: 2` — браузерный фетч перестал быть сериализованным. Честная
@@ -1064,6 +1065,16 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # условия ждать не может — либо отдаёт материал, либо челлендж, который снимает
         # подтверждение и стоит одного пере-прогрева.
         # Замер: `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
+        #
+        # `rate_limit` 0.2…1 (было 0.2…3) — ЗАМЕР 27.11.2026 живым обходом на изолированной
+        # раскладке (`ru-pg-dbms-9d1ba4b6a99b`): 896 адресов за 564 с = **1.586 req/s** при
+        # потолке `1/E[d]` = 1.67 (95 %), `fetch_ms` p50 **168**, ноль повторов, ноль
+        # `429`/`5xx`, ноль челленджей. Снижение законно потому, что лёгкий GET липкого
+        # hybrid — **один** запрос к хосту против **21** у честного рендера того же адреса
+        # (`scripts/measure_render_requests.py`): прежний интервал был ценой рендер-плеча.
+        # Граница: потолок терпимости хоста не найден (нижняя граница), а рендер теперь идёт
+        # с тем же интервалом — редко (2 прогрева на 896 адресов), но плотнее по запросам.
+        # Замер: `docs/reports/measurements/2026-11-27-render-request-cost.md`.
         "pangolin.sbertech.ru": {
             "browser_workers": 2,
             "fetch": "browser",
@@ -1072,7 +1083,7 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "wait_for": "() => document.body && document.body.innerText.length > 200",
             "max_depth": 8,
             "max_documents": 3500,
-            "rate_limit": {"min_s": 0.2, "max_s": 3.0},
+            "rate_limit": {"min_s": 0.2, "max_s": 1.0},
             "sitemap": "https://pangolin.sbertech.ru/sitemap.xml",
         },
         # Оси хоста platformv.sbertech.ru **не однородны по пути** — замер 29.10.2026:
@@ -1278,23 +1289,39 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # `fetch: browser` остаётся: корень отдаёт 403 обычному HTTP без cookie, а
         # гибрид берёт cookie именно прогревом (браузер платит за **хост**, не за URL).
         # Замер: `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
+        #
+        # `rate_limit` 0.2…1 — ЗАМЕР 27.11.2026 живым обходом (`ru-pg-dbms-0d4748d116fc`,
+        # `--only-product tantor`): 1 270 адресов продукта, хост `tantorlabs.ru` — 63
+        # запроса за 48 с = **1.32 req/s**, `fetch_ms` p50 **147**, `in_flight_max` 2,
+        # ноль повторов и ноль `429`/`5xx`; из 1 275 элементов браузером прошли **62**,
+        # остальное отдал лёгкий GET. До объявления действовал run-level `(1.0, 5.0)` ⇒
+        # `E[d]`=3 с ожидания на адрес при `fetch_ms` 147 мс. Граница: потолок терпимости не
+        # найден; у `docs.tantorlabs.ru` того же продукта темп держит сам хост (p95 3 771 мс,
+        # 21 повтор), и его ось не менялась.
+        # Замер: `docs/reports/measurements/2026-11-27-render-request-cost.md`.
         "tantorlabs.ru": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "hybrid",
             "max_depth": 3,
             "max_documents": 300,
+            "rate_limit": {"min_s": 0.2, "max_s": 1.0},
             "sitemap": "https://tantorlabs.ru/sitemap.xml",
         },
         # `strategy: hybrid` — ИЗМЕРЕНО 27.11.2026: мост 4/4, прогревов **0** (cookie уже
         # сняты на host-ключе того же хоста), челленджей 0, текст 1.00 (одно плечо 0.968
         # на `/cve` — выше порога 0.9). Замер:
         # `docs/reports/measurements/2026-11-27-hybrid-hosts.md`.
+        #
+        # `rate_limit` тот же, что у host-ключа, и намеренно тот же: origin один, а лимитер
+        # ключуется по origin, поэтому разные значения на двух ключах одного хоста дали бы
+        # разный темп на одном счётчике. Число — из того же живого обхода.
         "tantorlabs.ru/products/dbms": {
             "fetch": "browser",
             "extract": "auto",
             "strategy": "hybrid",
             "max_depth": 8,
+            "rate_limit": {"min_s": 0.2, "max_s": 1.0},
             # Размер ИЗМЕРЕН 09.11.2026 (изолированный стенд): 3 документа,
             # `truncated: false`; статика даёт те же 3. 50 — выше измерения, 200 не
             # подтверждались ничем. Замер:
