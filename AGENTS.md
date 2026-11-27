@@ -605,9 +605,29 @@ The state lives in the engine, and an engine belongs to a thread (Playwright syn
 worker warms a host itself. The observation is published as **numbers** by
 `BrowserCrawler.hybrid_state()` (mode, `warms`, `http_fetches`, `challenges`, `artifacts`,
 `cookies`) and logged at `close()` — provenance, not identity, since `crawl_strategy` is
-already a contract field. No package declared `hybrid` before the change (all profiles and
-`run.yaml` say `honest`), so no existing run's semantics moved; the adapter version string
-is bumped instead, which is provenance.
+already a contract field.
+
+**Measured on live hosts 27.11.2026** (`scripts/measure_hybrid_hosts.py`, 6 URLs per key,
+paired `hybrid` → `honest` of the same address, text through the real extractor;
+`docs/reports/measurements/2026-11-27-hybrid-hosts.md`): `pangolin.sbertech.ru` bridge 6/6,
+warms 1, text 1.00; `tantorlabs.ru` 6/6, warms 1, 1.00; `tantorlabs.ru/products/dbms` 4/4,
+warms **0** (cookies already taken by the host key — exactly what sticky-per-host buys);
+`sbertech.ru/documents` 6/6, warms 0, but both arms return the same script-rendered shell,
+so the mode is not the limiter there and the corpus quality is a `wait_for` question.
+Not convertible: `platformv.sbertech.ru` — the light GET hits a challenge on **every**
+address (18 challenges / 6 URLs, 0 bridges) and hybrid is even **slower** than honest
+(median 3 469 vs 691 ms); `sbertech.ru` host key — the bridge returns **0.79** of the
+render's text, i.e. loses material. Those four keys are declared `hybrid` in the package
+(an `execution_change`), the last two stay `honest`.
+
+**The axes that decide which bytes enter the corpus are contract fields** (fixed 27.11.2026):
+declaring `strategy` on a profile key used to leave `crawl_config_digest` — and therefore
+`run_id` — untouched (measured: `5e4fa880…` before and after, while `max_documents`
+3 500 → 3 501 gave `e7f9d5f9…`), because the digest resolved only `CrawlLimits` and
+`fetch`/`extract`/`strategy`/`wait_for` live in `DomainProfile`. `_declared_plan_axes`
+(`core/pipeline/report.py`) now carries them into each per-site digest entry as `plan`, and
+only **declared** values enter (`fetch: http`/`extract: auto` equal the model defaults and
+declare nothing), so a run that does not declare them keeps its digest byte for byte.
 
 ## 7. Gates G1–G4
 
@@ -729,7 +749,10 @@ is bumped instead, which is provenance.
   enter through `crawl_config_digest` (`CrawlLimits.as_dict()`), and so does the **resolved**
   `rate_limit` (site > run, same formula as execution, key only when declared) — a per-site
   value overrides the run-level axis, so leaving it out let a host be re-paced without a new
-  `run_id`. Add a new operator axis to the single inventory `CRAWL_AXIS_DESTS`
+  `run_id`. The per-site **acquisition** axes `fetch`/`extract`/`strategy`/`wait_for` enter
+  the same digest as `plan` (`_declared_plan_axes`, §6.3): they decide which bytes become the
+  corpus, and before 27.11.2026 declaring `strategy: hybrid` changed the execution while
+  leaving `run_id` untouched. Add a new operator axis to the single inventory `CRAWL_AXIS_DESTS`
   (`core/cli/execution_axes.py:197`) so `plan` and `run` pick it up together — flag parity is
   tested. Changing an axis gives a **new `run_id`** (`execution_change`), not an edit of the
   current run; otherwise two different corpora become one measurement.

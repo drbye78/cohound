@@ -494,7 +494,7 @@ hound package add-product "<name>" [--url <hint>] [--category ...] [--reason ...
    > **Уточнение к прежней редакции: прогон от этого не отказывал и не отказывает.**
    > `classify_change` (`core/pipeline/run_identity.py:386`) при росте состава даёт
    > `cohort_expansion` + `golden_required=full` + новый `run_id`; отказ живёт только в
-   > `hound diff` (`core/pipeline/report.py:3223`). Настоящий дефект был в **провенансе**: по
+   > `hound diff` (`core/pipeline/report.py:3269`). Настоящий дефект был в **провенансе**: по
    > `run_id`/манифесту нельзя было отличить «когорту расширили, объявив ревизию» от
    > «в `cohort.yaml` дописали строку».
    >
@@ -1276,7 +1276,7 @@ CREATE INDEX idx_partition_product ON index_partition(package_id, product_id);
 > `run_scope`/`product_plan_json` (`core/store/sqlite.py:239-240`), `embed_device` (`core/store/sqlite.py:212`) и таблица `run_product`
 > (`core/store/sqlite.py:787`; писатель — корпус, `save_run_product` —
 > `core/pipeline/corpus.py:3948`, обёртка `core/pipeline/corpus_persist.py:699`;
-> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2520`).
+> читатель — отчёт, `report.collect_run_products`, `core/pipeline/report.py:2566`).
 > `runs.cohort_digest` и `runs.seeds_digest` **есть** (колонки `core/store/sqlite.py:198-199`)
 > и заполняются из манифеста; они дублируют слагаемые `run_id` для диагностики diff, а
 > цепочка циклов живёт в `state.db.run_lineage` (§12.3). `RunManifest` несёт
@@ -4056,7 +4056,7 @@ golden**.
   `RunManifest`, и `report.py` его не выводил. Это было дефектом видимости, а не политики:
   `--only-product` меняет смысл среза, и он обязан быть виден в артефакте прогона.
   Теперь `run_scope` персистится (`runs.run_scope`, `RunManifest.run_scope`,
-  `core/pipeline/report.py:1570-1574`) и виден в `run_manifest.yaml` и `hound report --json`;
+  `core/pipeline/report.py:1616-1620`) и виден в `run_manifest.yaml` и `hound report --json`;
   политика **не изменилась** — scoped-прогон обрабатывает только выбранный продукт и не
   двигает `last_completed_run_id` (O10). Состав — `16-runs-schema-boundary.md` §3.1/§8.
 - Следующий полный прогон увидит `last_completed_run_id` от предыдущего полного прогона
@@ -4114,7 +4114,7 @@ golden**.
 `baseline_facts_digest`. Из 15 полей, отсутствующих по имени, три восстановимы и потому в
 счёт не входят: `cutoff_K` живёт на манифесте как атрибут `retrieval_cutoff_K`, а
 `serp_rounds`/`serp_mode` читаются из провенанса контура (`_CONTRACT_FIELD_GETTERS`,
-`core/pipeline/report.py:2993`).
+`core/pipeline/report.py:3039`).
 
 Следствие — **граница диагностики, а не «поля совпали»**: `hound diff` видит, что условия
 измерения разошлись (`execution_contract_digest`), но какое именно из этих 12 полей

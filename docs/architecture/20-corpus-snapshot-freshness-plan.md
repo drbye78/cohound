@@ -396,8 +396,8 @@ I2d  evaluated + ❌      → у ❌ есть датированный носи�
 `core/pipeline/corpus_coverage.py:368` + источник `core/pipeline/corpus_coverage.py:912`
 (`iter_crawl_session_items` — сеанс, не снятия);
 `core/domain/invariants.py:293` (`check_absence_coverage` + новый `check_absence_dated`);
-зеркало в `core/pipeline/report.py:2583` (`collect_crawl_truncation_anomalies`)/
-`core/pipeline/report.py:2470` (`collect_absence_undated_anomalies`);
+зеркало в `core/pipeline/report.py:2629` (`collect_crawl_truncation_anomalies`)/
+`core/pipeline/report.py:2516` (`collect_absence_undated_anomalies`);
 `docs/status-dictionary.yaml` (токен `absence_undated`;
 `reuse_unconfirmed` больше не объявлен в коде (словаря он не касался — жил константой
 `core/pipeline/evaluate.py`), но строки старых прогонов читаются как есть);

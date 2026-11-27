@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS run_product (
 coverage)` (`core/pipeline/corpus_coverage.py:772`): одна функция на продукт, вызывается на границе,
 а не накоплением в памяти. `cells_carried`/`cells_measured` **не заводятся**: на момент
 границы переноса ячеек не было (`09` §10), а сегодня их считает отчёт из durable-ячеек
-(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3619`).
+(`core/pipeline/state_sync.py:274-326`, `core/pipeline/report.py:3665`).
 
 **Побочный эффект, который надо принять явно:** `cells_total`/`cells_pending`/`baseline_complete`
 из `run_product` — величины того же класса, что `product_end` пишет в `results[].notes` прогона
@@ -377,7 +377,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 одного места — `core/pipeline/run_identity.py:383`, внутри `build_execution_contract`, то есть
 только на
 живом прогоне. Пересчёта из сохранённого словаря нет; `hound diff` сравнивает сохранённые
-строки (`core/pipeline/report.py:3393`), а отсутствующее на манифесте поле уходит в
+строки (`core/pipeline/report.py:3439`), а отсутствующее на манифесте поле уходит в
 `missing`, а не в исключение. `execution_change: embed_device` diff называет и тогда, когда
 поле есть только с одной стороны.
 ⚠️ **Сверено 08.11.2026 — оговорка к «старые прогоны читаются»:** совместимость чтения
@@ -386,9 +386,9 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 версии файла. Это следствие решения 01.11.2026, а не свойство оси.
 
 `RunManifest` (`core/domain/models.py:1919`) получает поле `embed_device`, и этого
-достаточно: `_contract_field_attr` (`core/pipeline/report.py:3050`) сопоставляет имя
+достаточно: `_contract_field_attr` (`core/pipeline/report.py:3096`) сопоставляет имя
 поля контракта с атрибутом манифеста напрямую, а `_CONTRACT_FIELD_GETTERS`
-(`core/pipeline/report.py:2976`)
+(`core/pipeline/report.py:3022`)
 заведён только для полей **без** одноимённого атрибута (сейчас там `serp_rounds`/`serp_mode`).
 Без поля на манифесте диагностика назовёт ось «недоступной» вместо «изменённой».
 
@@ -892,7 +892,7 @@ O6) рядом с `embed_precision`, той же природой, что `extra
 ошибок первой.
 
 **Расхождения, исправленные выше:** `_CONTRACT_FIELD_GETTERS` —
-`core/pipeline/report.py:2976` (первая редакция ссылалась на строку 1970 того же файла);
+`core/pipeline/report.py:3022` (первая редакция ссылалась на строку 1970 того же файла);
 `reuse_kind` в `url_state` —
 `core/store/state_sqlite.py:156` (первая редакция ссылалась на строку 93 — там комментарий);
 `_PARTITION_SCHEMA` —

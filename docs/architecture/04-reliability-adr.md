@@ -634,9 +634,9 @@ I16/I17/I20/I21/I23 — юнит-тестами по слоям; I18/I19 — с�
   `core/store/backup.py:274` `restore_run`; снапшот через `sqlite3.Connection.backup`, не
   копирование файла);
 - публикация и версии отчётов (`reports/`): адресация, признак «не публикация» — ✅ сделано
-  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:310`; маркер
-  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:218`; профиль публикуемости
-  `outputs/publishability.yaml` — `core/pipeline/report.py:4035`);
+  (адресация `{out}/{run_id}/outputs/` — `core/pipeline/report.py:314`; маркер
+  `NOT_FOR_PUBLICATION` — `core/pipeline/report.py:226`; профиль публикуемости
+  `outputs/publishability.yaml` — `core/pipeline/report.py:4081`);
 - стоимость/токены как метрика M1 (`llm_calls`, `tokens`, §B.2) — ✅ сделано
   (`core/pipeline/metrics.py:10`: `llm_calls`/`tokens` накоплены по заходам через
   `read_prior_llm_usage`/`merge_llm_usage`, а не «последняя инвокация»; запись —

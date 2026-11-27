@@ -159,8 +159,15 @@ def test_site_rate_limit_changes_crawl_digest() -> None:
     """Смена темпа **одного** site-ключа меняет ``crawl_config_digest`` (execution_change).
 
     Per-site темп перекрывает run-level ось, поэтому иначе объявленный темп можно было бы
-    нейтрализовать для хоста, не сдвинув ``run_id``. Правка профиля, которую
-    ``CrawlLimits`` не несёт (``wait_for``), дайджест не двигает.
+    нейтрализовать для хоста, не сдвинув ``run_id``.
+
+    ``wait_for`` тоже двигает дайджест — и это **исправление**, а не новое удобство: до
+    27.11.2026 пин утверждал обратное («поле профиля, не входящее в ``CrawlLimits``,
+    дайджест не двигает»), и вместе с ним вне контракта жили ``fetch``/``extract``/
+    ``strategy``. Между тем ``wait_for`` решает, **какой DOM** попадёт в корпус (условие
+    готовности SPA), а ``strategy: hybrid`` — отдаст ли мост ответ HTTP или отрендеренную
+    страницу. Измерено 27.11.2026 на ``ru-pg-dbms``: правка ``strategy`` не меняла
+    ``crawl_config_digest``, а правка ``max_documents`` меняла.
     """
     from core.pipeline.report import crawl_control_digest
 
@@ -179,8 +186,9 @@ def test_site_rate_limit_changes_crawl_digest() -> None:
     slow = DomainProfile(rate_limit=RateLimitSpec(min_s=0.05, max_s=0.2))
     fast = DomainProfile(rate_limit=RateLimitSpec(min_s=0.1, max_s=0.4))
     assert digest(slow) != digest(fast)
-    # no-op для этого дайджеста: поле профиля, не входящее в ``CrawlLimits``.
-    assert digest(slow) == digest(
+    # `wait_for` в ``CrawlLimits`` не входит, но условие готовности SPA решает, какой DOM
+    # станет текстом документа ⇒ это условие измерения, и дайджест обязан сдвинуться.
+    assert digest(slow) != digest(
         DomainProfile(rate_limit=RateLimitSpec(min_s=0.05, max_s=0.2), wait_for=".ready")
     )
 

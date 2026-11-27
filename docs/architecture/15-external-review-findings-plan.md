@@ -526,7 +526,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 
 | ID | Находка | Вердикт | Доказательство (HEAD) | Класс | P |
 |---|---|---|---|---|---|
-| V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно; аномалии класса утверждения нет | `cohound-spec-v2.md:669` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `core/pipeline/validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `support_subject_overlap` + артефакт `outputs/support_quality.yaml` есть (`core/pipeline/report.py:4251`). Лжёт один документ — `core/adapters/llm_local.py:22` приписывает шаг 3 `validate.py`; `02-subsystems.md:640` говорит правду («НЕ реализовано как шаг эшелона») | М | P0 + P6 |
+| V1 | §7.1 требует достаточность цитаты, в коде её нет | **ЧАСТИЧНО**: entailment отсутствует, «механизма нет вообще» — неверно; аномалии класса утверждения нет | `cohound-spec-v2.md:669` (шаг 3 эшелона, «частично механически», следствие — **аномалия**); `core/pipeline/validate.py:300-381` — восемь проверок, ни одна не спрашивает «следует ли статус»; но `support_subject_overlap` + артефакт `outputs/support_quality.yaml` есть (`core/pipeline/report.py:4297`). Лжёт один документ — `core/adapters/llm_local.py:22` приписывает шаг 3 `validate.py`; `02-subsystems.md:640` говорит правду («НЕ реализовано как шаг эшелона») | М | P0 + P6 |
 | V2 | Точность оценщика неизмерима | **ПОСЫЛКА СНЯТА 28.10, замер не выполнен**: эталон пересобран и объявлен пригодным, поэтому «неизмерима» больше не верно — но и «измерена» не верно | `packages/ru-pg-dbms/sources/golden_status.yaml:1-2` `state: present`; loader — `core/pipeline/golden_status.py:523` `read_golden_status` → `state=present, declared=True, comparison_available=True` (проверено вызовом). `golden.csv` = **905 строк = 181 параметр × 5 продуктов** (tier: 750 `full` / 155 `fast`; ожидание ✅500 / ⚠️123 / ❌282), в т.ч. **181 `jatoba`** (было 0) и новый 5-й продукт `digital_q_database`. Ветка отказа жива и читается (`core/pipeline/evaluator_benchmark.py:116,412,517`), но больше не срабатывает. **Сделано 07.11.2026:** первый прогон на срезе нового набора — 50 ячеек × 3 продукта с корпусом (`2026-11-07-reasoning-effort-matrix.md`): κ **0.008–0.056** (все CI накрывают ноль), `fabricated_support` 0, `abstention.absent_rate` 0.0 — модель ни разу не выдала `❌` при 9 golden-`❌`. **Не сделано:** полный набор (905 строк / 5 продуктов) не прогнан — κ, confusion, abstention по `postgrespro`/`tantor` невозможны без прогона с краулом, а до 07.11.2026 команда на реальном прогоне не измеряла ничего (сверка чанков шла по композиции `cb_…` вместо партиции `pb_…`, `cf28a89`) — то есть κ по этому эталону посчитана впервые | М | P6 |
 | V3 | 4.2 % вердиктов меняются на идентичном промпте; retry ≤2 — лотерея | **ЧАСТИЧНО**: число и лотерея верны, «docstring'и продают байт-в-байт» — нет; на 07.11.2026 замерено заново | `2026-10-26-verdict-reproducibility.md:40` (5 из 119); `max_retries` — объявленный вход (`evaluation_policy`), цикл публикует **первый валидный** сэмпл (`core/pipeline/evaluate.py:3063`). **Замер 07.11.2026** (`2026-11-07-llm-concurrency-scaling.md`): шумовой пол — **2 из 24 (8.3 %)** при `--repeats 2` на тех же входах, то есть согласие **91.7 %** против порога R7 ≥95 % (`cohound-spec-v2.md:831`, определение §11.7 — `:862`). Это **факт замера, а не вердикт**: порог R7 определён для двойного прогона без живого ре-фетча, здесь — повтор на 24 ячейках одной сборки; 4.2 % (25.10) и 8.3 % (07.11) — два разных среза, оба названы. **Решение владельца 08.11.2026:** считать порогом и пересмотреть **измерением** (полный benchmark на 905 ячейках), а не менять правило | М | P2 |
 | V4 | `decoder` — лейбл, а не механизм | **ПОДТВЕРЖДЕНО**, все три ноги | `prompt.py:23` «схема навязывается»; `llm_local.py:132` `DEFAULT_DECODER="none"` достижим в проде (`core/cli/wiring.py:1138`); `llm_local.py:1206-1219` — единственная ветка `json_schema` на **любое** значение ≠ `"none"`; проба: `json_object` → по проводам `json_schema`, `JSoN_ObJeCt` принимается (метки не enum — `core/config/deploy.py:843` `Decoder | None`, в `status-dictionary.yaml` ключа не было); живой прогон: манифест `decoder=json_object`, провод — `json_schema` | М | P2 |
@@ -539,7 +539,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 - ✅ V1 — **закрыт 08.11.2026 как аномалия, а не как понижение статуса**: замер предмета
   (`support_subject_overlap`, артефакт `outputs/support_quality.yaml`) теперь публикуется в
   операторском `nda_questions.csv` строкой `anomaly_kind=unrelated_support`
-  (`core/pipeline/report.py:2289`; параметр `unrelated_support_anomalies` — `:1862`, вызов :1965`, вызов —
+  (`core/pipeline/report.py:2335`; параметр `unrelated_support_anomalies` — `:1862`, вызов :1965`, вызов —
   `:3615`), с текстом «доказательство не о предмете: цитат N, без предмета M». Вердикты,
   Coverage, Capability и публикуемость не меняются, новых порогов нет; видов `anomaly_kind`
   стало **шесть**. Пин — `tests/pipeline/test_report.py:1105`. **Названное ограничение, а не
@@ -784,7 +784,7 @@ absence-модель, scoring и определения Coverage/Comparability �
 - 8 ✅ разведены и оба сделаны: P6 — `core/pipeline/digests.py:247` (`evaluation_policy`),
   P7 — `core/pipeline/prompt.py:175`.
 - 9 ✅ **исполнено 08.11.2026**: решение «аномалия, а не понижение статуса» доведено до кода —
-  `anomaly_kind=unrelated_support` в `nda_questions.csv` (`core/pipeline/report.py:2289`),
+  `anomaly_kind=unrelated_support` в `nda_questions.csv` (`core/pipeline/report.py:2335`),
   видов стало **шесть**; замер предмета остаётся в `outputs/support_quality.yaml`, а маркерная
   проверка класса утверждения — названное ограничение (см. §6.1).
 
@@ -867,7 +867,7 @@ P5-ловушки (удаление `fusion.py`, C4/C6/C9/C10/C11).
   неизвестности считаются (`core/domain/scoring.py:1114`), классы
   `PUBLISHABLE`/`PUBLISHABLE_WITH_CAVEAT`/`ANALYTICAL_ONLY`/`NOT_COMPARABLE` объявлены
   (`core/domain/enums.py:1170-1204`), причины `UnknownCause` — `core/domain/enums.py:1263-1298`,
-  артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:4036`, запись — `:3225`), в Ш8 :3328`), в Ш8 —
+  артефакт `outputs/publishability.yaml` пишется (`core/pipeline/report.py:4082`, запись — `:3225`), в Ш8 :3328`), в Ш8 —
   `core/pipeline/compute.py:337`.
 - ✅ **числа CI сверены 07.11.2026**: полный прогон — **6830 passed / 6 skipped**, `selfcheck`
   **113/113** (прогнан на месте), `mypy` baseline **112** (`docs/architecture/mypy-baseline.txt`),

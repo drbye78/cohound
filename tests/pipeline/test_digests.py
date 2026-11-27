@@ -726,6 +726,54 @@ def test_pdf_limits_product_layer_changes_crawl_config_digest() -> None:
     )
     assert len({base, with_product, other_limit}) == 3
 
+
+def test_per_site_strategy_changes_crawl_config_digest() -> None:
+    """Объявленный ``strategy`` на ключе профиля меняет дайджест, а не только исполнение.
+
+    До 27.11.2026 оси получения контента (``fetch``/``extract``/``strategy``/``wait_for``)
+    в ``crawl_config_digest`` не входили: правка ``strategy: honest → hybrid`` на ключе
+    ``ru-pg-dbms`` дала **тот же** дайджест (``5e4fa880434bdcb41b89be25``), а правка
+    ``max_documents`` — другой, хотя первая меняет то, **какие байты** попадут в корпус
+    (мост отдаёт ответ HTTP вместо отрендеренного DOM). Два разных состава корпуса жили
+    бы под одной идентичностью (§13).
+    """
+    from core.config.deploy import CrawlConfig
+    from core.config.domain_profiles import DomainProfile
+    from core.domain.enums import CrawlStrategy
+    from core.domain.models import CrawlRunConfig
+    from core.pipeline.report import crawl_control_digest
+
+    honest = {"site.test": DomainProfile(fetch="browser", strategy=CrawlStrategy.HONEST)}
+    hybrid = {"site.test": DomainProfile(fetch="browser", strategy=CrawlStrategy.HYBRID)}
+    digests = {
+        crawl_control_digest(run_crawl=CrawlRunConfig(), app=CrawlConfig(), profiles=profiles)
+        for profiles in (honest, hybrid)
+    }
+    assert len(digests) == 2
+
+
+def test_per_site_default_plan_axes_do_not_change_crawl_config_digest() -> None:
+    """Ключ без объявленных осей получения контента дайджест не двигает (§13, A3).
+
+    ``fetch: http``/``extract: auto`` — дефолты модели, они ничего не объявляют сверх
+    уже учтённого. Иначе прогон, где профиль просто перечисляет лимиты, получал бы
+    ``execution_change`` от правки, которая ничего не меняет.
+    """
+    from core.config.deploy import CrawlConfig
+    from core.config.domain_profiles import DomainProfile
+    from core.domain.models import CrawlRunConfig
+    from core.pipeline.report import crawl_control_digest
+
+    bare = {"site.test": DomainProfile(max_documents=100)}
+    explicit_defaults = {
+        "site.test": DomainProfile(fetch="http", extract="auto", max_documents=100)
+    }
+    digests = {
+        crawl_control_digest(run_crawl=CrawlRunConfig(), app=CrawlConfig(), profiles=profiles)
+        for profiles in (bare, explicit_defaults)
+    }
+    assert len(digests) == 1
+
 def test_tool_profile_is_a_contract_condition() -> None:
     """Профиль инструментов — 37-е поле контракта (план 28 §9), а не провенанс.
 

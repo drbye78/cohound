@@ -666,7 +666,7 @@ I7 (N/A недопустим на выходе модели), I1 (✅/⚠️ т�
 из 70 без доказательства о предмете.
 **Следствие-аномалия теперь публикуется** (V1 закрыт 08.11.2026): записи замера идут в
 операторский `nda_questions.csv` строками `anomaly_kind=unrelated_support`
-(`core/pipeline/report.py:2267`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
+(`core/pipeline/report.py:2313`), со ссылкой на тот же `support_quality.yaml`; статус ячейки
 не меняется. Маркерная проверка класса утверждения (отрицание/условность в цитате против
 заявленного ✅) остаётся **названным ограничением**, а не работой: она требует замера шума
 на корпусе, иначе превращается в порог из головы (A3).
@@ -828,7 +828,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 | `diff.md` | `report.py` | изменённые статусы + evidence_id (запрещён через major) |
 | `run_manifest.yaml` | фаза `report` (`build_manifest` → строка `runs` через `persist_manifest`); файл `runs/{run_id}/run_manifest.yaml` — из `write_reports` | все версии, модели, `index_build_id`/`partition_build_id`, профиль+K, бюджет, scoring-политика, `ranking_epsilon`, `settings_provenance`, `gate_waivers` |
 
-**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:3971`;
+**Прочие артефакты той же фазы** (`write_reports`, `core/pipeline/report.py:4017`;
 все — в `{out_dir}/{run_id}/outputs/`): `publishability.yaml`, `measurement_uncertainty.yaml`
 (P6c: объявленная либо измеренная полоса неопределённости), `run_product.csv` (статус
 продукта в прогоне), `stale_cells.csv`, `cell_origin.csv`, `cell_diagnostics.csv`,
@@ -838,7 +838,7 @@ package/catalog version, edition/jurisdiction. Нарушено → `cross-cycle
 когорты — `cohort.yaml: comparison_base`; матрица переходов `base_status → product_status`,
 ординальности статусов не вводится). Таблица выше называет публикационные (`PUBLISHED_ARTIFACTS`,
 `core/pipeline/gate_subject.py:64-69`) и манифест. Полный перечень — поля датакласса
-`Artifacts` (`core/pipeline/report.py:307`), а не число: список рос на каждом O-пункте, и
+`Artifacts` (`core/pipeline/report.py:314`), а не число: список рос на каждом O-пункте, и
 пересчитанное «сколько всего файлов» устаревало быстрее, чем его читали. Раньше здесь
 стояло «16» (измерено 2026-11-08) — к 17.11.2026 это число неверно.
 
@@ -951,7 +951,7 @@ flowchart LR
 **Открытые вопросы к итерации 3 (все 5 закрыты; сверено 2026-11-08):**
 формат `runs/{run_id}/` (раскладка файлов) — ✅ сделано
 (раскладка и её код: `docs/architecture/03-data-config-cli.md` §A.2; писатель —
-`write_reports` `core/pipeline/report.py:3971` → `{out_dir}/{run_id}/outputs/`,
+`write_reports` `core/pipeline/report.py:4017` → `{out_dir}/{run_id}/outputs/`,
 request-файлы гейтов — `core/pipeline/gate_subject.py:532`); версионирование
 `prompt`-шаблонов — ✅ сделано
 (`core/pipeline/prompt.py:175`, `TEMPLATE_VERSION = "evaluator_v7"`, файлы

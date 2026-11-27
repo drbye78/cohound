@@ -349,17 +349,17 @@ hound artifacts fetch --package {case_id} --url URL --product P --actor {кто}
 
 **На 25.10 его не было.** Провалы фетчей попадали в отчёт только агрегатами
 (`core/domain/models.py:1869` — `CrawlSessionProvenance.failed: int`;
-`core/pipeline/report.py:1732-1745` — движки в шапке; `core/pipeline/report.py:2617-2622` —
+`core/pipeline/report.py:1778-1791` — движки в шапке; `core/pipeline/report.py:2663-2668` —
 `blocked = {error_kind: count}` и `unreadable_origins` от `derive_corpus_coverage`). Ни URL,
 ни текста ошибки. Per-URL
 детализация живёт в `crawl_session_items` и доступна только через
 `hound crawl status --per-url` — то есть «посмотреть глазами», а не «получить файл».
 Сделано — §8 п. 1: файл пишется (`core/pipeline/artifacts_gap.py:354`).
 
-Ближайший образец формы — `core/pipeline/report.py:2242` `render_nda_questions`: единый
+Ближайший образец формы — `core/pipeline/report.py:2288` `render_nda_questions`: единый
 CSV, строка =
 аномалия, `anomaly_kind` из набора `i3_protocol`/`crawl_truncation`/`corpus_incomplete`/
-`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2306-2372`,
+`golden_exempt_product`/`absence_undated`/`unrelated_support` (`core/pipeline/report.py:2352-2418`,
 сверено 08.11.2026 — видов **шесть**; диапазон пере-указан 21.11.2026 после правки шапки
 battle card). Тот же приём,
 другая таблица.
@@ -417,7 +417,7 @@ gaps:
 `run_lineage.previous_run_id` и `change_class` (`core/store/state_sqlite.py:285-289`; запись —
 `core/pipeline/state_adopt.py:1536,1807`). Прогон N+1, объявивший артефакты, попадает в эту
 цепочку автоматически, а `hound diff` называет смену `manual_artifacts_digest` осью
-расхождения (`core/pipeline/report.py:2961-3015`). Отдельная пометка на артефакте не нужна:
+расхождения (`core/pipeline/report.py:3007-3061`). Отдельная пометка на артефакте не нужна:
 состояния «артефакт перенесён из прогона X» нет — файл перечитывается каждый прогон, а
 перенос типизирован на уровне ячейки (`measurement_origin=carried` + `carried_from_run_id`);
 см. §8 п. 3.
@@ -476,7 +476,7 @@ gaps:
 
 1. ✅ сделано — **Отчёт `artifacts_gap.yaml`** из персистентных данных — первым, независимо
    от остального (`core/pipeline/artifacts_gap.py:354` — единственный writer, зовут
-   `core/pipeline/corpus.py:5729` и `core/pipeline/report.py:4340`; человеческая строка —
+   `core/pipeline/corpus.py:5729` и `core/pipeline/report.py:4386`; человеческая строка —
    `core/pipeline/artifacts_gap.py:213`, сбор — `core/pipeline/artifacts_gap.py:267`). Ничего не меняет в семантике, сразу делает пробел
    действенным.
 2. ✅ сделано — **Шов подачи**: `manual_artifacts.yaml` → `RawPage`(+`engine=manual`) →
@@ -497,7 +497,7 @@ gaps:
    `carried_from_run_id` (`core/domain/models.py:1497`, схема `cell-reuse-4`); документ —
    `corpus_docs.reuse_kind` (`live|revalidated|reused|stale`). Связь прогонов при этом видна:
    `run_lineage.previous_run_id` + `change_class`, а `hound diff` называет смену
-   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:2961-3015`).
+   `manual_artifacts_digest` осью расхождения (`core/pipeline/report.py:3007-3061`).
 4. ➖ **переехало** — документный `pb` (`F3`) ведётся как гейт флота в
    `24-fleet-work-units.md` F1.5; здесь не ведётся. Цена «шаг 2 стоит часы на продукт»
    остаётся фактом §6 этого документа.
@@ -582,7 +582,7 @@ by_product}` из персистентного аудита; `share_of_corpus = 
   (`core/pipeline/manual_artifacts.py:202`), сверка `sha256` (`core/pipeline/manual_artifacts.py:308`),
   заготовка пакета — `packages/_template/sources/manual_artifacts.yaml:52`.
 - ✅ **Отдельный отчёт о недоступном** — `outputs/artifacts_gap.yaml` пишется и фазой `corpus`
-  (`core/pipeline/corpus.py:5652`), и `report` (`core/pipeline/report.py:4258`); форма —
+  (`core/pipeline/corpus.py:5652`), и `report` (`core/pipeline/report.py:4304`); форма —
   `core/pipeline/artifacts_gap.py:267` (`collect_artifact_gaps`), человеческая строка —
   `core/pipeline/artifacts_gap.py:213` (`human_line`).
 - ✅ **Новой фазы нет** — `PHASES` по-прежнему 15 (`core/pipeline/runner.py:133`); подача

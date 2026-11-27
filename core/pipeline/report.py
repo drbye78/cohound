@@ -73,6 +73,8 @@ from core.domain.enums import (
     CellState,
     ChangeClass,
     DenialStrength,
+    ExtractionRoute,
+    FetchMode,
     Importance,
     MeasurementOrigin,
     RankingPolicy,
@@ -126,6 +128,7 @@ from core.pipeline.digests import (
 from core.pipeline.digests import (
     seeds_digest as _seeds_digest,
 )
+from core.pipeline.fetch_plan import select_domain_profile
 from core.pipeline.golden_status import GoldenStatus, read_golden_status
 from core.pipeline.heading_anomalies import (
     write_heading_anomalies_artifact,
@@ -819,6 +822,39 @@ def _catalog_version_from_inputs(inputs: Any) -> str:
     return _catalog_digest(catalog)
 
 
+def _declared_plan_axes(url: str, sites: Mapping[str, Any]) -> dict[str, Any]:
+    """Объявленные оси **получения контента** лучшего профиля для ``url`` (D2/D4).
+
+    ``fetch``/``extract``/``strategy``/``wait_for`` решают, **какие байты** попадут в
+    корпус: ``browser`` отдаёт отрендеренный DOM вместо ответа HTTP, ``strategy: hybrid``
+    — либо то, либо другое (липкий мост), ``wait_for`` ждёт готовности SPA, а ``extract:
+    document`` меняет читателя. Пока этих осей не было в дайджесте, объявление
+    ``strategy: hybrid`` на ключе **не меняло** ``crawl_config_digest``, то есть не меняло
+    ``run_id``: два разных состава корпуса жили под одной идентичностью (§13). Измерено
+    27.11.2026 на ``ru-pg-dbms``: правка ``strategy: honest → hybrid`` дала тот же
+    дайджест (``5e4fa880434bdcb41b89be25``), а правка ``max_documents`` — другой
+    (``e7f9d5f96cd9f9c381d1ef9e``), хотя первая меняет исполнение сильнее.
+
+    Входят только **объявленные** значения: ``None`` (наследуется ``run.yaml``) и
+    значение, равное дефолту модели (``fetch: http``/``extract: auto``), ничего не
+    объявляют сверх уже учтённого. Поэтому прогон без этих осей сохраняет прежний
+    дайджест, а объявленная ось честно даёт ``execution_change``.
+    """
+    profile = select_domain_profile(url, sites) if sites else None
+    if profile is None:
+        return {}
+    axes: dict[str, Any] = {}
+    if profile.fetch is not FetchMode.HTTP:
+        axes["fetch"] = profile.fetch.value
+    if profile.extract is not ExtractionRoute.AUTO:
+        axes["extract"] = profile.extract.value
+    if profile.strategy is not None:
+        axes["strategy"] = profile.strategy.value
+    if profile.wait_for is not None:
+        axes["wait_for"] = profile.wait_for
+    return axes
+
+
 def crawl_control_digest(
     *,
     run_crawl: Any,
@@ -834,6 +870,10 @@ def crawl_control_digest(
     per-site; темп ``rate_limit`` входит при объявлении на site/run слое, per-site перекрывает run-level). Канонизируется ``json.dumps(sort_keys=True)``
     и хешируется :func:`short_hash`. Смена осей на **любом** слое меняет дайджест → манифест
     помечает ``execution_change`` (§13), не ``methodology_change``.
+
+    Per-site запись несёт и **оси получения контента** объявленного профиля (``plan``:
+    ``fetch``/``extract``/``strategy``/``wait_for``) — см. :func:`_declared_plan_axes`:
+    без них объявленный ``strategy: hybrid`` менял исполнение, но не ``run_id``.
 
     Публичная функция (не только внутренняя деталь манифеста): composition root
     (:mod:`core.cli.execution_axes`) вызывает её для **декларированной** оси контракта.
@@ -866,6 +906,12 @@ def crawl_control_digest(
                 url, app=app_config, run=run_crawl, profiles=sites, product=axes
             ).as_dict()
         )
+        # Оси получения контента объявленного профиля (``fetch``/``extract``/``strategy``/
+        # ``wait_for``) — тоже условие измерения: они решают, какие байты попадут в корпус,
+        # и до 27.11.2026 в дайджест не входили (см. :func:`_declared_plan_axes`).
+        plan_axes = _declared_plan_axes(url, sites)
+        if plan_axes:
+            payload["plan"] = plan_axes
         payload.update(operator)
         return payload
 
