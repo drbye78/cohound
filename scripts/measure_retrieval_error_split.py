@@ -75,12 +75,17 @@ def _iter_records(conn: sqlite3.Connection, build_id: str) -> Iterator[Any]:
 def _chunk_lookup(conn: sqlite3.Connection) -> Any:
     """Гидртация top-K: точка-чтение чанка по ``chunk_id``."""
     from core.ports.types import Chunk
+    from core.store.corpus_reader import _CHUNK_FIELDS
     from core.store.sqlite_rows import _row_to_chunk
+
+    # Проекция берётся из единственного объявления, а не пишется здесь руками: рукописный
+    # SELECT отстал от схемы, когда у чанка появился `table_ref` (3.26.0), и прибор падал
+    # на `IndexError` вместо ответа (найдено 27.11.2026).
+    projection = ", ".join(_CHUNK_FIELDS)
 
     def lookup(chunk_id: str) -> Chunk | None:
         row = conn.execute(
-            "SELECT chunk_id, chunk_no, text, heading_path, context_prefix, content_hash,"
-            " char_start, char_end FROM corpus_chunks WHERE chunk_id = ?",
+            f"SELECT {projection} FROM corpus_chunks WHERE chunk_id = ?",  # noqa: S608 - проекция из объявления, chunk_id — bind
             (chunk_id,),
         ).fetchone()
         return None if row is None else _row_to_chunk(row)
