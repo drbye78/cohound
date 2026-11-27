@@ -477,3 +477,375 @@ def test_json_reports_every_state_db(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert len(payload["state_dbs"]) == 2
     assert [info["live_paths"] for info in payload["state_db_info"]] == [0, 1]
     assert payload["live_paths"] == 1
+
+
+# ------------------------------------------------------------------ цена удаления
+
+
+def _run_db(
+    directory: Path,
+    *,
+    run_id: str,
+    refs: list[str] = (),
+    g4: bool = False,
+    cells: int = 0,
+    session_status: str | None = None,
+    session_refs: list[str] = (),
+    with_raw_tables: bool = True,
+) -> Path:
+    """Минимальная прогонная БД: только таблицы, которые читает цензус.
+
+    ``with_raw_tables=False`` — БД старой схемы: таблиц ссылок нет вовсе (читатель обязан
+    пропустить их молча).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    db = directory / "cohound.db"
+    conn = sqlite3.connect(db)
+    statements = [
+        "CREATE TABLE gate_decisions (run_id TEXT, gate TEXT, verdict TEXT)",
+        "CREATE TABLE cells (run_id TEXT, product_id TEXT, param_id TEXT)",
+        "CREATE TABLE crawl_sessions (session_id TEXT, status TEXT)",
+    ]
+    if with_raw_tables:
+        statements += [
+            "CREATE TABLE corpus_docs (doc_id TEXT, raw_path TEXT)",
+            "CREATE TABLE extract_queue (session_id TEXT, raw_path TEXT)",
+            "CREATE TABLE crawl_session_items (session_id TEXT, raw_path TEXT)",
+        ]
+    conn.executescript(";".join(statements))
+    if g4:
+        conn.execute("INSERT INTO gate_decisions VALUES (?, 'G4', 'approved')", (run_id,))
+    for index in range(cells):
+        conn.execute("INSERT INTO cells VALUES (?, 'p1', ?)", (run_id, f"param_{index}"))
+    if session_status is not None:
+        conn.execute("INSERT INTO crawl_sessions VALUES ('s1', ?)", (session_status,))
+    if with_raw_tables:
+        for raw in refs:
+            conn.execute("INSERT INTO corpus_docs VALUES ('d', ?)", (raw,))
+        for raw in session_refs:
+            conn.execute("INSERT INTO crawl_session_items VALUES ('s1', ?)", (raw,))
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _runs_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "runs"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def test_run_db_reference_becomes_run_history(tmp_path: Path) -> None:
+    """Ссылка только из прогонной БД — класс ``corpus_raw_run_history``, и он удаляется."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    history = _raw(root, "p1", "history.bin")
+    orphan = _raw(root, "p1", "drop.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_a", run_id="run_a", refs=[str(history)])
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--apply",
+            "--actor",
+            "t",
+            "--runs-dir",
+            str(runs),
+        )
+        == 0
+    )
+
+    assert not history.exists(), "цена названа — но удаление всё равно происходит"
+    assert not orphan.exists()
+    assert live.exists()
+
+
+def test_price_split_live_vs_dead_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Живой прогон (G4 approved) и мёртвый попадают в разные строки цены."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    from_live = _raw(root, "p1", "from_live.bin", b"a" * 10)
+    from_dead = _raw(root, "p1", "from_dead.bin", b"b" * 20)
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_live", run_id="run_live", refs=[str(from_live)], g4=True)
+    _run_db(runs / "run_dead", run_id="run_dead", refs=[str(from_dead)])
+
+    assert (
+        _run_dbs(
+            tmp_path, package, [db], "--json", "--runs-dir", str(runs)
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["price"]["by_live_runs"] == {"files": 1, "bytes": 10}
+    assert payload["price"]["by_dead_runs"] == {"files": 1, "bytes": 20}
+    assert payload["classes"]["corpus_raw_run_history"]["files"] == 2
+    assert payload["classes"]["corpus_raw_unreferenced"]["files"] == 0
+
+
+def test_price_resumable_session_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``by_resumable_session`` — флаг: ``running`` взводит, ``finished`` — нет."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    resumable = _raw(root, "p1", "resumable.bin")
+    finished = _raw(root, "p1", "finished.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(
+        runs / "run_running",
+        run_id="run_running",
+        refs=[str(resumable)],
+        session_status="running",
+        session_refs=[str(resumable)],
+    )
+    _run_db(
+        runs / "run_finished",
+        run_id="run_finished",
+        refs=[str(finished)],
+        session_status="finished",
+        session_refs=[str(finished)],
+    )
+
+    assert _run_dbs(tmp_path, package, [db], "--json", "--runs-dir", str(runs)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["price"]["by_resumable_session"]["files"] == 1
+    sessions = {
+        run["run_id"]: run["resumable_sessions"]
+        for run in payload["run_census"]["runs"]
+    }
+    assert sessions == {"run_running": 1, "run_finished": 0}
+
+
+def test_without_runs_dbs_price_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Без прогонных БД класс истории пуст, кандидаты — в ``_unreferenced``, есть stderr."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    candidate = _raw(root, "p1", "candidate.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_a", run_id="run_a", refs=[str(candidate)])
+
+    assert _run_dbs(tmp_path, package, [db], "--json") == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert payload["classes"]["corpus_raw_run_history"]["files"] == 0
+    assert payload["classes"]["corpus_raw_unreferenced"]["files"] == 1
+    assert "цена удаления неизвестна" in captured.err
+
+
+def test_audit_records_runs_per_file(tmp_path: Path) -> None:
+    """Построчная запись несёт ``runs``; у истинной сироты список пуст."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    history = _raw(root, "p1", "history.bin")
+    _raw(root, "p1", "drop.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_a", run_id="run_a", refs=[str(history)], g4=True)
+    audit = tmp_path / "audit.jsonl"
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--apply",
+            "--actor",
+            "t",
+            "--runs-dir",
+            str(runs),
+            "--audit",
+            str(audit),
+        )
+        == 0
+    )
+
+    lines = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    summary, *events = lines
+    by_name = {Path(event["path"]).name: event for event in events}
+    assert by_name["history.bin"]["runs"] == ["run_a"]
+    assert by_name["drop.bin"]["runs"] == []
+    assert summary["run_census"]["runs"][0]["run_id"] == "run_a"
+    assert summary["run_census"]["price"]["by_live_runs"]["files"] == 1
+
+
+def test_run_db_without_raw_tables_is_tolerated(tmp_path: Path) -> None:
+    """БД без ``corpus_docs``/``extract_queue``/``crawl_session_items`` не ломает прогон."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    orphan = _raw(root, "p1", "drop.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(runs / "run_old", run_id="run_old", with_raw_tables=False)
+
+    assert _run_dbs(tmp_path, package, [db], "--runs-dir", str(runs)) == 0
+    assert orphan.exists(), "dry-run ничего не удаляет"
+
+
+def test_runs_root_finds_nested_run_dbs(tmp_path: Path) -> None:
+    """``--runs-root`` находит ``cohound.db`` рекурсивно и считает цену."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    history = _raw(root, "p1", "history.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs_root = tmp_path / "stands" / "runs"
+    _run_db(runs_root / "deep" / "run_a", run_id="run_a", refs=[str(history)])
+
+    assert (
+        _run_dbs(tmp_path, package, [db], "--runs-root", str(runs_root)) == 0
+    )
+    assert history.exists()
+
+
+# ------------------------------------------------------------------ соседние пакеты
+
+
+def _package_with_root(tmp_path: Path, name: str, root: str) -> Path:
+    """Пакет с одним продуктом ``p1`` и объявленным корнем ``root``."""
+    package = tmp_path / name
+    (package / "sources").mkdir(parents=True)
+    (package / "sources" / "corpus_urls.yaml").write_text(
+        f"p1:\n- {root}\n", encoding="utf-8"
+    )
+    return package
+
+
+def test_key_inside_neighbour_package_is_rescued(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Адрес вне первого пакета, но внутри второго — ключ не удаляется, а считается спасённым."""
+    package = _package(tmp_path, products=("p1",))
+    neighbour = _package_with_root(tmp_path, "neighbour", "https://other.test/docs/")
+    other_url = "https://other.test/docs/page.html"
+    kept = _cache_file(tmp_path / "cache", other_url, meta=True)
+    db = _state(tmp_path / "state", urls=[("p1", other_url)])
+
+    assert (
+        _run_dbs(
+            tmp_path,
+            package,
+            [db],
+            "--json",
+            "--also-package",
+            str(neighbour),
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert all(path.exists() for path in kept), "ключ объявлен соседним пакетом"
+    assert payload["classes"]["http_cache_outside_space"]["files"] == 0
+    assert payload["rescued_by_other_packages"]["files"] == 2, "байты и сайдкар"
+    assert payload["packages"] == [str(package), str(neighbour)]
+
+
+def test_also_package_without_corpus_urls_refuses(tmp_path: Path) -> None:
+    """Каталог без ``corpus_urls.yaml`` — отказ, а не тихое «пакета нет»."""
+    package = _package(tmp_path)
+    empty = tmp_path / "not_a_package"
+    empty.mkdir()
+    db = _state(tmp_path / "state")
+
+    assert _run_dbs(tmp_path, package, [db], "--also-package", str(empty)) == 2
+
+
+# ------------------------------------------------------------------ дренаж
+
+
+def test_by_drain_counts_dead_run_with_running_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Мёртвый прогон с ``status='running'`` — это незавершённая докачка, а не архив."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    draining = _raw(root, "p1", "draining.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(
+        runs / "run_drain",
+        run_id="run_drain",
+        refs=[str(draining)],
+        session_status="running",
+        session_refs=[str(draining)],
+    )
+
+    assert _run_dbs(tmp_path, package, [db], "--json", "--runs-dir", str(runs)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["price"]["by_drain"] == {"files": 1, "bytes": 1}
+    assert payload["price"]["by_resumable_session"]["files"] == 1
+    assert payload["price"]["by_dead_runs"]["files"] == 1
+
+
+def test_by_drain_ignores_finished_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Завершённый сеанс дренажом не считается."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    archived = _raw(root, "p1", "archived.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(
+        runs / "run_done",
+        run_id="run_done",
+        refs=[str(archived)],
+        session_status="finished",
+        session_refs=[str(archived)],
+    )
+
+    assert _run_dbs(tmp_path, package, [db], "--json", "--runs-dir", str(runs)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["price"]["by_drain"] == {"files": 0, "bytes": 0}
+    assert payload["price"]["by_resumable_session"] == {"files": 0, "bytes": 0}
+    assert payload["price"]["by_dead_runs"]["files"] == 1
+
+
+def test_by_drain_excludes_live_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Живой прогон с возобновляемым сеансом — не дренаж (докачка не потеряна)."""
+    package = _package(tmp_path)
+    root = tmp_path / "corpus_raw"
+    live = _raw(root, "p1", "live.bin")
+    active = _raw(root, "p1", "active.bin")
+    db = _state(tmp_path / "state", raw_paths=[str(live)])
+    runs = _runs_dir(tmp_path)
+    _run_db(
+        runs / "run_live",
+        run_id="run_live",
+        refs=[str(active)],
+        g4=True,
+        session_status="running",
+        session_refs=[str(active)],
+    )
+
+    assert _run_dbs(tmp_path, package, [db], "--json", "--runs-dir", str(runs)) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["price"]["by_drain"] == {"files": 0, "bytes": 0}
+    assert payload["price"]["by_resumable_session"]["files"] == 1
