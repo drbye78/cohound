@@ -35,7 +35,7 @@ from core.config import load_run_config
 from core.config.deploy import CrawlConfig
 from core.config.domain_profiles import DomainProfile, load_domain_profiles
 from core.domain import CrawlStrategy, DocumentLevel, FetchMode, RateLimitSpec
-from core.pipeline.crawl_frontier import resolve_crawl_limits
+from core.pipeline.crawl_frontier import is_blacklisted, resolve_crawl_limits
 from core.pipeline.fetch_plan import select_domain_profile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +92,10 @@ RUN_CRAWL_EXCLUDE_PATHS = [
     "/events/*",
     "/cases/*",
     "/mediacenter/*",
+    # Служебные страницы (решение владельца 27.11.2026): 15 адресов `/order/*` и 5
+    # `/feedback/*` на `postgrespro.ru` — замер по `state.db` стенда.
+    "/order/*",
+    "/feedback/*",
 ]
 RUN_CRAWL_EXCLUDE_DOCUMENTS = [
     "*.gz", "*.tar", "*.tgz", "*.exe", "*.msi", "*.dmg",
@@ -376,46 +380,61 @@ def test_resolve_crawl_limits_per_site(
     assert list(limits.exclude_paths) == RUN_CRAWL_EXCLUDE_PATHS
     assert list(limits.exclude_documents) == RUN_CRAWL_EXCLUDE_DOCUMENTS
 
-def test_postgrespro_docs_root_keeps_russian_only() -> None:
-    """Корень документации объявляет русский язык осью `exclude_queries` (site-слой).
+def test_parametric_url_is_not_product_material() -> None:
+    """Параметрический URL исключён **run-слоем**, и ни один site-ключ его не переопределяет.
 
-    Класс дефекта: сайт отдаёт каждую страницу тремя **отдельными** адресами
-    (`?lang=ru`, `?lang=en`, `?lang=ru-en`), `content_hash` у них разный у 99.9 % пар —
-    это не редирект и не дубль байтов, а множитель ×3.91 к корпусу. `exclude_paths`
-    query-строку не видит (матчит только путь), поэтому нужна отдельная ось.
-    Измерено 24.11.2026 на обходе `ru-pg-dbms-e11e04cbb3d9`: 166 145 адресов при
-    42 517 канонических страницах.
+    Класс дефекта, который этот тест держит закрытым: правило, объявленное на run-уровне,
+    бессильно, если per-site профиль несёт свой `exclude_queries` — site-слой побеждает
+    run-слой, и оставленный в профиле список вернул бы в корпус ровно то, что правило
+    исключило (на `postgrespro.ru` это 8 122 адреса `?lang=ru`, у 99.9 % которых есть
+    «голый» двойник того же пути).
+
+    Прежний носитель был per-site (`lang=en`, `lang=ru-en`): сайт отдаёт каждую страницу
+    тремя отдельными адресами, `content_hash` у них разный у 99.9 % пар, то есть это
+    множитель ×3.91 к корпусу, а не дубль байтов (измерено 24.11.2026 на обходе
+    `ru-pg-dbms-e11e04cbb3d9`: 166 145 адресов при 42 517 канонических страницах).
+    С 27.11.2026 решение владельца шире: параметрический URL — **не материал продукта**
+    (`["*"]`), потому что таких адресов в `url_state` 23 228 из 81 575 (замер того же дня).
     """
     profiles = load_domain_profiles(ON_DISK_PROFILES)
     cfg = load_run_config(ON_DISK_RUN)
 
-    docs = resolve_crawl_limits(
-        "https://postgrespro.ru/docs/enterprise/18/sql-vacuum",
-        app=CrawlConfig(),
-        run=cfg.crawl,
-        profiles=profiles,
-    )
-    assert list(docs.exclude_queries) == ["lang=en", "lang=ru-en"]
+    assert list(cfg.crawl.exclude_queries) == ["*"], "правило объявляется на run-уровне"
 
-    # Та же ось у деревьев сателлитов: их корпус тоже русский.
+    # Ни один объявленный site-ключ не несёт своего списка — иначе он победил бы run-слой.
+    assert not [key for key, prof in profiles.items() if prof.exclude_queries], (
+        "per-site `exclude_queries` переопределил бы run-уровневое правило"
+    )
+
     for url in (
-        "https://postgrespro.ru/docs/ppem/2/agent-config-ref",
-        "https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-continuous-wal-archiving",
-        "https://postgrespro.ru/docs/ora2pgpro/26/introduction",
+        "https://postgrespro.ru/docs/enterprise/18/sql-vacuum?lang=en",
+        "https://postgrespro.ru/docs/ppem/2/agent-config-ref?lang=ru-en",
+        "https://postgrespro.ru/docs/pg_probackup3/3.5/pbk-setting-up-continuous-wal-archiving?PAGEN_1=2",
+        "https://postgrespro.ru/docs/ora2pgpro/26/introduction?utm_source=x",
+        "https://pangolin.sbertech.ru/docs/public/PSQ/8.1.0/?active=1",
     ):
-        satellite = resolve_crawl_limits(
+        limits = resolve_crawl_limits(
             url, app=CrawlConfig(), run=cfg.crawl, profiles=profiles
         )
-        assert list(satellite.exclude_queries) == ["lang=en", "lang=ru-en"], url
+        assert list(limits.exclude_queries) == ["*"], url
+        assert is_blacklisted(url, limits) is True, url
 
-    # Ось не протекает на соседние корни того же хоста: там объявлено пусто.
-    portal = resolve_crawl_limits(
-        "https://postgrespro.ru/products/postgrespro/enterprise/",
-        app=CrawlConfig(),
-        run=cfg.crawl,
-        profiles=profiles,
+    # «Голый» адрес правилом не задет: `*` не матчит пустую query-строку.
+    bare = "https://postgrespro.ru/docs/enterprise/18/sql-vacuum"
+    limits = resolve_crawl_limits(
+        bare, app=CrawlConfig(), run=cfg.crawl, profiles=profiles
     )
-    assert list(portal.exclude_queries) == []
+    assert is_blacklisted(bare, limits) is False
+
+    # Правило не привязано к корню: соседний корень того же хоста получает его же, и
+    # «голый» адрес под ним по-прежнему допущен (отсекается только query).
+    portal_url = "https://postgrespro.ru/products/postgrespro/enterprise/"
+    portal = resolve_crawl_limits(
+        portal_url, app=CrawlConfig(), run=cfg.crawl, profiles=profiles
+    )
+    assert list(portal.exclude_queries) == ["*"]
+    assert is_blacklisted(portal_url, portal) is False
+    assert is_blacklisted(portal_url + "?utm_source=x", portal) is True
 
 
 def test_pangolin_scope_is_announced_edition_only() -> None:

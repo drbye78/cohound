@@ -1168,16 +1168,16 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
         # на страницы, чьи варианты частичный обход не успел обнаружить. Точное значение
         # объявит `hound crawl drain --apply` после исчерпания корня.
         #
-        # `exclude_queries` — язык: сайт отдаёт каждую страницу тремя отдельными адресами
-        # (`?lang=ru`, `?lang=en`, `?lang=ru-en`), `content_hash` у них разный у 99.9 % пар.
-        # Оставлен русский: адрес без параметра отдаёт русский текст (доля кириллицы
-        # 0.70–0.83), плюс явный `?lang=ru`. `exclude_paths` query-строку не видит.
+        # `exclude_queries` здесь НЕ объявляется: с 27.11.2026 действует правило профиля —
+        # параметрический URL не считается материалом продукта (`run.yaml:crawl`, `["*"]`).
+        # Прежний per-site список (`lang=en`, `lang=ru-en`) снят: site-слой побеждает
+        # run-слой, и оставленный здесь список вернул бы адреса `?lang=ru`, у 99.9 % которых
+        # есть «голый» двойник того же пути.
         "postgrespro.ru/docs/enterprise/18": {
             "fetch": "http",
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 3000,
-            "exclude_queries": ["lang=en", "lang=ru-en"],
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         # Деревья сателлитов (решение владельца 24.11.2026): на них опирается
@@ -1191,7 +1191,6 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 500,
-            "exclude_queries": ["lang=en", "lang=ru-en"],
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         "postgrespro.ru/docs/pg_probackup3/3.5": {
@@ -1199,7 +1198,6 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 200,
-            "exclude_queries": ["lang=en", "lang=ru-en"],
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         "postgrespro.ru/docs/ora2pgpro/26": {
@@ -1207,7 +1205,6 @@ def build_domain_profiles() -> dict[str, dict[str, object]]:
             "extract": "auto",
             "max_depth": 8,
             "max_documents": 150,
-            "exclude_queries": ["lang=en", "lang=ru-en"],
             "rate_limit": {"min_s": 0.05, "max_s": 0.2},
         },
         # Sitemap намеренно НЕ на host-ключе (см. ловушку матчинга в докстринге):
@@ -1624,12 +1621,35 @@ def main() -> int:
             # объявленная ось превратила бы preflight-отказ в предупреждение.
             "extract_max_tasks_per_child": 25,
             "document_level": "layout_tables",
+            # Параметрический URL — **не материал продукта** (решение владельца 27.11.2026,
+            # «до реального кейса»). Правило объявлено на run-уровне, потому что это
+            # свойство профиля, а не сайта; per-site списки `exclude_queries` сняты —
+            # site-слой побеждает run-слой, и оставленный там список вернул бы исключённое.
+            #
+            # Цена измерена 27.11.2026 на `state.db` стенда (81 575 URL): query-строку несут
+            # 23 228 (28.5 %), и это множитель корпуса, а не отдельные документы — 23 054 из
+            # них `?lang=` (en 7 762 / ru 8 122 / ru-en 7 170), у 23 037 (99.9 %) есть «голый»
+            # двойник того же пути. Артефактов с query — 0: терминальные документы качаются
+            # по чистому пути, поэтому `["*"]` не отрезает ни одного файла. Пустая query не
+            # матчится ни одним паттерном (`blacklist_match` проверяет её явно).
+            #
+            # Вне `?lang=` — 174 адреса: `?cve=` 81, `?PAGEN_1=` 60 (пагинация листингов,
+            # носитель ссылок — названный риск, а не измеренная потеря), `?category=&id=` 17,
+            # `?active=` 7, `?utm_*=` 5, `?Itemid=…` 1, `?id=` 1. Исключение — **не
+            # неполнота**: блэклист пишет `skipped_blacklisted`, а `complete` корня решают
+            # `truncated`/`skipped_documents` (§6), поэтому `bounded` (I2d) не рушится.
+            "exclude_queries": ["*"],
+            # `/order/*` и `/feedback/*` — служебные страницы: объявлены не материалом
+            # продукта (решение владельца 27.11.2026). Измерено на `state.db` стенда:
+            # 15 и 5 адресов, все на `postgrespro.ru`, чей host-корень их иначе бы втянул.
             "exclude_paths": [
                 "/blog/*",
                 "/news/*",
                 "/events/*",
                 "/cases/*",
                 "/mediacenter/*",
+                "/order/*",
+                "/feedback/*",
             ],
             "exclude_documents": [
                 "*.gz", "*.tar", "*.tgz", "*.exe", "*.msi", "*.dmg",

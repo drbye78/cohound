@@ -532,8 +532,13 @@ outside the declared space against **1** in arm v6 — the whole `postgrespro` g
 documents) was the `edu.postgrespro.ru` root withdrawn on 14.11.2026, and 137 `pangolin`
 documents were *other versions* of the docs tree (6.4.0–6.7.0, 7.1.0, 8.3.0) under the
 declared `/docs/public/PSQ/8.1.0/` prefix. `plan_incremental_items` now filters the set with
-the same predicate as the crawl (`Frontier.scope_admission`) and publishes the count plus the
-top-5 hosts; under a network policy the filter is a no-op (there `Frontier` does the work).
+the same predicate as the crawl (`Frontier.scope_admission` **and** `Frontier.blacklisted`) and
+publishes the count plus the top-5 hosts; under a network policy the filter is a no-op (there
+`Frontier` does the work). The blacklist belongs to the same declared space — it is inside
+`crawl_config_digest` — so a no-network pass that skipped it would return `url_state` rows with
+a parametric query (`?lang=`, `?PAGEN_1=`) to the corpus after the package declared them not to
+be product material (measured 27.11.2026: 23 228 of 81 575 `url_state` URLs carry a query;
+dropped rows are named `blacklisted`, not silently skipped).
 The same pass also stopped calling three expected absences a loss: a **container** has no
 document version by construction (members replay by their own URLs), a **declared manual
 artifact** is fed later in the same run, and a **recorded refusal** (`robots_disallow` — the

@@ -3522,6 +3522,13 @@ def plan_incremental_items(
     молча. Терминальный артефакт вне префикса остаётся в наборе: он не продолжает
     навигацию, но был скачан законно (P6b).
 
+    **Блэклист оператора — часть того же пространства** (``crawl_config_digest`` несёт
+    ``exclude_paths``/``exclude_documents``/``exclude_queries`` безусловно), поэтому под
+    политикой без сети он применяется тем же фильтром (:meth:`Frontier.blacklisted`) и
+    отброшенное называется причиной ``blacklisted``. Иначе объявленное правило
+    («параметрический URL — не материал продукта») держалось бы только под сетью, а
+    проход без сети возвращал бы такие адреса в корпус из ``url_state``.
+
     Ремонт провалов (``--only-failed``) идёт **не** этим путём: он не зависит от режима
     продукта и не выводится из ``url_state`` целиком — см. :func:`plan_repair_items`.
     """
@@ -3561,17 +3568,27 @@ def plan_incremental_items(
             )
         extra.append(item)
     if no_network and scopes:
-        # Один предикат на оба прохода: допуск тот же, что у краула, — объявленный host,
-        # path-prefix по границе сегмента, SSRF, traversal-guard.
+        # Допуск тот же, что у краула, — объявленный host, path-prefix по границе сегмента,
+        # SSRF, traversal-guard **и блэклист оператора**. Блэклист входит в объявленное
+        # пространство (он в ``crawl_config_digest``), поэтому проход без сети обязан
+        # применять его так же: иначе строка ``url_state`` с параметрической query
+        # (``?lang=``, ``?PAGEN_1=``) возвращалась бы в корпус после того, как правило
+        # объявило её не материалом продукта. Измерено 27.11.2026 на стенде: ``url_state``
+        # несёт 23 228 адресов с query из 81 575.
         admitted: list[IncrementalItem] = []
         for item in extra:
-            if any(
-                frontier.scope_admission(item.url) != SCOPE_OUT
-                for _root, frontier in scopes
-            ):
+            reason: str | None = "out_of_declared_space"
+            for _root, frontier in scopes:
+                if frontier.blacklisted(item.url):
+                    reason = "blacklisted"
+                    continue
+                if frontier.scope_admission(item.url) != SCOPE_OUT:
+                    reason = None
+                    break
+            if reason is None:
                 admitted.append(item)
             elif dropped is not None:
-                dropped.append((item.url, "out_of_declared_space"))
+                dropped.append((item.url, reason))
         extra = admitted
     return extra
 

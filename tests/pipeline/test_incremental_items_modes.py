@@ -157,3 +157,81 @@ def test_declared_space_filter_is_noop_for_network_policies() -> None:
     )
 
     assert {item.normalized_url for item in items} == {KNOWN, RETIRED}
+
+# --------------------------------------------------------------------------- #
+# Блэклист оператора — часть объявленного пространства (27.11.2026)
+# --------------------------------------------------------------------------- #
+
+PARAMETRIC = "https://p1.test/docs/guide?lang=en"
+
+def _state_with_parametric() -> _FakeState:
+    """Строка ``url_state`` с параметрической query (``?lang=``) рядом с «голым» адресом."""
+    return _FakeState(
+        [
+            UrlStateRow(
+                product_id="p1",
+                url=KNOWN,
+                normalized_url=KNOWN,
+                doc_version_id="dv_known",
+            ),
+            UrlStateRow(
+                product_id="p1",
+                url=PARAMETRIC,
+                normalized_url=PARAMETRIC,
+                doc_version_id="dv_param",
+            ),
+        ]
+    )
+
+def test_no_network_work_set_applies_operator_blacklist() -> None:
+    """Под политикой без сети блэклист применяется так же, как под сетью.
+
+    Дефект-класс: ``exclude_queries``/``exclude_paths`` входят в ``crawl_config_digest``,
+    то есть объявлены частью пространства, но фильтр прохода без сети проверял только
+    ``scope_admission`` (host + path-prefix + SSRF). Объявленное правило «параметрический
+    URL — не материал продукта» держалось бы только под сетью, а ``url_state`` возвращал бы
+    такие адреса в корпус при ``offline``/``frozen``. Измерено 27.11.2026 на стенде:
+    23 228 адресов с query из 81 575 в ``url_state``.
+    """
+    dropped: list[tuple[str, str]] = []
+    items = plan_incremental_items(
+        "p1",
+        [ROOT],
+        state=_state_with_parametric(),
+        policy=RefreshPolicy.OFFLINE,
+        product_modes={"p1": ProductMode.FULL.value},
+        planned_validators={},
+        errors=[],
+        scopes=[(ROOT, Frontier(ROOT, CrawlLimits(exclude_queries=("*",))))],
+        dropped=dropped,
+    )
+
+    assert [item.normalized_url for item in items] == [KNOWN]
+    assert dropped == [(PARAMETRIC, "blacklisted")]
+
+def test_blacklist_filter_does_not_touch_urls_without_query() -> None:
+    """``["*"]`` не матчит URL без query: «голые» адреса остаются в наборе."""
+    dropped: list[tuple[str, str]] = []
+    items = plan_incremental_items(
+        "p1",
+        [ROOT],
+        state=_state_with_parametric(),
+        policy=RefreshPolicy.OFFLINE,
+        product_modes={"p1": ProductMode.FULL.value},
+        planned_validators={},
+        errors=[],
+        scopes=[
+            (
+                ROOT,
+                Frontier(
+                    ROOT,
+                    CrawlLimits(exclude_queries=("*",), exclude_paths=("/order/*",)),
+                ),
+            )
+        ],
+        dropped=dropped,
+    )
+
+    assert [item.normalized_url for item in items] == [KNOWN]
+    assert dropped == [(PARAMETRIC, "blacklisted")]
+

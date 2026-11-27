@@ -288,8 +288,8 @@ crawler/search/poller/sitemap бросает на любом вызове; в `n
   (сверяет множество значений enum с ключами таблицы) и
   `test_dispatch_has_no_silent_default_for_unknown_policy`.
 - ✅ Путь `bytes`: `corpus_raw` → текущая экстракция → текущий чанкинг
-  (`core/pipeline/corpus_ingest.py:4917`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
-  `core/pipeline/corpus_ingest.py:3871`, им же пользуется фолбэк переиспользования). Ключ `extract_cache` — хеш **сырых байтов**
+  (`core/pipeline/corpus_ingest.py:4934`, `frozen_bytes_product`; общий шаг — `rebuild_from_stored_bytes`
+  `core/pipeline/corpus_ingest.py:4063`, им же пользуется фолбэк переиспользования). Ключ `extract_cache` — хеш **сырых байтов**
   (`raw_path.stem`), поэтому повторный `frozen` в том же окружении попадает в кэш.
 - ✅ **Дрейф пере-извлечения виден, а объявленное пере-извлечение — нет (план 26 O35).**
   Промах кэша с другим `content_hash` при **том же** штампе движка → токен

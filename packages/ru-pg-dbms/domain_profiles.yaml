@@ -334,14 +334,11 @@ postgrespro.ru/docs/enterprise/18:
   # варианта `?lang=`), 3 000 — это +26 % на страницы, чьи варианты частичный обход не
   # успел обнаружить. Прежние 20 000 относились к корню `/docs/` целиком.
   #
-  # `exclude_queries` — язык. Сайт отдаёт каждую страницу отдельными адресами
-  # (`?lang=ru`, `?lang=en`, `?lang=ru-en`), и `content_hash` у них разный у 99.9 % пар,
-  # то есть это не редирект и не дубль байтов. Оставлен русский: адрес без параметра
-  # отдаёт русский текст (измерено: доля кириллицы 0.70–0.83), плюс явный `?lang=ru`.
-  # Ось видит query-строку, чего `exclude_paths` не умеет (он матчит только путь).
-  exclude_queries:
-  - lang=en
-  - lang=ru-en
+  # `exclude_queries` здесь НЕ объявляется: с 27.11.2026 действует правило профиля —
+  # параметрический URL не считается материалом продукта (`run.yaml:crawl.exclude_queries:
+  # ["*"]`, решение владельца). Прежний per-site список (`lang=en`, `lang=ru-en`, с
+  # сохранённым `?lang=ru`) снят: site-слой побеждает run-слой, и оставленный здесь список
+  # вернул бы 8 122 адреса `?lang=ru`, у 99.9 % которых есть «голый» двойник того же пути.
   extract: auto
   fetch: http
   max_depth: 8
@@ -353,9 +350,6 @@ postgrespro.ru/docs/ora2pgpro/26:
   # Дерево сателлита миграции, добавлено 24.11.2026: 3 из 132 адресов retrieval-эталона
   # O14. Версия — последняя опубликованная. `max_documents` = измеренное + запас:
   # **83** адреса на обходе `e11e04cbb3d9`, 150 — это +81 %.
-  exclude_queries:
-  - lang=en
-  - lang=ru-en
   extract: auto
   fetch: http
   max_depth: 8
@@ -368,9 +362,6 @@ postgrespro.ru/docs/pg_probackup3/3.5:
   # 24.11.2026: 8 из 132 адресов retrieval-эталона O14. Версия — последняя
   # опубликованная. `max_documents` = измеренное + запас: **105** адресов на обходе
   # `e11e04cbb3d9`, 200 — это +90 %.
-  exclude_queries:
-  - lang=en
-  - lang=ru-en
   extract: auto
   fetch: http
   max_depth: 8
@@ -385,9 +376,6 @@ postgrespro.ru/docs/ppem/2:
   # дерева. Язык — той же осью, что у `enterprise/18`.
   # `max_documents` = измеренное + запас: обход `e11e04cbb3d9` дал **323** адреса после
   # языкового фильтра, 500 — это +55 % на необнаруженные варианты.
-  exclude_queries:
-  - lang=en
-  - lang=ru-en
   extract: auto
   fetch: http
   max_depth: 8

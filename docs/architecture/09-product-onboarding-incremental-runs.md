@@ -670,7 +670,7 @@ hound run --run-yaml packages/{case}/run.yaml --package packages/{case}
     `offline.no_version`: пропуск нельзя прочитать как успех. **Chunk-set отвергнут**
     (чужая версия чанкера, пустой набор, I19-расхождение текста), а сохранённые байты на
     месте — документ **пересобирается** текущим конвейером (`rebuild_from_stored_bytes`,
-    `core/pipeline/corpus_ingest.py:3871`; per-URL экстрактор → текущий чанкер), это `offline.rebuilt_docs` /
+    `core/pipeline/corpus_ingest.py:4063`; per-URL экстрактор → текущий чанкер), это `offline.rebuilt_docs` /
     `reuse_bytes_rebuild`, а не ошибка; байтов нет — `offline.no_bytes` /
     `reuse_bytes_missing`. Три исхода (`reused`/`rebuilt`/`no_bytes`) различимы, chunk-set
     чужой версии по-прежнему **не** принимается как есть (I19 не ослаблен). Честность
